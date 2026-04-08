@@ -866,9 +866,23 @@ common_peg_parser common_chat_peg_builder::standard_json_tools(
     return force_tool_calls ? section : optional(section);
 }
 
-void common_chat_peg_gemma4_mapper::from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result) {
-    for (const auto & node : result.nodes) {
+void common_chat_peg_gemma4_mapper::from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & parse_result_arg) {
+    for (const auto & node : parse_result_arg.nodes) {
         visit(arena, node);
+    }
+
+    // Discard whitespace-only reasoning content (e.g. from empty thinking blocks)
+    if (!result.reasoning_content.empty()) {
+        bool all_whitespace = true;
+        for (char c : result.reasoning_content) {
+            if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+                all_whitespace = false;
+                break;
+            }
+        }
+        if (all_whitespace) {
+            result.reasoning_content.clear();
+        }
     }
 }
 
@@ -984,15 +998,21 @@ void common_chat_peg_gemma4_mapper::visit(const common_peg_ast_arena & arena, co
         auto name_id = arena.find_by_tag(node, "tool-name");
         auto args_id = arena.find_by_tag(node, "tool-args");
 
-        if (name_id != COMMON_PEG_INVALID_AST_ID && args_id != COMMON_PEG_INVALID_AST_ID) {
+        if (name_id != COMMON_PEG_INVALID_AST_ID) {
             const auto & name_node = arena.get(name_id);
-            const auto & args_node = arena.get(args_id);
 
             if (!name_node.is_partial) {
                 common_chat_tool_call call;
                 call.name = std::string(name_node.text);
-                if (!args_node.children.empty()) {
-                    call.arguments = gemma4_to_json(arena, args_node.children[0]);
+                if (args_id != COMMON_PEG_INVALID_AST_ID) {
+                    const auto & args_node = arena.get(args_id);
+                    if (!args_node.children.empty()) {
+                        call.arguments = gemma4_to_json(arena, args_node.children[0]);
+                    } else {
+                        call.arguments = "{}";
+                    }
+                } else {
+                    call.arguments = "{}";
                 }
                 result.tool_calls.push_back(call);
             }
