@@ -1112,6 +1112,10 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         "<|turn>",
     };
 
+    data.additional_stops = {
+        "<turn|>",
+    };
+
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
