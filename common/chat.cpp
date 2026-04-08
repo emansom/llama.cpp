@@ -1114,6 +1114,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
 
     data.additional_stops = {
         "<turn|>",
+        "<tool_call|>",
+        "<channel|>",
     };
 
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
