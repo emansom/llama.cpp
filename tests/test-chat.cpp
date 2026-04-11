@@ -10,6 +10,7 @@
 #include "chat-auto-parser.h"
 #include "chat.h"
 #include "common.h"
+#include "fc-format.h"
 #include "ggml.h"
 #include "log.h"
 
@@ -2173,12 +2174,13 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
 
         // Empty thinking block followed by tool call (reasoning_format=NONE)
+        // With NONE, thinking blocks are not stripped — they appear as content.
         tst.test(
                 "<|channel>thought\n<channel|>"
                 "<|tool_call>call:get_time{city:<|\"|>Paris<|\"|>}<tool_call|>")
             .tools({ get_time_tool })
             .reasoning_format(COMMON_REASONING_FORMAT_NONE)
-            .expect(message_with_tool_calls("get_time", R"({"city": "Paris"})"))
+            .expect(message_with_content_and_tool_call("<|channel>thought\n<channel|>", "get_time", R"({"city": "Paris"})"))
             .run();
 
         // Parallel tool calls with mixed value types
@@ -4165,6 +4167,297 @@ static void test_msg_diffs_compute() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FC format validation tests — verify fc-format.h/cpp produces output matching
+// the Jinja template and can round-trip through the PEG parser.
+// ---------------------------------------------------------------------------
+
+static void test_fc_format_value() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // String
+    assert_equals(std::string(R"(<|"|>hello<|"|>)"), fc_format_value(json("hello"), cfg));
+    // Integer
+    assert_equals(std::string("42"), fc_format_value(json(42), cfg));
+    // Negative integer
+    assert_equals(std::string("-7"), fc_format_value(json(-7), cfg));
+    // Float
+    assert_equals(std::string("3.14"), fc_format_value(json(3.14), cfg));
+    // Boolean true
+    assert_equals(std::string("true"), fc_format_value(json(true), cfg));
+    // Boolean false
+    assert_equals(std::string("false"), fc_format_value(json(false), cfg));
+    // Null
+    assert_equals(std::string("null"), fc_format_value(json(nullptr), cfg));
+    // Array
+    assert_equals(
+        std::string(R"([<|"|>a<|"|>,<|"|>b<|"|>])"),
+        fc_format_value(json::array({"a", "b"}), cfg));
+    // Empty array
+    assert_equals(std::string("[]"), fc_format_value(json::array(), cfg));
+    // Object (ordered_json preserves insertion order)
+    {
+        json obj = json::object();
+        obj["theme"] = "dark";
+        obj["count"] = 3;
+        assert_equals(
+            std::string(R"({theme:<|"|>dark<|"|>,count:3})"),
+            fc_format_value(obj, cfg));
+    }
+    // Empty object
+    assert_equals(std::string("{}"), fc_format_value(json::object(), cfg));
+    // Nested object
+    {
+        json inner = json::object();
+        inner["x"] = 1;
+        json outer = json::object();
+        outer["nested"] = inner;
+        assert_equals(std::string("{nested:{x:1}}"), fc_format_value(outer, cfg));
+    }
+}
+
+static void test_fc_format_tool_declaration() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // Simple tool with one string param
+    {
+        json tool = {
+            { "type", "function" },
+            { "function", {
+                { "name", "get_time" },
+                { "description", "Get the current time in a city" },
+                { "parameters", {
+                    { "type", "object" },
+                    { "properties", {
+                        { "city", {
+                            { "type", "string" },
+                            { "description", "City name" },
+                        }},
+                    }},
+                    { "required", json::array({ "city" }) },
+                }},
+            }},
+        };
+        std::string result = fc_format_tool_declaration(tool, cfg);
+        assert_equals(std::string(
+            R"(declaration:get_time{description:<|"|>Get the current time in a city<|"|>,parameters:{properties:{city:{description:<|"|>City name<|"|>,type:<|"|>STRING<|"|>}},required:[<|"|>city<|"|>],type:<|"|>OBJECT<|"|>}})"),
+            result);
+    }
+
+    // Tool with integer param
+    {
+        json tool = {
+            { "type", "function" },
+            { "function", {
+                { "name", "special_function" },
+                { "description", "I'm special" },
+                { "parameters", {
+                    { "type", "object" },
+                    { "properties", {
+                        { "arg1", {
+                            { "type", "integer" },
+                            { "description", "The arg." },
+                        }},
+                    }},
+                    { "required", json::array({ "arg1" }) },
+                }},
+            }},
+        };
+        std::string result = fc_format_tool_declaration(tool, cfg);
+        assert_equals(std::string(
+            R"(declaration:special_function{description:<|"|>I'm special<|"|>,parameters:{properties:{arg1:{description:<|"|>The arg.<|"|>,type:<|"|>INTEGER<|"|>}},required:[<|"|>arg1<|"|>],type:<|"|>OBJECT<|"|>}})"),
+            result);
+    }
+}
+
+static void test_fc_format_tool_call_args() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // String arg
+    {
+        json args = json::object();
+        args["city"] = "London";
+        assert_equals(std::string(R"(city:<|"|>London<|"|>)"), fc_format_tool_call_args(args, cfg));
+    }
+    // Integer arg
+    {
+        json args = json::object();
+        args["arg1"] = 42;
+        assert_equals(std::string("arg1:42"), fc_format_tool_call_args(args, cfg));
+    }
+    // Boolean arg
+    {
+        json args = json::object();
+        args["enabled"] = true;
+        assert_equals(std::string("enabled:true"), fc_format_tool_call_args(args, cfg));
+    }
+    // Multiple args
+    {
+        json args = json::object();
+        args["city"] = "Paris";
+        args["units"] = "celsius";
+        assert_equals(
+            std::string(R"(city:<|"|>Paris<|"|>,units:<|"|>celsius<|"|>)"),
+            fc_format_tool_call_args(args, cfg));
+    }
+    // Empty args
+    assert_equals(std::string(""), fc_format_tool_call_args(json::object(), cfg));
+    // Nested object arg
+    {
+        json config = json::object();
+        config["theme"] = "dark";
+        config["count"] = 3;
+        json args = json::object();
+        args["config"] = config;
+        assert_equals(
+            std::string(R"(config:{theme:<|"|>dark<|"|>,count:3})"),
+            fc_format_tool_call_args(args, cfg));
+    }
+    // Array arg
+    {
+        json args = json::object();
+        args["todos"] = json::array({"buy milk", "walk dog"});
+        assert_equals(
+            std::string(R"(todos:[<|"|>buy milk<|"|>,<|"|>walk dog<|"|>])"),
+            fc_format_tool_call_args(args, cfg));
+    }
+}
+
+static void test_fc_format_tool_response() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // String response
+    assert_equals(
+        std::string(R"(response:get_time{value:<|"|>14:30 UTC<|"|>})"),
+        fc_format_tool_response("get_time", json("14:30 UTC"), cfg));
+
+    // Object response
+    {
+        json resp = json::object();
+        resp["time"] = "14:30";
+        resp["zone"] = "UTC";
+        assert_equals(
+            std::string(R"(response:get_time{time:<|"|>14:30<|"|>,zone:<|"|>UTC<|"|>})"),
+            fc_format_tool_response("get_time", resp, cfg));
+    }
+
+    // Null response
+    assert_equals(
+        std::string("response:func{value:null}"),
+        fc_format_tool_response("func", json(nullptr), cfg));
+}
+
+static void test_fc_wrap_helpers() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // wrap_tool_call
+    {
+        json args = json::object();
+        args["city"] = "London";
+        assert_equals(
+            std::string(R"(<|tool_call>call:get_time{city:<|"|>London<|"|>}<tool_call|>)"),
+            fc_wrap_tool_call("get_time", args, cfg));
+    }
+
+    // wrap_tool_response
+    assert_equals(
+        std::string(R"(<|tool_response>response:get_time{value:<|"|>14:30<|"|>}<tool_response|>)"),
+        fc_wrap_tool_response("get_time", json("14:30"), cfg));
+}
+
+static void test_fc_format_peg_round_trip() {
+    LOG_DBG("%s\n", __func__);
+    fc_format_config cfg;
+
+    // Generate native format tool calls with fc_format, then parse with PEG parser.
+    // The PEG parser should recover the original JSON arguments.
+    auto tst = peg_tester("models/templates/google-gemma-4-31B-it.jinja");
+
+    // String arg round-trip
+    {
+        json args = json::object();
+        args["city"] = "London";
+        std::string native = fc_wrap_tool_call("get_time", args, cfg);
+        // Strip the tokens to get just the model output
+        std::string model_output = native;
+        tst.test(model_output)
+            .tools({ get_time_tool })
+            .expect(message_with_tool_calls("get_time", R"({"city": "London"})"))
+            .run();
+    }
+
+    // Integer arg round-trip
+    {
+        json args = json::object();
+        args["arg1"] = 42;
+        std::string model_output = fc_wrap_tool_call("special_function", args, cfg);
+        tst.test(model_output)
+            .tools({ special_function_tool })
+            .expect(message_with_tool_calls("special_function", R"({"arg1": 42})"))
+            .run();
+    }
+
+    // Boolean arg round-trip
+    {
+        json args = json::object();
+        args["enabled"] = true;
+        std::string model_output = fc_wrap_tool_call("toggle", args, cfg);
+        tst.test(model_output)
+            .tools({ toggle_tool })
+            .expect(message_with_tool_calls("toggle", R"({"enabled": true})"))
+            .run();
+    }
+
+    // Nested object round-trip
+    {
+        json config = json::object();
+        config["theme"] = "dark";
+        config["count"] = 3;
+        json args = json::object();
+        args["config"] = config;
+        std::string model_output = fc_wrap_tool_call("set_config", args, cfg);
+        tst.test(model_output)
+            .tools({ config_tool })
+            .expect(message_with_tool_calls("set_config", R"({"config":{"theme":"dark","count":3}})"))
+            .run();
+    }
+
+    // Array arg round-trip
+    {
+        json args = json::object();
+        args["todos"] = json::array({"buy milk", "walk dog"});
+        std::string model_output = fc_wrap_tool_call("todo_list", args, cfg);
+        tst.test(model_output)
+            .tools({ todo_list })
+            .expect(message_with_tool_calls("todo_list", R"({"todos":["buy milk","walk dog"]})"))
+            .run();
+    }
+
+    // Parallel tool calls round-trip
+    {
+        json args1 = json::object();
+        args1["city"] = "London";
+        json args2 = json::object();
+        args2["city"] = "Paris";
+        std::string model_output =
+            fc_wrap_tool_call("get_time", args1, cfg) +
+            fc_wrap_tool_call("get_weather", args2, cfg);
+        tst.test(model_output)
+            .tools({ get_time_tool, get_weather_tool })
+            .parallel_tool_calls(true)
+            .expect_tool_calls({
+                { "get_time", R"({"city": "London"})", "" },
+                { "get_weather", R"({"city": "Paris"})", "" },
+            })
+            .run();
+    }
+}
+
 int main(int argc, char ** argv) {
     bool detailed_debug    = false;
     bool only_run_filtered = false;
@@ -4228,6 +4521,12 @@ int main(int argc, char ** argv) {
         test_msgs_oaicompat_json_conversion();
         test_tools_oaicompat_json_conversion();
         test_developer_role_to_system_workaround();
+        test_fc_format_value();
+        test_fc_format_tool_declaration();
+        test_fc_format_tool_call_args();
+        test_fc_format_tool_response();
+        test_fc_wrap_helpers();
+        test_fc_format_peg_round_trip();
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }
