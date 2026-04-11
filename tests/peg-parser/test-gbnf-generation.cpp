@@ -318,8 +318,6 @@ void test_gbnf_generation(testing &t) {
         )""", gbnf);
     });
 
-||||||| BASE
-=======
     t.test("silent parser emits nothing in gbnf", [](testing &t) {
         auto parser = build_peg_parser([](common_peg_parser_builder & p) {
             return p.literal("hello") + p.silent(p.literal("world"));
@@ -337,7 +335,7 @@ void test_gbnf_generation(testing &t) {
 
     t.test("silent choice inside sequence emits nothing", [](testing &t) {
         auto parser = build_peg_parser([](common_peg_parser_builder & p) {
-            return p.literal("a") + p.silent(p.literal("b") | p.literal("c")) + p.literal("d");
+            return p.literal("a") + p.gbnf(p.literal("b") | p.literal("c"), "") + p.literal("d");
         });
 
         auto gbnf = build_grammar([&](const common_grammar_builder & builder) {
@@ -352,7 +350,7 @@ void test_gbnf_generation(testing &t) {
 
     t.test("silent wrapped in tag emits nothing", [](testing &t) {
         auto parser = build_peg_parser([](common_peg_parser_builder & p) {
-            return p.literal("a") + p.tag("t", p.silent(p.literal("b")));
+            return p.literal("a") + p.tag("t", p.gbnf(p.literal("b"), ""));
         });
 
         auto gbnf = build_grammar([&](const common_grammar_builder & builder) {
