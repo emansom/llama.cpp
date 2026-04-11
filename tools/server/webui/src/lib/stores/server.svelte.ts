@@ -63,6 +63,16 @@ class ServerStore {
 	}
 
 	/**
+	 * Detects if the loaded model uses Gemma 4 chat format (peg-gemma4).
+	 * Used to auto-enable reasoning exclusion from context per Google's
+	 * prompt formatting guide (Rule 1: strip thoughts between turns).
+	 */
+	get isGemma4(): boolean {
+		const fmt = this.props?.default_generation_settings?.params?.chat_format;
+		return fmt === 'peg-gemma4';
+	}
+
+	/**
 	 *
 	 *
 	 * Data Handling
@@ -156,3 +166,4 @@ export const defaultParams = () => serverStore.defaultParams;
 export const contextSize = () => serverStore.contextSize;
 export const isRouterMode = () => serverStore.isRouterMode;
 export const isModelMode = () => serverStore.isModelMode;
+export const isGemma4 = () => serverStore.isGemma4;

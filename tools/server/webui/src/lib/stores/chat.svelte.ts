@@ -18,7 +18,7 @@ import { conversationsStore } from '$lib/stores/conversations.svelte';
 import { config } from '$lib/stores/settings.svelte';
 import { agenticStore } from '$lib/stores/agentic.svelte';
 import { mcpStore } from '$lib/stores/mcp.svelte';
-import { contextSize, isRouterMode } from '$lib/stores/server.svelte';
+import { contextSize, isRouterMode, isGemma4 } from '$lib/stores/server.svelte';
 import {
 	selectedModelName,
 	modelsStore,
@@ -739,7 +739,7 @@ class ChatStore {
 						assistantMessage,
 						streamedContent,
 						effectiveModel,
-						!!config().excludeReasoningFromContext
+						!!(config().excludeReasoningFromContext || isGemma4())
 					);
 				}
 			},
@@ -1577,7 +1577,8 @@ class ChatStore {
 
 		if (currentConfig.disableReasoningParsing) apiOptions.disableReasoningParsing = true;
 
-		if (currentConfig.excludeReasoningFromContext) apiOptions.excludeReasoningFromContext = true;
+		// Auto-enable reasoning exclusion for Gemma 4 (Rule 1: strip thoughts between turns)
+		if (currentConfig.excludeReasoningFromContext || isGemma4()) apiOptions.excludeReasoningFromContext = true;
 
 		if (hasValue(currentConfig.temperature))
 			apiOptions.temperature = Number(currentConfig.temperature);
