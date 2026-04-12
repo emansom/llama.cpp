@@ -1197,10 +1197,31 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
                 /* max = */ inputs.parallel_tool_calls ? -1 : 1
             ));
 
+            // When reasoning is extracted, skip stray <channel|> in content so
+            // the thinking end marker never leaks into output.  The until_one_of
+            // trie handles partial matches correctly, preserving streaming monotonicity.
+            if (extract_reasoning) {
+                auto cseg  = p.content(p.until_one_of({"<|channel>", "<|tool_call>", "<channel|>"}));
+                auto skip  = p.literal("<channel|>");
+                auto content = p.rule("content", cseg + p.zero_or_more(skip + cseg));
+                auto message = p.rule("message", thought + content);
+                return start + p.zero_or_more(message) + tool_call;
+            }
+
             auto scan_to_toolcall = p.rule("scan-to-toolcall", p.until("<|tool_call>"));
             auto content = p.rule("content", p.content(p.until_one_of({"<|channel>", "<channel|>", "<|tool_call>"})));
             auto message = p.rule("message", thought + content);
             return start + p.zero_or_more(message) + scan_to_toolcall + tool_call;
+        }
+
+        // When reasoning is extracted, skip stray <channel|> in content so
+        // the thinking end marker never leaks into output.
+        if (extract_reasoning) {
+            auto cseg  = p.content(p.until_one_of({"<|channel>", "<channel|>"}));
+            auto skip  = p.literal("<channel|>");
+            auto content = p.rule("content", cseg + p.zero_or_more(skip + cseg));
+            auto message = p.rule("message", thought + content);
+            return start + p.one_or_more(message);
         }
 
         // Gemma 4 may emit an extra <|channel>thought\n<channel|> at the end of the content. It may

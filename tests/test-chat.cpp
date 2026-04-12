@@ -2144,6 +2144,40 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .expect(message_assist)
             .run();
+
+        // Thinking + tool call (reasoning_format=AUTO): verify <channel|> does NOT leak
+        tst.test(
+                "<|channel>thought\nLet me check the time.\n<channel|>"
+                "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|>")
+            .tools({ get_time_tool })
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_with_reasoning_and_tool_call("Let me check the time.\n", "get_time", R"({"city": "London"})"))
+            .run();
+
+        // Thinking + content (no tool call) with tools enabled
+        tst.test(
+                "<|channel>thought\nI should respond directly.\n<channel|>Hello, world!")
+            .tools({ get_time_tool })
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(simple_assist_msg("Hello, world!", "I should respond directly.\n"))
+            .run();
+
+        // Thinking + content + tool call: full combination
+        tst.test(
+                "<|channel>thought\nThinking...\n<channel|>Here is the result:"
+                "<|tool_call>call:get_time{city:<|\"|>Paris<|\"|>}<tool_call|>")
+            .tools({ get_time_tool })
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_with_reasoning_content_and_multiple_tool_calls(
+                "Thinking...\n", "Here is the result:", {{"get_time", R"({"city": "Paris"})"}}))
+            .run();
+
+        // Stray <channel|> in content is stripped when reasoning is active
+        tst.test(
+                "<|channel>thought\nThinking\n<channel|>Answer <channel|> here")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(simple_assist_msg("Answer  here", "Thinking\n"))
+            .run();
     }
 
     {
