@@ -2162,6 +2162,33 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
             }
         }
 
+        // Strip reasoning from completed prior assistant turns to prevent
+        // context bloat (Google Rules 1-2).  Preserve reasoning in the last
+        // assistant turn when it has tool calls (active continuation).
+        int last_assistant_idx = -1;
+        for (int i = static_cast<int>(params.messages.size()) - 1; i >= 0; i--) {
+            if (params.messages[i].value("role", "") == "assistant") {
+                last_assistant_idx = i;
+                break;
+            }
+        }
+        for (int i = 0; i < static_cast<int>(params.messages.size()); i++) {
+            auto & msg = params.messages[i];
+            if (msg.value("role", "") != "assistant") {
+                continue;
+            }
+            // Keep reasoning in the last assistant turn if it has tool calls
+            if (i == last_assistant_idx) {
+                bool has_tools = msg.contains("tool_calls") && msg["tool_calls"].is_array()
+                              && !msg["tool_calls"].empty();
+                if (has_tools) {
+                    continue;
+                }
+            }
+            msg.erase("reasoning_content");
+            msg.erase("reasoning");
+        }
+
         if (src.find("{#- OpenAI Chat Completions:") == std::string::npos) {
             // apply workarounds if using the older gemma4 templates
             LOG_WRN("%s: detected an outdated gemma4 chat template, applying compatibility workarounds. "
