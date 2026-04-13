@@ -1969,6 +1969,23 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
 
     // Gemma4 format detection
     if (src.find("'<|tool_call>call:'") != std::string::npos) {
+        // Parse JSON string content in tool messages into objects so the Jinja
+        // template's format_tool_response_block receives mappings and renders
+        // proper FC format (unquoted keys, <|"|>-wrapped strings).
+        for (auto & msg : params.messages) {
+            if (msg.value("role", "") != "tool" || !msg.contains("content")) {
+                continue;
+            }
+            auto & content = msg.at("content");
+            if (!content.is_string()) {
+                continue;
+            }
+            auto parsed = json::parse(content.get<std::string>(), /*cb=*/nullptr, /*allow_exceptions=*/false);
+            if (!parsed.is_discarded() && parsed.is_object()) {
+                content = std::move(parsed);
+            }
+        }
+
         if (src.find("{#- OpenAI Chat Completions:") == std::string::npos) {
             // apply workarounds if using the older gemma4 templates
             LOG_WRN("%s: detected an outdated gemma4 chat template, applying compatibility workarounds. "
