@@ -1114,8 +1114,6 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
 
     data.additional_stops = {
         "<turn|>",
-        "<tool_call|>",
-        "<channel|>",
     };
 
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
@@ -1182,12 +1180,42 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             foreach_function(inputs.tools, [&](const json & tool) {
                 const auto & function = tool.at("function");
                 std::string  name     = function.at("name");
-                // TODO @aldehir : need to extend json-schema-to-grammar to produce more than JSON rules
-                // const auto & params   = function.at("parameters");
+                json params = function.contains("parameters") ? function.at("parameters") : json::object();
+
+                // Build per-tool constrained GBNF while keeping gemma4-dict for PEG parsing.
+                // The gbnf() primitive delegates parsing to the child (gemma4-dict, which
+                // gemma4_to_json handles correctly) while emitting a constrained GBNF grammar
+                // that restricts dictionary keys to declared parameter names.
+                common_peg_parser args = p.literal("{}");
+                if (params.contains("properties") && !params["properties"].empty()) {
+                    std::string member_gbnf;
+                    bool first_member = true;
+                    for (const auto & el : params["properties"].items()) {
+                        const std::string & prop_name = el.key();
+                        const auto & prop_def = el.value();
+                        std::string type = prop_def.value("type", "");
+
+                        std::string value_rule;
+                        if (type == "number" || type == "integer") value_rule = "gemma4-number";
+                        else if (type == "boolean")                value_rule = "gemma4-bool";
+                        else if (type == "object")                 value_rule = "gemma4-dict";
+                        else if (type == "array")                  value_rule = "gemma4-array";
+                        else                                       value_rule = "gemma4-value";
+
+                        if (!first_member) member_gbnf += " | ";
+                        first_member = false;
+                        member_gbnf += gbnf_format_literal(prop_name) + " \":\" space " + value_rule;
+                    }
+
+                    std::string dict_gbnf =
+                        "\"{\" space (\"}\" | ((" + member_gbnf + ") (\",\" space (" + member_gbnf + "))* space \"}\"))";
+
+                    args = p.gbnf(p.ref("gemma4-dict"), dict_gbnf);
+                }
 
                 tool_choice |= p.rule("tool-" + name, p.tool(p.sequence({
                     p.tool_open(p.tool_name(p.literal(name)) + p.peek(p.literal("{"))),
-                    p.tool_args(p.ref("gemma4-dict")),
+                    p.tool_args(args),
                 })));
             });
 
