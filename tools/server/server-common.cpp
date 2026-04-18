@@ -941,8 +941,26 @@ json oaicompat_chat_params_parse(
         } else if (response_type == "json_schema") {
             auto schema_wrapper = json_value(response_format, "json_schema", json::object());
             json_schema = json_value(schema_wrapper, "schema", json::object());
+        } else if (response_type == "lark_grammar") {
+#ifdef LLAMA_USE_LLGUIDANCE
+            std::string lark_grammar = json_value(response_format, "lark_grammar", std::string());
+            if (lark_grammar.empty()) {
+                throw std::invalid_argument("response_format.lark_grammar must be a non-empty string");
+            }
+            // Prefix with %llguidance so common/sampling.cpp routes to llama_sampler_init_llg
+            // with kind="lark".
+            grammar = "%llguidance\n" + lark_grammar;
+#else
+            throw std::invalid_argument("lark_grammar response_format requires llguidance (cmake -DLLAMA_LLGUIDANCE=ON)");
+#endif // LLAMA_USE_LLGUIDANCE
+        } else if (response_type == "gbnf_grammar") {
+            std::string gbnf_grammar = json_value(response_format, "gbnf_grammar", std::string());
+            if (gbnf_grammar.empty()) {
+                throw std::invalid_argument("response_format.gbnf_grammar must be a non-empty string");
+            }
+            grammar = gbnf_grammar;
         } else if (!response_type.empty() && response_type != "text") {
-            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
+            throw std::invalid_argument("response_format type must be one of \"text\", \"json_object\", \"json_schema\", \"lark_grammar\", or \"gbnf_grammar\", but got: " + response_type);
         }
     }
 

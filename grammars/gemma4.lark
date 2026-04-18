@@ -1,0 +1,60 @@
+# Gemma 4 full conversation format grammar (Lark / llguidance)
+# Reference: https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
+#
+# Covers all Gemma 4 special tokens:
+#   turns, tool definitions, tool calls, tool responses, thinking/channel blocks
+#
+# Use via the API (requires cmake -DLLAMA_LLGUIDANCE=ON):
+#   { "response_format": { "type": "lark_grammar", "lark_grammar": "<contents of this file>" } }
+
+start: turn+
+
+turn: "<|turn>" ROLE "\n" turn_content "<turn|>"
+ROLE: "system" | "user" | "model"
+
+turn_content: think_block? content_item*
+content_item: text_content
+            | tool_call
+            | tool_response
+            | tool_def
+
+# Thinking / reasoning channel (activated via <|think|> in system instructions)
+think_block: "<|channel>" "thought" "\n" NON_TAG_TEXT "<channel|>"
+
+# Free text (anything not starting a Gemma 4 special token)
+text_content: NON_TAG_TEXT
+
+# Tool definition block (typically appears in system turn)
+tool_def: "<|tool>" NON_TAG_TEXT "<tool|>"
+
+# Tool call block (model output requesting a function invocation)
+tool_call: "<|tool_call>" "call:" IDENT "{" arg_list? "}" "<tool_call|>"
+
+# Tool response block (user turn returning function result)
+tool_response: "<|tool_response>" NON_TAG_TEXT "<tool_response|>"
+
+# FC (function call) argument format
+arg_list: arg ("," arg)*
+arg: IDENT ":" value
+value: fc_string
+     | NUMBER
+     | BOOL
+     | "null"
+     | fc_array
+     | fc_object
+
+# Gemma 4 string-protection delimiter: <|"|>...<|"|>
+fc_string: /\<\|"\|>/ FC_CHARS /\<\|"\|>/
+FC_CHARS: /([^<]|<[^|]|<\|[^"]|<\|\\[^|])*/
+
+fc_array: "[" (value ("," value)*)? "]"
+fc_object: "{" arg_list? "}"
+
+BOOL: "true" | "false"
+IDENT: /[a-zA-Z_][a-zA-Z0-9_]*/
+NUMBER: /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
+
+# Text that does not begin a Gemma 4 special-token sequence (<|...)
+NON_TAG_TEXT: /([^<]|<[^|]|<\|[^tcia"\\])*/
+
+%ignore /[ \t\n\r]+/
