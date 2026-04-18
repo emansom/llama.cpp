@@ -1,0 +1,28 @@
+# Gemma 4 tool call format grammar (GBNF)
+# Reference: https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
+#
+# Constrains generation to a single Gemma 4 FC-format tool call block.
+# Use this when you want the model to output exactly one tool invocation.
+#
+# Example output:
+#   <|tool_call>call:get_weather{location:<|\"|>Paris<|\"|>,unit:<|\"|>celsius<|\"|>}<tool_call|>
+#
+# To use via the API:
+#   { "response_format": { "type": "gbnf_grammar", "gbnf_grammar": "<contents of this file>" } }
+
+root             ::= think-block? tool-call
+
+# Optional thinking block emitted by Gemma 4 reasoning models before the tool call
+think-block      ::= "<|channel>" "thought" "\n" non-tag-text "<channel|>"
+non-tag-text     ::= ( [^<] | "<" [^|] | "<|" [^tcia"\\] )*
+
+tool-call        ::= "<|tool_call>" "call:" identifier "{" arg-list? "}" "<tool_call|>"
+identifier       ::= [a-zA-Z_] [a-zA-Z0-9_]*
+arg-list         ::= arg ("," arg)*
+arg              ::= identifier ":" value
+value            ::= fc-string | number | "true" | "false" | "null" | fc-array | fc-object
+fc-string        ::= "<|\"|>" fc-char* "<|\"|>"
+fc-char          ::= [^<] | "<" [^|] | "<|" [^"] | "<|\\" [^|]
+number           ::= "-"? [0-9]+ ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+fc-array         ::= "[" (value ("," value)*)? "]"
+fc-object        ::= "{" arg-list? "}"

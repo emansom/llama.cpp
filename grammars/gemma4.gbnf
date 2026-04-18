@@ -1,0 +1,43 @@
+# Gemma 4 full conversation format grammar (GBNF)
+# Reference: https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
+#
+# Covers all Gemma 4 special tokens:
+#   turns, tool definitions, tool calls, tool responses, thinking/channel blocks
+#
+# FC argument values use Gemma 4's string-protection delimiter <|"|>...<|"|>
+# instead of standard JSON quotes.
+
+root             ::= turn+
+turn             ::= "<|turn>" role "\n" turn-content "<turn|>"
+role             ::= "system" | "user" | "model"
+turn-content     ::= think-block? content-item*
+content-item     ::= text-content | tool-call-block | tool-response-block | tool-def-block
+
+# Thinking / reasoning channel (activated via <|think|> in system instructions)
+think-block      ::= "<|channel>" "thought" "\n" non-tag-text "<channel|>"
+
+# Free text content (anything that doesn't start a special token)
+text-content     ::= non-tag-text
+
+# Tool definition block (typically in system turn)
+tool-def-block   ::= "<|tool>" non-tag-text "<tool|>"
+
+# Tool call block (model output requesting a function call)
+tool-call-block  ::= "<|tool_call>" "call:" identifier "{" arg-list? "}" "<tool_call|>"
+
+# Tool response block (user turn returning function result)
+tool-response-block ::= "<|tool_response>" non-tag-text "<tool_response|>"
+
+# Characters that don't start a Gemma 4 special token sequence
+non-tag-text     ::= ( [^<] | "<" [^|] | "<|" [^tcia"\\] )*
+
+# FC (function call) argument format
+identifier       ::= [a-zA-Z_] [a-zA-Z0-9_]*
+arg-list         ::= arg ("," arg)*
+arg              ::= identifier ":" value
+value            ::= fc-string | number | "true" | "false" | "null" | fc-array | fc-object
+fc-string        ::= "<|\"|>" fc-char* "<|\"|>"
+fc-char          ::= [^<] | "<" [^|] | "<|" [^"] | "<|\\" [^|]
+number           ::= "-"? [0-9]+ ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+fc-array         ::= "[" (value ("," value)*)? "]"
+fc-object        ::= "{" arg-list? "}"
