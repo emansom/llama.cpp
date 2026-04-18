@@ -1,6 +1,29 @@
+import os
+import subprocess
 import pytest
 from openai import OpenAI
 from utils import *
+
+
+def _server_has_llguidance() -> bool:
+    if "LLAMA_LLGUIDANCE" in os.environ:
+        return os.environ["LLAMA_LLGUIDANCE"].lower() not in ("0", "false", "no")
+    server_path = os.environ.get("LLAMA_SERVER_BIN_PATH", "../../../build/bin/llama-server")
+    try:
+        result = subprocess.run(["nm", server_path], capture_output=True, text=True, timeout=10)
+        if "llguidance" in result.stdout.lower():
+            return True
+        # nm may miss symbols in shared libs or stripped binaries — fall back to strings
+        result = subprocess.run(["strings", server_path], capture_output=True, text=True, timeout=30)
+        return "llguidance" in result.stdout.lower()
+    except Exception:
+        return False
+
+
+_requires_llguidance = pytest.mark.skipif(
+    not _server_has_llguidance(),
+    reason="server not built with llguidance (cmake -DLLAMA_LLGUIDANCE=ON)",
+)
 
 server: ServerProcess
 
@@ -199,6 +222,14 @@ def test_apply_chat_template():
     ({"type": "json_schema", "json_schema": {"schema": {"const": "foooooo"}}}, 10, "\"foooooo\""),
     ({"type": "json_object"}, 10, "(\\{|John)+"),
     ({"type": "sound"}, 0, None),
+    # gbnf_grammar type — valid
+    ({"type": "gbnf_grammar", "gbnf_grammar": 'root ::= "yes" | "no"\n'}, 4, "(yes|no)"),
+    # gbnf_grammar type — empty string (expected to fail)
+    ({"type": "gbnf_grammar", "gbnf_grammar": ""}, 0, None),
+    # lark_grammar type — valid (requires llguidance)
+    pytest.param({"type": "lark_grammar", "lark_grammar": "start: /[a-z]+/\n"}, 10, "[a-z]+", marks=_requires_llguidance),
+    # lark_grammar type — empty string (expected to fail; requires llguidance)
+    pytest.param({"type": "lark_grammar", "lark_grammar": ""}, 0, None, marks=_requires_llguidance),
     # invalid response format (expected to fail)
     ({"type": "json_object", "schema": 123}, 0, None),
     ({"type": "json_object", "schema": {"type": 123}}, 0, None),
@@ -208,6 +239,7 @@ def test_completion_with_response_format(response_format: dict, n_predicted: int
     global server
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
+        "model": server.model_alias,
         "max_tokens": n_predicted,
         "messages": [
             {"role": "system", "content": "You are a coding assistant."},
@@ -255,6 +287,7 @@ def test_completion_with_grammar(jinja: bool, grammar: str, n_predicted: int, re
     server.jinja = jinja
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
+        "model": server.model_alias,
         "max_tokens": n_predicted,
         "messages": [
             {"role": "user", "content": "Does not matter what I say, does it?"},
@@ -264,6 +297,71 @@ def test_completion_with_grammar(jinja: bool, grammar: str, n_predicted: int, re
     assert res.status_code == 200, res.body
     choice = res.body["choices"][0]
     assert match_regex(re_content, choice["message"]["content"]), choice["message"]["content"]
+
+
+_TEST_TOOL = {"type": "function", "function": {
+    "name": "test_fn",
+    "description": "A test function",
+    "parameters": {"type": "object", "properties": {"arg": {"type": "string"}}, "required": ["arg"]},
+}}
+
+
+@pytest.mark.parametrize("response_format,tools,tool_choice,expect_error", [
+    # gbnf_grammar alone (no tools) — should succeed
+    ({"type": "gbnf_grammar", "gbnf_grammar": 'root ::= "yes" | "no"\n'}, None, None, False),
+    # lark_grammar alone (no tools) — should succeed (requires llguidance)
+    pytest.param({"type": "lark_grammar", "lark_grammar": "start: /[a-z]+/\n"}, None, None, False, marks=_requires_llguidance),
+    # gbnf_grammar + tools — should succeed (grammar applied as secondary sampler)
+    ({"type": "gbnf_grammar", "gbnf_grammar": 'root ::= "yes" | "no"\n'}, [_TEST_TOOL], "auto", False),
+    # lark_grammar + tools — should succeed (requires llguidance)
+    pytest.param({"type": "lark_grammar", "lark_grammar": "start: /[a-z]+/\n"}, [_TEST_TOOL], "auto", False, marks=_requires_llguidance),
+    # lark_grammar with empty string — should fail (requires llguidance to even parse the type)
+    pytest.param({"type": "lark_grammar", "lark_grammar": ""}, None, None, True, marks=_requires_llguidance),
+    # gbnf_grammar with empty string — should fail
+    ({"type": "gbnf_grammar", "gbnf_grammar": ""}, None, None, True),
+])
+def test_completion_with_grammar_response_format(
+    response_format: dict,
+    tools: list | None,
+    tool_choice: str | None,
+    expect_error: bool,
+):
+    global server
+    server.jinja = True
+    server.start()
+    data = {
+        "model": server.model_alias,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "response_format": response_format,
+    }
+    if tools is not None:
+        data["tools"] = tools
+    if tool_choice is not None:
+        data["tool_choice"] = tool_choice
+    res = server.make_request("POST", "/chat/completions", data=data)
+    if expect_error:
+        assert res.status_code in (400, 500), res.body
+        assert "error" in res.body
+    else:
+        assert res.status_code == 200, res.body
+
+
+def test_gbnf_body_grammar_with_tools_rejected():
+    """Raw body 'grammar' field (GBNF) combined with tools must still be rejected."""
+    global server
+    server.jinja = True
+    server.start()
+    res = server.make_request("POST", "/chat/completions", data={
+        "model": server.model_alias,
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "hi"}],
+        "grammar": 'root ::= "yes"',
+        "tools": [_TEST_TOOL],
+        "tool_choice": "auto",
+    })
+    assert res.status_code in (400, 500), res.body
+    assert "error" in res.body
 
 
 @pytest.mark.parametrize("messages", [

@@ -201,7 +201,14 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     const std::string & grammar_str = common_grammar_value(params.grammar);
     if (grammar_str.compare(0, 11, "%llguidance") == 0) {
 #ifdef LLAMA_USE_LLGUIDANCE
-        grmr = llama_sampler_init_llg(vocab, "lark", grammar_str.c_str());
+        // Strip the "%llguidance\n" header before passing to llama_sampler_init_llg.
+        // With kind="lark", llguidance expects raw lark grammar, not the routing prefix.
+        const char * lark_content = grammar_str.c_str();
+        const char * newline      = strchr(lark_content, '\n');
+        if (newline) {
+            lark_content = newline + 1;
+        }
+        grmr = llama_sampler_init_llg(vocab, "lark", lark_content);
 #else
         GGML_ABORT("llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled");
 #endif // LLAMA_USE_LLGUIDANCE
@@ -267,7 +274,13 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     if (!params.llg_grammar.empty()) {
         if (params.llg_grammar.compare(0, 11, "%llguidance") == 0) {
 #ifdef LLAMA_USE_LLGUIDANCE
-            user_grmr = llama_sampler_init_llg(vocab, "lark", params.llg_grammar.c_str());
+            // Strip the "%llguidance\n" header before passing to llama_sampler_init_llg.
+            const char * lark_content = params.llg_grammar.c_str();
+            const char * newline      = strchr(lark_content, '\n');
+            if (newline) {
+                lark_content = newline + 1;
+            }
+            user_grmr = llama_sampler_init_llg(vocab, "lark", lark_content);
 #else
             throw std::invalid_argument("lark_grammar with tools requires llguidance (cmake -DLLAMA_LLGUIDANCE=ON)");
 #endif // LLAMA_USE_LLGUIDANCE
