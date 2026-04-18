@@ -401,6 +401,14 @@ task_params server_task::params_from_json_cmpl(
         }
         params.sampling.grammar_lazy = json_value(data, "grammar_lazy", defaults.sampling.grammar_lazy);
         SRV_DBG("Grammar lazy: %s\n", params.sampling.grammar_lazy ? "true" : "false");
+
+        // Secondary user grammar applied alongside a tool-call grammar.
+        // Set when response_format.type is "lark_grammar" or "gbnf_grammar" with tools present.
+        std::string llg_grammar_str = json_value(data, "llg_grammar", std::string());
+        if (!llg_grammar_str.empty()) {
+            params.sampling.llg_grammar = std::move(llg_grammar_str);
+            SRV_DBG("Secondary grammar (llg_grammar): %s\n", params.sampling.llg_grammar.c_str());
+        }
     }
 
     {

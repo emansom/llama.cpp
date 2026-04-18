@@ -256,6 +256,7 @@ struct common_params_sampling {
     };
 
     common_grammar              grammar;      // optional grammar constraint (user / output-format / tool-calls)
+    std::string                         llg_grammar;     // secondary user grammar applied alongside tool-call grammar
     bool                                grammar_lazy = false;
     std::vector<common_grammar_trigger> grammar_triggers; // optional triggers (for lazy grammars)
     std::set<llama_token>               preserved_tokens;

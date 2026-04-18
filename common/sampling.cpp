@@ -110,6 +110,7 @@ struct common_sampler {
     common_params_sampling params;
 
     struct llama_sampler * grmr;
+    struct llama_sampler * user_grmr; // secondary grammar (from response_format alongside tools)
     struct llama_sampler * rbudget;
     struct llama_sampler * chain;
 
@@ -258,6 +259,21 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         }
     }
 
+    // Secondary user grammar: applied alongside a tool-call grammar when response_format
+    // specifies lark_grammar or gbnf_grammar together with tools. Not prefilled.
+    llama_sampler * user_grmr = nullptr;
+    if (!params.llg_grammar.empty()) {
+        if (params.llg_grammar.compare(0, 11, "%llguidance") == 0) {
+#ifdef LLAMA_USE_LLGUIDANCE
+            user_grmr = llama_sampler_init_llg(vocab, "lark", params.llg_grammar.c_str());
+#else
+            throw std::invalid_argument("lark_grammar with tools requires llguidance (cmake -DLLAMA_LLGUIDANCE=ON)");
+#endif // LLAMA_USE_LLGUIDANCE
+        } else {
+            user_grmr = llama_sampler_init_grammar(vocab, params.llg_grammar.c_str(), "root");
+        }
+    }
+
     // Feed generation prompt tokens to the grammar sampler so it advances past
     // tokens the template already placed in the prompt.
     // Only applies to output-format and tool-call grammars; user-supplied grammars must not be prefilled.
@@ -390,13 +406,14 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     }
 
     auto * result = new common_sampler {
-        /* .params  = */ params,
-        /* .grmr    = */ grmr,
-        /* .rbudget = */ rbudget,
-        /* .chain   = */ chain,
-        /* .prev    = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
-        /* .cur     = */ {},
-        /* .cur_p   = */ {},
+        /* .params    = */ params,
+        /* .grmr      = */ grmr,
+        /* .user_grmr = */ user_grmr,
+        /* .rbudget   = */ rbudget,
+        /* .chain     = */ chain,
+        /* .prev      = */ ring_buffer<llama_token>(std::max(32, params.n_prev)),
+        /* .cur       = */ {},
+        /* .cur_p     = */ {},
     };
 
     return result;
@@ -408,6 +425,7 @@ void common_sampler_free(struct common_sampler * gsmpl) {
     }
 
     llama_sampler_free(gsmpl->grmr);
+    llama_sampler_free(gsmpl->user_grmr);
     llama_sampler_free(gsmpl->rbudget);
     llama_sampler_free(gsmpl->chain);
 
@@ -445,6 +463,10 @@ void common_sampler_accept(struct common_sampler * gsmpl, llama_token token, boo
         llama_sampler_accept(gsmpl->grmr, token);
     }
 
+    if (gsmpl->user_grmr && accept_grammar) {
+        llama_sampler_accept(gsmpl->user_grmr, token);
+    }
+
     llama_sampler_accept(gsmpl->chain, token);
 
     gsmpl->prev.push_back(token);
@@ -460,13 +482,14 @@ void common_sampler_reset(struct common_sampler * gsmpl) {
 
 struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
     return new common_sampler {
-        /* .params  = */ gsmpl->params,
-        /* .grmr    = */ llama_sampler_clone(gsmpl->grmr),
-        /* .rbudget = */ llama_sampler_clone(gsmpl->rbudget),
-        /* .chain   = */ llama_sampler_clone(gsmpl->chain),
-        /* .prev    = */ gsmpl->prev,
-        /* .cur     = */ gsmpl->cur,
-        /* .cur_p   = */ gsmpl->cur_p,
+        /* .params    = */ gsmpl->params,
+        /* .grmr      = */ llama_sampler_clone(gsmpl->grmr),
+        /* .user_grmr = */ llama_sampler_clone(gsmpl->user_grmr),
+        /* .rbudget   = */ llama_sampler_clone(gsmpl->rbudget),
+        /* .chain     = */ llama_sampler_clone(gsmpl->chain),
+        /* .prev      = */ gsmpl->prev,
+        /* .cur       = */ gsmpl->cur,
+        /* .cur_p     = */ gsmpl->cur_p,
     };
 }
 
@@ -531,9 +554,10 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     llama_token id = LLAMA_TOKEN_NULL;
 
-    auto & grmr  = gsmpl->grmr;
-    auto & rbudget = gsmpl->rbudget;
-    auto & chain = gsmpl->chain;
+    auto & grmr      = gsmpl->grmr;
+    auto & user_grmr = gsmpl->user_grmr;
+    auto & rbudget   = gsmpl->rbudget;
+    auto & chain     = gsmpl->chain;
     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
 
     // Check if a backend sampler has already sampled a token in which case we
@@ -563,6 +587,9 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     if (grammar_first && grammar_should_apply(gsmpl)) {
         llama_sampler_apply(grmr, &cur_p);
+        if (user_grmr) {
+            llama_sampler_apply(user_grmr, &cur_p);
+        }
     }
 
     llama_sampler_apply(chain, &cur_p);
@@ -580,7 +607,14 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
         llama_sampler_apply(grmr, &single_token_data_array);
 
-        const bool is_valid = single_token_data_array.data[0].logit != -INFINITY;
+        bool is_valid = single_token_data_array.data[0].logit != -INFINITY;
+
+        // also check user grammar (secondary grammar applied alongside tool-call grammar)
+        if (is_valid && user_grmr) {
+            llama_sampler_apply(user_grmr, &single_token_data_array);
+            is_valid = single_token_data_array.data[0].logit != -INFINITY;
+        }
+
         if (is_valid) {
             return id;
         }
@@ -594,6 +628,9 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 
     if (grammar_should_apply(gsmpl)) {
         llama_sampler_apply(grmr,  &cur_p);
+        if (user_grmr) {
+            llama_sampler_apply(user_grmr, &cur_p);
+        }
     }
 
     llama_sampler_apply(chain, &cur_p);

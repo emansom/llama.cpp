@@ -1051,7 +1051,12 @@ json oaicompat_chat_params_parse(
     inputs.enable_thinking       = opt.enable_thinking;
     if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
         if (body.contains("grammar")) {
-            throw std::invalid_argument("Cannot use custom grammar constraints with tools.");
+            // Allow Lark grammars (%llguidance prefix) alongside tools — they operate via a
+            // separate sampler and do not conflict with the tool-call grammar. Block plain GBNF.
+            const std::string & g = body.at("grammar").get<std::string>();
+            if (g.compare(0, 11, "%llguidance") != 0) {
+                throw std::invalid_argument("Cannot use custom grammar constraints with tools.");
+            }
         }
         llama_params["parse_tool_calls"] = true;
     }
@@ -1116,6 +1121,14 @@ json oaicompat_chat_params_parse(
     if (!chat_params.grammar.empty()) {
         llama_params["grammar"]      = chat_params.grammar;
         llama_params["grammar_type"] = std::string("tool_calls");
+    }
+    // Thread a user-supplied grammar (from response_format lark_grammar / gbnf_grammar) as a
+    // secondary sampler alongside the tool-call grammar — only when tools are active.
+    // When tools are absent, inputs.grammar flows through the normal "grammar" llama_params path
+    // via common_chat_params_parse / inputs.grammar → params.sampling.grammar in server-task.cpp.
+    // Here we only set llg_grammar when chat_params.grammar (tool-call GBNF) is also present.
+    if (!inputs.grammar.empty() && !chat_params.grammar.empty()) {
+        llama_params["llg_grammar"] = inputs.grammar;
     }
     llama_params["grammar_lazy"] = chat_params.grammar_lazy;
     auto grammar_triggers        = json::array();
