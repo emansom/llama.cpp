@@ -1,0 +1,77 @@
+# Simple Go package grammar for constrained generation
+start: package_decl import_decl* decl*
+
+package_decl: "package" IDENT "\n"
+
+import_decl: "import" "(" (STRING_LIT "\n")+ ")"
+           | "import" STRING_LIT "\n"
+
+decl: func_decl
+    | type_decl
+    | var_decl "\n"
+
+type_decl: "type" IDENT "struct" "{" field_decl* "}"
+
+field_decl: IDENT go_type "\n"
+
+func_decl: "func" receiver? IDENT "(" param_list? ")" return_type? "{" statement* "}"
+
+receiver: "(" IDENT go_type ")"
+
+return_type: go_type
+           | "(" go_type ("," go_type)* ")"
+
+param_list: param ("," param)*
+param: IDENT go_type
+
+go_type: "*" go_type   -> pointer_type
+       | "[" "]" go_type -> slice_type
+       | "map" "[" go_type "]" go_type -> map_type
+       | IDENT          -> named_type
+       | "int" | "int64" | "float64" | "bool" | "string" | "error" | "byte"
+
+statement: return_stmt
+         | var_decl_stmt
+         | short_var_stmt
+         | if_stmt
+         | for_stmt
+         | expr_stmt
+         | assignment_stmt
+
+return_stmt: "return" expr_list? "\n"
+var_decl_stmt: "var" IDENT go_type ("=" expr)? "\n"
+short_var_stmt: ident_list ":=" expr_list "\n"
+assignment_stmt: expr_list "=" expr_list "\n"
+expr_stmt: expr "\n"
+
+if_stmt: "if" expr "{" statement* "}" ("else" "{" statement* "}")?
+
+for_stmt: "for" (expr | short_var_stmt expr ";" expr)? "{" statement* "}"
+
+ident_list: IDENT ("," IDENT)*
+expr_list: expr ("," expr)*
+
+expr: IDENT "(" arg_list? ")"      -> call
+    | expr "." IDENT "(" arg_list? ")" -> method_call
+    | expr "." IDENT               -> field_access
+    | expr BINOP expr              -> binop
+    | "!" expr                     -> not
+    | "&" expr                     -> addr
+    | "*" expr                     -> deref
+    | STRING_LIT                   -> string_lit
+    | NUMBER                       -> number
+    | BOOL                         -> bool_lit
+    | "nil"                        -> nil_lit
+    | IDENT                        -> var_ref
+    | "fmt.Errorf" "(" STRING_LIT ")" -> errorf
+
+arg_list: expr ("," expr)*
+
+BINOP: "+" | "-" | "*" | "/" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+BOOL: "true" | "false"
+IDENT: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /-?[0-9]+(\.[0-9]+)?/
+STRING_LIT: "\"" /([^"\\]|\\.)*/ "\""
+
+%ignore /[ \t]+/
+%ignore /\/\/[^\n]*/
