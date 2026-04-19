@@ -1,0 +1,40 @@
+# Simple Java class grammar for constrained generation
+start: class_decl
+
+class_decl: "public" "class" IDENT "{" method_decl* "}"
+
+method_decl: modifier* type IDENT "(" param_list? ")" "{" statement* "}"
+
+modifier: "public" | "private" | "protected" | "static" | "final"
+
+param_list: param ("," param)*
+param: type IDENT
+
+statement: return_stmt
+         | var_decl_stmt
+         | expr_stmt
+
+return_stmt: "return" expr ";"
+var_decl_stmt: type IDENT "=" expr ";"
+expr_stmt: expr ";"
+
+expr: IDENT "(" arg_list? ")"   -> method_call
+    | IDENT "." IDENT           -> field_access
+    | STRING_LIT                -> string_lit
+    | NUMBER                    -> number
+    | IDENT                     -> var_ref
+    | "new" IDENT "(" arg_list? ")"  -> constructor
+
+arg_list: expr ("," expr)*
+
+type: IDENT ("<" type ">")?
+    | "void"
+    | "int" | "long" | "double" | "boolean" | "String"
+
+IDENT: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /-?[0-9]+(\.[0-9]+)?/
+STRING_LIT: "\"" /([^"\\]|\\.)*/ "\""
+
+%ignore /[ \t\n\r]+/
+%ignore /\/\/[^\n]*/
+%ignore /\/\*(.|\n)*?\*\//
