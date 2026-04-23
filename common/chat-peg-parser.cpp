@@ -872,22 +872,33 @@ void common_chat_peg_gemma4_mapper::from_ast(const common_peg_ast_arena & arena,
     }
 }
 
+// Normalize rule name: replace underscores with hyphens so that both Lark-transpiled
+// (underscore) and C++ builder (hyphen) conventions are handled by the same mapper.
+static std::string normalize_rule_name(const std::string & rule) {
+    std::string result = rule;
+    for (char & c : result) {
+        if (c == '_') c = '-';
+    }
+    return result;
+}
+
 static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg_ast_id id) {
     const auto & node = arena.get(id);
+    const std::string rule = normalize_rule_name(node.rule);
 
     if (node.text.empty()) {
         return "";
     }
 
-    if (node.rule == "gemma4-number" || node.rule == "gemma4-bool" || node.rule == "gemma4-null") {
+    if (rule == "gemma4-number" || rule == "gemma4-bool" || rule == "gemma4-null") {
         return std::string(node.text);
     }
 
-    if (node.rule == "gemma4-string-content") {
+    if (rule == "gemma4-string-content") {
         return escape_json_string_inner(std::string(node.text));
     }
 
-    if (node.rule == "gemma4-string") {
+    if (rule == "gemma4-string") {
         std::string result = "\"";
         if (!node.children.empty()) {
             result += gemma4_to_json(arena, node.children[0]);
@@ -898,7 +909,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
         return result;
     }
 
-    if (node.rule == "gemma4-array") {
+    if (rule == "gemma4-array") {
         std::string result = "[";
 
         bool add_comma = false;
@@ -916,11 +927,11 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
         return result;
     }
 
-    if (node.rule == "gemma4-dict-key-name") {
+    if (rule == "gemma4-dict-key-name") {
         return std::string(node.text);
     }
 
-    if (node.rule == "gemma4-dict-key") {
+    if (rule == "gemma4-dict-key") {
         std::string result = "\"";
         if (!node.children.empty()) {
             result += escape_json_string_inner(gemma4_to_json(arena, node.children[0]));
@@ -931,7 +942,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
         return result;
     }
 
-    if (node.rule == "gemma4-dict-kv") {
+    if (rule == "gemma4-dict-kv") {
         std::string result;
         for (auto child_id : node.children) {
             result += gemma4_to_json(arena, child_id);
@@ -939,7 +950,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
         return result;
     }
 
-    if (node.rule == "gemma4-dict") {
+    if (rule == "gemma4-dict") {
         std::string result = "{";
 
         bool add_comma = false;
@@ -957,7 +968,7 @@ static std::string gemma4_to_json(const common_peg_ast_arena & arena, common_peg
         return result;
     }
 
-    if (node.rule == "gemma4-value") {
+    if (rule == "gemma4-value") {
         if (!node.children.empty()) {
             return gemma4_to_json(arena, node.children[0]);
         }

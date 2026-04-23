@@ -296,6 +296,8 @@ struct server_chat_params {
     std::string reasoning_budget_message;
     std::string media_path;
     bool force_pure_content = false;
+    std::string chat_lark_grammar;    // content of --chat-lark-grammar-file
+    std::string chat_gbnf_grammar;    // content of --chat-gbnf-grammar-file
 };
 
 // used by /completions endpoint

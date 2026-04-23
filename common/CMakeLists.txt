@@ -65,6 +65,10 @@ add_library(${TARGET}
     chat-peg-parser.h
     chat.cpp
     chat.h
+    gbnf-to-peg.cpp
+    gbnf-to-peg.h
+    lark-to-peg.cpp
+    lark-to-peg.h
     common.cpp
     common.h
     console.cpp

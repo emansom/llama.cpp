@@ -1,0 +1,22 @@
+# DeepSeek v3.2 chat grammar (GBNF)
+#
+# Covers the full output format for tool-call, content-only, and response_format responses.
+# {{RESPONSE_SCHEMA}} replaced at runtime.
+
+DSML ::= "｜DSML｜"
+
+root ::= think-block? content ( tool-calls-block | response-format | )
+think-block ::= "<think>" reasoning "</think>"
+reasoning ::= ( [^<] | "<" [^/] )*
+content ::= ( [^<`] | "<" [^｜] | "`" [^`] | "``" [^`] )*
+
+tool-calls-block ::= "<" DSML "function_calls>" " "* invoke+ " "* "</" DSML "function_calls>"
+invoke ::= "<" DSML "invoke" " " "name=\"" func-name "\">\n" param* "</" DSML "invoke>"
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+param ::= "<" DSML "parameter" " " "name=\"" param-name "\"" " " "string=\"" bool-str "\">" param-value "</" DSML "parameter>\n"
+param-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+bool-str ::= "true" | "false"
+param-value ::= [^<]*
+
+response-format ::= "```json\n" response-content "\n```"
+response-content ::= {{RESPONSE_SCHEMA}}

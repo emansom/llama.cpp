@@ -1,0 +1,24 @@
+%llguidance {}
+
+# Kimi K2 chat grammar (Lark / llguidance)
+#
+# Covers the full output format for both tool-call and content-only responses.
+# Tool call format:
+#   <|tool_calls_section_begin|>
+#   <|tool_call_begin|>functions.FUNC_NAME:INDEX<|tool_call_argument_begin|>{json}<|tool_call_end|>
+#   <|tool_calls_section_end|>
+#
+# {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
+
+start: think_block? content tool_calls_section?
+think_block: "<think>" reasoning "</think>"
+reasoning: /(.|\n)*?/
+content: /([^<]|<(?!\|tool_calls_section_begin\|)|\<\|(?!tool_calls_section_begin\|)|\<\|t(?!ool_calls_section_begin\|))*/
+
+tool_calls_section: "<|tool_calls_section_begin|>"? tool_call+ "<|tool_calls_section_end|>"?
+tool_call: "<|tool_call_begin|>" tool_id "<|tool_call_argument_begin|>" tool_args "<|tool_call_end|>"?
+tool_id: "functions." func_name ":" CALL_INDEX
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+CALL_INDEX: /[0-9]+/
+tool_args: {{TOOL_SCHEMA}}

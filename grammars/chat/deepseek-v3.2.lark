@@ -1,0 +1,27 @@
+%llguidance {}
+
+# DeepSeek v3.2 chat grammar (Lark / llguidance)
+#
+# Covers the full output format for tool-call, content-only, and response_format responses.
+# Tool call format:    XML-like DSML tags
+# Response format:     think_block? content ```json\n{schema}\n```
+#
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
+
+start: think_block? content (tool_calls_block | response_format | )
+think_block: "<think>" reasoning "</think>"
+reasoning: /(.|\n)*?/
+content: /([^<`]|<(?!｜DSML｜function_calls)|`[^`]|``[^`])*/
+
+DSML: "｜DSML｜"
+tool_calls_block: "<" DSML "function_calls>" " "* invoke+ " "* "</" DSML "function_calls>"
+invoke: "<" DSML "invoke" " " "name=\"" func_name "\">\n" param* "</" DSML "invoke>"
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+param: "<" DSML "parameter" " " "name=\"" param_name "\"" " " "string=\"" BOOL_STR "\">" param_value "</" DSML "parameter>\n"
+param_name: /[a-zA-Z_][a-zA-Z0-9_]*/
+BOOL_STR: "true" | "false"
+param_value: /[^<]*/
+
+response_format: "```json\n" response_content "\n```"
+response_content: {{RESPONSE_SCHEMA}}

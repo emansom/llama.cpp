@@ -1,0 +1,18 @@
+# Ministral-3 chat grammar (GBNF)
+#
+# Covers the full output format for tool-call, content-only, and response_format responses.
+# {{TOOL_SCHEMA}}     replaced at runtime.
+# {{RESPONSE_SCHEMA}} replaced at runtime.
+
+root ::= think-block? content ( tool-call-section | response-format | )
+think-block ::= "[THINK]" reasoning "[/THINK]"
+reasoning ::= ( [^[] | "[" [^/] )*
+content ::= ( [^[`] | "[" [^T] | "[T" [^O] | "[TO" [^O] | "[TOO" [^L] | "[TOOL" [^_] | "[TOOL_" [^C] | "`" [^`] | "``" [^`] )*
+
+tool-call-section ::= "[TOOL_CALLS]" tool-call+
+tool-call ::= "[" func-name "]" "[ARGS]" tool-args
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+tool-args ::= {{TOOL_SCHEMA}}
+
+response-format ::= "```json\n" response-content "\n```"
+response-content ::= {{RESPONSE_SCHEMA}}

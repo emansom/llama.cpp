@@ -200,6 +200,7 @@ struct common_chat_parser_params {
     bool                    parse_tool_calls     = true;
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
+    std::string             override_grammar;              // CLI Lark or GBNF grammar override; used instead of serialized parser
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
         format  = chat_params.format;
@@ -262,6 +263,15 @@ std::vector<common_chat_tool> common_chat_tools_parse_oaicompat(const nlohmann::
 nlohmann::ordered_json common_chat_msgs_to_json_oaicompat(const std::vector<common_chat_msg> & msgs, bool concat_typed_text = false);
 
 nlohmann::ordered_json common_chat_tools_to_json_oaicompat(const std::vector<common_chat_tool> & tools);
+
+nlohmann::ordered_json common_chat_msg_diff_to_json_oaicompat(const common_chat_msg_diff & diff);
+
+// Chat grammar registry: loads model chat grammar files from a directory at startup.
+// Grammar files are named <model-key>.lark and <model-key>.gbnf (e.g. "gemma4.lark").
+// Call common_chat_grammar_init() once at startup before any chat template processing.
+// The registry persists in process memory and is read on every request (no re-reading files).
+void        common_chat_grammar_init(const std::string & grammars_dir);
+std::string common_chat_grammar_get(const std::string & model_key);
 
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);

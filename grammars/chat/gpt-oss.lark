@@ -1,0 +1,30 @@
+%llguidance {}
+
+# GPT-OSS chat grammar (Lark / llguidance)
+#
+# Covers the full output format for tool-call, content (analysis/final), and mixed responses.
+# Tool call format:
+#   <|start|>assistant to=functions.FUNC_NAME<|channel|>CHANNEL_TYPE[<|constrain|>TYPE]<|message|>{json}
+# Content format:
+#   <|start|>assistant<|channel|>CHANNEL_TYPE<|message|>content<|end|>
+# Response format:
+#   <|start|>assistant<|channel|>final<|message|>{schema}
+#
+# {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
+
+start: preamble* (tool_turn | response_format | content_turn)
+preamble: "<|start|>assistant<|channel|>" CHANNEL_TYPE "<|message|>" content "<|end|>"
+content: /([^<]|<(?!\|end\|))*/
+CHANNEL_TYPE: "commentary" | "analysis" | "final"
+
+content_turn: "<|start|>assistant<|channel|>" CHANNEL_TYPE "<|message|>" content
+tool_turn: "<|start|>assistant to=functions." func_name "<|channel|>" CHANNEL_TYPE constrain? "<|message|>" tool_args
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+constrain: "<|constrain|>" CONSTRAIN_TYPE
+CONSTRAIN_TYPE: /[A-Za-z0-9_-]+/
+tool_args: {{TOOL_SCHEMA}}
+
+response_format: "<|start|>assistant<|channel|>final" constrain? "<|message|>" response_content
+response_content: {{RESPONSE_SCHEMA}}

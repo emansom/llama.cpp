@@ -1130,25 +1130,53 @@ json oaicompat_chat_params_parse(
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;
-    if (!chat_params.grammar.empty()) {
+
+    // Grammar assembly
+    // Priority for sampling grammar: request grammar > CLI Lark > CLI GBNF > template-generated GBNF
+    // "request grammar" = grammar from response_format.lark_grammar / gbnf_grammar in the request
+    // CLI grammars apply to ALL scenarios (with or without tools); request grammars apply only when no tools.
+    const std::string & cli_grammar = !opt.chat_lark_grammar.empty() ? opt.chat_lark_grammar
+                                                                      : opt.chat_gbnf_grammar;
+    const bool has_cli_grammar      = !cli_grammar.empty();
+    const bool has_request_grammar  = !inputs.grammar.empty();
+    const bool has_tool_grammar     = !chat_params.grammar.empty(); // template-generated tool-call grammar
+
+    if (has_cli_grammar && has_tool_grammar) {
+        // CLI grammar overrides the template-generated tool-call grammar.
+        // grammar_type=tool_calls ensures prefill is enabled.
+        // llguidance path in sampling.cpp bypasses lazy triggers, so disable them.
+        llama_params["grammar"]          = cli_grammar;
+        llama_params["grammar_type"]     = std::string("tool_calls");
+        llama_params["grammar_lazy"]     = false;
+        llama_params["grammar_triggers"] = json::array();
+        // Pass the CLI grammar for post-generation PEG parsing override
+        llama_params["chat_override_grammar"] = cli_grammar;
+    } else if (has_tool_grammar) {
+        // Normal template-generated tool-call grammar (no CLI override).
         llama_params["grammar"]      = chat_params.grammar;
         llama_params["grammar_type"] = std::string("tool_calls");
+        llama_params["grammar_lazy"] = chat_params.grammar_lazy;
+        auto grammar_triggers        = json::array();
+        for (const auto & trigger : chat_params.grammar_triggers) {
+            server_grammar_trigger ct(trigger);
+            grammar_triggers.push_back(ct.to_json());
+        }
+        llama_params["grammar_triggers"] = grammar_triggers;
+    } else if (has_cli_grammar) {
+        // No tools: CLI grammar applies (no tool-call prefill needed).
+        llama_params["grammar"]          = cli_grammar;
+        llama_params["grammar_lazy"]     = false;
+        llama_params["grammar_triggers"] = json::array();
+    } else if (has_request_grammar) {
+        // No tools, no CLI grammar: request grammar from response_format (bug-fix: was previously dropped).
+        llama_params["grammar"]          = inputs.grammar;
+        llama_params["grammar_lazy"]     = false;
+        llama_params["grammar_triggers"] = json::array();
+    } else {
+        llama_params["grammar_lazy"]     = false;
+        llama_params["grammar_triggers"] = json::array();
     }
-    // Thread a user-supplied grammar (from response_format lark_grammar / gbnf_grammar) as a
-    // secondary sampler alongside the tool-call grammar — only when tools are active.
-    // When tools are absent, inputs.grammar flows through the normal "grammar" llama_params path
-    // via common_chat_params_parse / inputs.grammar → params.sampling.grammar in server-task.cpp.
-    // Here we only set llg_grammar when chat_params.grammar (tool-call GBNF) is also present.
-    if (!inputs.grammar.empty() && !chat_params.grammar.empty()) {
-        llama_params["llg_grammar"] = inputs.grammar;
-    }
-    llama_params["grammar_lazy"] = chat_params.grammar_lazy;
-    auto grammar_triggers        = json::array();
-    for (const auto & trigger : chat_params.grammar_triggers) {
-        server_grammar_trigger ct(trigger);
-        grammar_triggers.push_back(ct.to_json());
-    }
-    llama_params["grammar_triggers"]  = grammar_triggers;
+
     llama_params["preserved_tokens"]  = chat_params.preserved_tokens;
     llama_params["generation_prompt"] = chat_params.generation_prompt;
     for (const auto & stop : chat_params.additional_stops) {

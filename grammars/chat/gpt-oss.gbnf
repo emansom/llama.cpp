@@ -1,0 +1,23 @@
+# GPT-OSS chat grammar (GBNF)
+#
+# Covers the full output format for both tool-call and content-only responses.
+# Tool call format: <|start|>assistant to=functions.NAME<|channel|>TYPE<|message|>{json}
+# Content format:  <|start|>assistant<|channel|>TYPE<|message|>content
+# Response format: <|start|>assistant<|channel|>final<|message|>{schema}
+#
+# {{TOOL_SCHEMA}}     replaced at runtime with per-tool schema.
+# {{RESPONSE_SCHEMA}} replaced at runtime with response schema.
+
+root ::= preamble* ( tool-turn | response-format | content-turn )
+preamble ::= "<|start|>assistant<|channel|>" channel-type "<|message|>" content "<|end|>"
+content ::= ( [^<] | "<" [^|] )*
+channel-type ::= "commentary" | "analysis" | "final"
+
+content-turn ::= "<|start|>assistant<|channel|>" channel-type "<|message|>" content
+tool-turn ::= "<|start|>assistant to=functions." func-name "<|channel|>" channel-type constrain? "<|message|>" tool-args
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+constrain ::= "<|constrain|>" [A-Za-z0-9_-]+
+tool-args ::= {{TOOL_SCHEMA}}
+
+response-format ::= "<|start|>assistant<|channel|>final" constrain? "<|message|>" response-content
+response-content ::= {{RESPONSE_SCHEMA}}

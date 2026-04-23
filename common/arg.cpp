@@ -3157,6 +3157,32 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
+        {"--chat-grammars-dir"}, "DIR",
+        "directory containing model chat grammar files (*.lark for llguidance, *.gbnf for GBNF sampler)\n"
+        "files are read at startup and cached in memory; default: <executable-dir>/../share/llama.cpp/grammars/chat",
+        [](common_params & params, const std::string & value) {
+            params.chat_grammars_dir = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CHAT_GRAMMARS_DIR"));
+    add_opt(common_arg(
+        {"--chat-lark-grammar-file"}, "FNAME",
+        "Lark grammar file to use as the sampling constraint and parsing grammar for all chat requests.\n"
+        "Applied to all requests (with or without tools) unless the request itself specifies a custom\n"
+        "grammar via response_format. Requires llguidance support (cmake -DLLAMA_LLGUIDANCE=ON).",
+        [](common_params & params, const std::string & value) {
+            params.chat_lark_grammar = read_file(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--chat-gbnf-grammar-file"}, "FNAME",
+        "GBNF grammar file to use as the sampling constraint and parsing grammar for all chat requests.\n"
+        "Applied to all requests (with or without tools) unless the request itself specifies a custom\n"
+        "grammar via response_format. Used when llguidance support is not compiled in.",
+        [](common_params & params, const std::string & value) {
+            params.chat_gbnf_grammar = read_file(value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},
         string_format(

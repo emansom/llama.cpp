@@ -1048,8 +1048,19 @@ private:
                 /* reasoning_budget      */ params_base.sampling.reasoning_budget_tokens,
                 /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
                 /* media_path            */ params_base.media_path,
-                /* force_pure_content    */ params_base.force_pure_content_parser
+                /* force_pure_content    */ params_base.force_pure_content_parser,
+                /* chat_lark_grammar     */ params_base.chat_lark_grammar,
+                /* chat_gbnf_grammar     */ params_base.chat_gbnf_grammar,
             };
+
+            // Load model chat grammar files from disk into the in-process registry.
+            // Grammar files (*.lark, *.gbnf) are read once at startup and cached in memory.
+            // Default install location: /usr/share/llama.cpp/grammars/chat
+            // Override with --chat-grammars-dir or LLAMA_ARG_CHAT_GRAMMARS_DIR.
+            const std::string grammars_dir = params_base.chat_grammars_dir.empty()
+                ? std::string("/usr/share/llama.cpp/grammars/chat")
+                : params_base.chat_grammars_dir;
+            common_chat_grammar_init(grammars_dir);
         }
 
         return true;
