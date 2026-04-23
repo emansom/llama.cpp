@@ -1,0 +1,18 @@
+%llguidance {}
+
+# GigaChat v3 chat grammar (Lark / llguidance)
+#
+# Covers the full output format for both tool-call and content-only responses.
+# Tool call format:
+#   <|message_sep|>\n\nfunction call<|role_sep|>\n{"name":"FUNC_NAME","arguments":{json}}
+#
+# {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
+
+start: content tool_call?
+content: /([^<]|<(?!\|message_sep\|))*/
+
+tool_call: "<|message_sep|>\n\nfunction call<|role_sep|>\n" tool_body
+tool_body: "{" "\"name\"" ":" "\"" func_name "\"" "," "\"arguments\"" ":" tool_args "}"
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}

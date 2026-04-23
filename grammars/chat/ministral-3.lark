@@ -1,0 +1,27 @@
+%llguidance {}
+
+# Ministral-3 chat grammar (Lark / llguidance)
+#
+# Covers the full output format for tool-call, content-only, and response_format responses.
+# Tool call format:    [TOOL_CALLS][FUNC_NAME][ARGS]{json}
+# Response format:     [THINK]?content ```json\n{schema}\n```
+# Reasoning format:    [THINK]reasoning[/THINK]
+#
+# {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
+
+start: think_block? content (tool_call_section | response_format | )
+think_block: "[THINK]" reasoning "[/THINK]"
+reasoning: /(.|\n)*?/
+content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/ 
+
+tool_call_section: "[TOOL_CALLS]" tool_call+
+tool_call: "[" func_name "]" "[ARGS]" tool_args
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}
+
+response_format: "```json\n" response_content "\n```"
+response_content: {{RESPONSE_SCHEMA}}
+
+%ignore " "

@@ -1,0 +1,36 @@
+%llguidance {}
+
+# Gemma 4 chat grammar (Lark / llguidance)
+#
+# Covers the full output format for tool-call, content-only, and response_format responses.
+# Tool call format:    <|tool_call>call:FUNC_NAME{key:<|"|>val<|"|>,...}<tool_call|>
+# Response format:     think_block? ```json\n{schema}\n```
+# Think format:        <|channel>thought ...content... <channel|>
+#
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
+
+start: think_block? (tool_calls | response_format | content)
+content: /([^<`]|<[^|]|<\|[^tc]|<\|t[^o]|<\|to[^o]|<\|too[^l]|<\|tool[^_]|<\|tool_[^c]|`[^`]|``[^`])*/
+think_block: "<|channel>thought" /[ \t\n\r]+/ reasoning /(.|\n)*?/ "<channel|>"
+reasoning: /[^<]*/
+
+tool_calls: tool_call+
+tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+gemma4_dict: "{" (gemma4_kv ("," gemma4_kv)*)? "}"
+gemma4_kv: gemma4_dict_key ":" gemma4_value
+gemma4_dict_key: /[^:{}]+/
+gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA4_BOOL | "null"
+gemma4_string: "<|\"|>" GEMMA4_STR_CONTENT "<|\"|>"
+GEMMA4_STR_CONTENT: /([^<]|<[^|]|<\|[^"]|<\|"[^|])*/
+gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
+
+GEMMA4_NUMBER: /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
+GEMMA4_BOOL: "true" | "false"
+
+response_format: "```json\n" response_content "\n```"
+response_content: {{RESPONSE_SCHEMA}}
+
+%ignore /[ \t\n\r]/

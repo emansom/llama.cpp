@@ -288,3 +288,7 @@ configure_file(cmake/llama.pc.in
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/llama.pc"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+# Install grammar files for distro packaging
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/grammars/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/llama.cpp/grammars)
