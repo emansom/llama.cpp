@@ -147,10 +147,24 @@ enum common_chat_tool_choice {
 enum common_chat_format {
     COMMON_CHAT_FORMAT_CONTENT_ONLY,
 
-    // These are intended to be parsed by the PEG parser
+    // These are intended to be parsed by the PEG parser. Each model family with its
+    // own wire format has a dedicated enum value so the dispatcher can pick the right
+    // mapper/state-machine. A small generic catch-all (PEG_NATIVE) remains for
+    // formats that still use the shared JSON-tagged mapper.
     COMMON_CHAT_FORMAT_PEG_SIMPLE,
     COMMON_CHAT_FORMAT_PEG_NATIVE,
-    COMMON_CHAT_FORMAT_PEG_GEMMA4,
+
+    COMMON_CHAT_FORMAT_PEG_GEMMA4,          // <|tool_call>call:NAME{K:<|"|>V<|"|>}<tool_call|>
+    COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_2,   // <｜DSML｜function_calls>…<param name="k">v</param>…
+    COMMON_CHAT_FORMAT_PEG_KIMI_K2,         // <|tool_call_begin|>functions.NAME:IDX<|tool_call_argument_begin|>{json}<|tool_call_end|>
+    COMMON_CHAT_FORMAT_PEG_LFM2,            // [name(arg=val,…)] inside <|tool_call_start|>…<|tool_call_end|>
+    COMMON_CHAT_FORMAT_PEG_LFM2_5,          // same shape as LFM2, no wrapper tokens required
+    COMMON_CHAT_FORMAT_PEG_MINISTRAL_3,     // [TOOL_CALLS]name[ARGS]{json}
+    COMMON_CHAT_FORMAT_PEG_GPT_OSS,         // channel-tagged with JSON args
+    COMMON_CHAT_FORMAT_PEG_FUNCTIONARY_V3_2,// >>>recipient\n{content}
+    COMMON_CHAT_FORMAT_PEG_GIGACHAT_V3,     // GigaChat XML-ish with JSON args
+    COMMON_CHAT_FORMAT_PEG_QWEN3_CODER,     // <tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>
+    COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH,   // <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>
 
     COMMON_CHAT_FORMAT_COUNT,  // Not a format, just the # formats
 };
@@ -180,6 +194,9 @@ struct common_chat_params {
     std::string                         grammar;
     bool                                grammar_lazy         = false;
     std::string                         generation_prompt;
+    // When true, generation_prompt is NOT prepended to the effective input in common_chat_peg_parse.
+    // Grammar-file-based parsers parse the model's raw output directly and do not need the prefix.
+    bool                                grammar_file_parser  = false;
     bool                                supports_thinking    = false;
     std::string                         thinking_start_tag;  // e.g., "<think>"
     std::string                         thinking_end_tag;    // e.g., "</think>"
@@ -187,6 +204,10 @@ struct common_chat_params {
     std::vector<std::string>            preserved_tokens;
     std::vector<std::string>            additional_stops;
     std::string                         parser;
+    // Carried through from common_chat_templates_inputs.reasoning_format so
+    // per-format pipelines can branch on whether the API caller wants
+    // reasoning extracted (AUTO/DEEPSEEK) vs. folded into content (NONE).
+    common_reasoning_format             reasoning_format     = COMMON_REASONING_FORMAT_NONE;
 };
 
 // per-message parsing syntax
@@ -197,14 +218,18 @@ struct common_chat_parser_params {
     // Whether reasoning_content should be inlined in the content (e.g. for reasoning_format=deepseek in stream mode)
     bool                    reasoning_in_content = false;
     std::string             generation_prompt;
+    bool                    grammar_file_parser  = false;  // mirrors common_chat_params::grammar_file_parser
     bool                    parse_tool_calls     = true;
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
     std::string             override_grammar;              // CLI Lark or GBNF grammar override; used instead of serialized parser
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
-        format  = chat_params.format;
-        generation_prompt = chat_params.generation_prompt;
+        format               = chat_params.format;
+        grammar_file_parser  = chat_params.grammar_file_parser;
+        reasoning_format     = chat_params.reasoning_format;
+        // Grammar-file parsers parse raw model output and do not need the generation_prompt prefix.
+        generation_prompt    = chat_params.grammar_file_parser ? std::string{} : chat_params.generation_prompt;
     }
 };
 
