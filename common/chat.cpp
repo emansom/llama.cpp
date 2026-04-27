@@ -2,6 +2,7 @@
 
 #include "chat-auto-parser-helpers.h"
 #include "chat-auto-parser.h"
+#include "chat-formats/format-pipeline.h"
 #include "chat-peg-parser.h"
 #include "common.h"
 #include "gbnf-to-peg.h"
@@ -887,24 +888,41 @@ static std::string build_gbnf_tool_schema(const json & tools) {
     return result;
 }
 
+// Replace all occurrences of placeholder in str with replacement. Several chat
+// grammars repeat the same `{{TOOL_SCHEMA}}` / `{{RESPONSE_SCHEMA}}` placeholder
+// in multiple rules (e.g. once for the tool-call body and once inside an
+// optional response-format alternative); a single substring replacement would
+// leave the second occurrence in the rendered grammar.
+static std::string replace_all(const std::string & str, const std::string & placeholder, const std::string & replacement) {
+    std::string result;
+    result.reserve(str.size());
+    size_t start = 0;
+    size_t pos;
+    while ((pos = str.find(placeholder, start)) != std::string::npos) {
+        result.append(str, start, pos - start);
+        result.append(replacement);
+        start = pos + placeholder.size();
+    }
+    result.append(str, start, str.size() - start);
+    return result;
+}
+
 // Inject per-tool schema into a grammar template (Lark or GBNF) by replacing {{TOOL_SCHEMA}}.
 static std::string inject_tool_schema(const std::string & grammar_template, const json & tools) {
     const std::string placeholder = "{{TOOL_SCHEMA}}";
-    auto pos = grammar_template.find(placeholder);
-    if (pos == std::string::npos) {
+    if (grammar_template.find(placeholder) == std::string::npos) {
         return grammar_template;
     }
     std::string schema = is_lark_grammar(grammar_template)
         ? build_lark_tool_schema(tools)
         : build_gbnf_tool_schema(tools);
-    return grammar_template.substr(0, pos) + schema + grammar_template.substr(pos + placeholder.size());
+    return replace_all(grammar_template, placeholder, schema);
 }
 
 // Inject response format schema into a grammar template (Lark or GBNF) by replacing {{RESPONSE_SCHEMA}}.
 static std::string inject_response_schema(const std::string & grammar_template, const json & json_schema) {
     const std::string placeholder = "{{RESPONSE_SCHEMA}}";
-    auto pos = grammar_template.find(placeholder);
-    if (pos == std::string::npos) {
+    if (grammar_template.find(placeholder) == std::string::npos) {
         return grammar_template;
     }
     std::string schema;
@@ -928,7 +946,7 @@ static std::string inject_response_schema(const std::string & grammar_template, 
             schema = "([^]*)";
         }
     }
-    return grammar_template.substr(0, pos) + schema + grammar_template.substr(pos + placeholder.size());
+    return replace_all(grammar_template, placeholder, schema);
 }
 
 // Build a PEG parser from a grammar template (Lark or GBNF).
@@ -938,23 +956,12 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
-    // Replace {{TOOL_SCHEMA}} with generic JSON object matcher
-    {
-        const std::string placeholder = "{{TOOL_SCHEMA}}";
-        auto pos = base.find(placeholder);
-        if (pos != std::string::npos) {
-            base.replace(pos, placeholder.size(), lark ? "/\\{[^}]*\\}/" : "([^]*)");
-        }
-    }
-
-    // Replace {{RESPONSE_SCHEMA}} with generic JSON matcher
-    {
-        const std::string placeholder = "{{RESPONSE_SCHEMA}}";
-        auto pos = base.find(placeholder);
-        if (pos != std::string::npos) {
-            base.replace(pos, placeholder.size(), lark ? "/[\\s\\S]*/" : "([^]*)");
-        }
-    }
+    // For extraction purposes, tool_args and response_content match any JSON object/value.
+    // The precise schema constraint was already enforced by llguidance/GBNF at sampling time.
+    // Use a special marker __JSON_OBJECT__ and __JSON_VALUE__ that the transpiler recognizes
+    // and maps to builder.json_object() and builder.json() respectively.
+    base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
+    base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
     return lark ? common_lark_to_peg(base) : common_gbnf_to_peg(base);
 }
@@ -1920,6 +1927,26 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     common_peg_parse_context ctx(effective_input, flags);
     auto result = parser.parse(ctx);
 
+    // Per-format pipeline first; for formats not yet migrated (or PEG_NATIVE
+    // from the auto-parser) the factory returns an invalid pipeline and we
+    // fall back to the legacy `common_chat_peg_mapper`.
+    auto run_with_pipeline_or_mapper = [&](common_chat_msg & msg) {
+        common_chat_format_pipeline pipeline =
+            common_chat_make_format_pipeline(params.format, msg, is_partial, params.reasoning_format);
+        if (pipeline.valid()) {
+            pipeline.run(ctx.ast, result);
+            return;
+        }
+        std::unique_ptr<common_chat_peg_mapper> mapper;
+        if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
+            mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
+        } else {
+            mapper = std::make_unique<common_chat_peg_mapper>(msg);
+        }
+        mapper->is_partial_parse = is_partial;
+        mapper->from_ast(ctx.ast, result);
+    };
+
     if (result.fail()) {
         // During partial parsing, return partial results if any AST nodes were captured
         // This allows streaming to work correctly for formats like FUNC_MARKDOWN_CODE_BLOCK
@@ -1927,16 +1954,23 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // Try to extract any partial results from what was successfully parsed
             common_chat_msg msg;
             msg.role = "assistant";
-            std::unique_ptr<common_chat_peg_mapper> mapper;
-            if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-                mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-            } else {
-                mapper = std::make_unique<common_chat_peg_mapper>(msg);
-            }
-            mapper->from_ast(ctx.ast, result);
-
+            run_with_pipeline_or_mapper(msg);
             if (ctx.is_debug()) {
                 fprintf(stderr, "\nAST for partial parse (fail):\n%s\n", ctx.ast.dump().c_str());
+                fflush(stderr);
+            }
+            return msg;
+        }
+        // For grammar-file parsers, stray/unexpected model output may cause parse failures.
+        // Log a warning and return whatever content was extracted before the failure point.
+        if (params.grammar_file_parser && result.end > 0) {
+            LOG_WRN("Chat grammar parse failed at pos %zu; stray model output ignored: '%s'\n",
+                    result.end, effective_input.substr(result.end).c_str());
+            common_chat_msg msg;
+            msg.role = "assistant";
+            run_with_pipeline_or_mapper(msg);
+            if (ctx.is_debug()) {
+                fprintf(stderr, "\nAST for failed parse (grammar-file fallback):\n%s\n", ctx.ast.dump().c_str());
                 fflush(stderr);
             }
             return msg;
@@ -1947,14 +1981,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
 
     common_chat_msg msg;
     msg.role = "assistant";
-
-    std::unique_ptr<common_chat_peg_mapper> mapper;
-    if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-        mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-    } else {
-        mapper = std::make_unique<common_chat_peg_mapper>(msg);
-    }
-    mapper->from_ast(ctx.ast, result);
+    run_with_pipeline_or_mapper(msg);
 
     if (ctx.is_debug()) {
         fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());

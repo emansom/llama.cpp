@@ -15,6 +15,9 @@ class common_chat_peg_mapper {
 
     virtual ~common_chat_peg_mapper() = default;
 
+    // Set before calling from_ast to control whether partial-mode safeguards apply.
+    bool is_partial_parse = false;
+
     virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result);
     virtual void map(const common_peg_ast_node & node);
   protected:

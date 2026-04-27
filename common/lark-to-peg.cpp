@@ -364,8 +364,17 @@ struct LarkParser {
 
         if (tok.type == LarkTok::NAME) {
             consume();
+            const std::string & raw = tok.value;
+            // Magic markers injected by chat_grammar_to_peg() for PEG extraction.
+            // The chat-grammar runtime substitutes {{TOOL_SCHEMA}} and
+            // {{RESPONSE_SCHEMA}} placeholders with these names so the
+            // post-generation PEG parser matches any JSON object / value
+            // (the precise schema constraint is enforced by llguidance/GBNF
+            // at sampling time).
+            if (raw == "__JSON_OBJECT__") return builder.json_object();
+            if (raw == "__JSON_VALUE__")  return builder.json();
             // Normalize underscores to hyphens to match builder.rule() clean_name behavior
-            std::string name = tok.value;
+            std::string name = raw;
             for (char & c : name) { if (c == '_') c = '-'; }
             return builder.ref(name);
         }

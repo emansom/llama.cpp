@@ -63,6 +63,16 @@ add_library(${TARGET}
     chat-diff-analyzer.cpp
     chat-peg-parser.cpp
     chat-peg-parser.h
+    chat-formats/decoded-event.h
+    chat-formats/format-tracker.h
+    chat-formats/format-decoder.h
+    chat-formats/format-transformer.h
+    chat-formats/format-presenter.h
+    chat-formats/format-presenter.cpp
+    chat-formats/format-pipeline.h
+    chat-formats/format-pipeline.cpp
+    chat-formats/json-tagged-format.h
+    chat-formats/json-tagged-format.cpp
     chat.cpp
     chat.h
     gbnf-to-peg.cpp
