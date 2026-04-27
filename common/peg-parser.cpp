@@ -333,6 +333,62 @@ struct parser_executor {
     parser_executor(const common_peg_arena & arena, common_peg_parse_context & ctx, size_t start)
         : arena(arena), ctx(ctx), start_pos(start) {}
 
+    // Collect the leading literal(s) from a parser id (through refs, rules, tags, sequences).
+    // For a choice, collects all non-empty leading literals from each alternative.
+    // Used by the sequence parser to build ctx.next_sequence_delimiters for Until(no-delimiter) children.
+    void collect_leading_literals(common_peg_parser_id id, std::vector<std::string> & out, int depth = 0) const {
+        // Depth bound guards against pathological recursion (cycles are also
+        // separately broken by the arena's cycle detection). 16 is enough to
+        // descend through realistic chat-grammar layering: outer optional →
+        // rule → sequence → semantically-tagged rule → atomic → tag → inner
+        // sequence → rule → atomic → tag → literal.
+        if (depth > 16 || id == COMMON_PEG_INVALID_PARSER_ID || id >= arena.size()) return;
+        std::visit([&](const auto & p) {
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
+                if (!p.literal.empty()) out.push_back(p.literal);
+            } else if constexpr (std::is_same_v<T, common_peg_ref_parser>) {
+                try { collect_leading_literals(arena.get_rule(p.name), out, depth + 1); }
+                catch (...) {}
+            } else if constexpr (std::is_same_v<T, common_peg_rule_parser>) {
+                collect_leading_literals(p.child, out, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_tag_parser>) {
+                collect_leading_literals(p.child, out, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_atomic_parser>) {
+                collect_leading_literals(p.child, out, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
+                // Walk children collecting leading literals; if an item is optional/skippable
+                // (e.g. `X?` or `X*`), keep going so the leading literals of the NEXT required
+                // item are also included. Otherwise `content` before `X? Y ...` would only stop
+                // at X's first literal, even though the real input may skip X and start with Y.
+                for (const auto & cid : p.children) {
+                    collect_leading_literals(cid, out, depth + 1);
+                    bool skippable = false;
+                    std::visit([&](const auto & cp) {
+                        using CT = std::decay_t<decltype(cp)>;
+                        if constexpr (std::is_same_v<CT, common_peg_repetition_parser>) {
+                            if (cp.min_count == 0) skippable = true;
+                        } else if constexpr (std::is_same_v<CT, common_peg_epsilon_parser>) {
+                            skippable = true;
+                        }
+                    }, arena.get(cid));
+                    if (!skippable) break;
+                }
+            } else if constexpr (std::is_same_v<T, common_peg_choice_parser>) {
+                for (const auto & child : p.children) {
+                    collect_leading_literals(child, out, depth + 1);
+                }
+            } else if constexpr (std::is_same_v<T, common_peg_repetition_parser>) {
+                // Collect leading literals from the child for both required (min>0) and optional (min=0)
+                // repetitions. For optional items, this lets rest() stop before content that might
+                // follow, even if the optional part is absent. This is safe because the delimiter
+                // would only trigger if the exact delimiter string appears in the input.
+                collect_leading_literals(p.child, out, depth + 1);
+            }
+            // Epsilon, regex, and zero-or-more repetitions — no known leading literal, ignore
+        }, arena.get(id));
+    }
+
     std::string debug_indent() const { return std::string(ctx.parse_depth * 2, ' '); }
 
     std::string debug_input_snippet(size_t pos, size_t len = 60) const {
@@ -410,7 +466,32 @@ struct parser_executor {
             if (ctx.is_debug()) {
                 fprintf(stderr, "%sSEQ child %zu: %s\n", debug_indent().c_str(), i, arena.dump(child_id).c_str());
             }
+
+            // State-machine context: before parsing each child, collect the leading literals of
+            // the next sibling and expose them as next_sequence_delimiters. An Until(no-delimiter)
+            // child uses these to know where to stop — it inherits the structural context from
+            // the enclosing sequence without the delimiters being hardcoded in the grammar.
+            //
+            // For the LAST child, no inner sibling can supply a delimiter, so we keep the
+            // outer (`saved_next_delims`) context intact: a rest()/Until() at the tail of
+            // a nested rule still needs to know where the surrounding parse expects to
+            // resume (e.g. `start: turn (turn_separator turn)*` where `turn` ends in a
+            // lazy-any rule — the lazy-any must stop at `<|end|>` from the outer
+            // turn_separator).
+            const auto saved_next_delims = ctx.next_sequence_delimiters;
+            if (i + 1 < p.children.size()) {
+                ctx.next_sequence_delimiters.clear();
+                // Collect leading literals from ALL remaining siblings so that rest() nodes
+                // stop before any of the subsequent sequence elements (e.g. both an optional
+                // separator and a required closing delimiter).
+                for (size_t j = i + 1; j < p.children.size(); j++) {
+                    collect_leading_literals(p.children[j], ctx.next_sequence_delimiters);
+                }
+            }
+            // else: keep saved_next_delims unchanged so the outer context propagates.
+
             auto result = arena.parse(child_id, ctx, pos);
+            ctx.next_sequence_delimiters = saved_next_delims;
 
             if (ctx.is_debug()) {
                 fprintf(stderr, "%sSEQ child %zu: %s at %zu->%zu\n", debug_indent().c_str(), i,
@@ -496,6 +577,18 @@ struct parser_executor {
         // Try to match up to max_count times (or unlimited if max_count is -1)
         while (p.max_count == -1 || match_count < p.max_count) {
             if (pos >= ctx.input.size()) {
+                // In streaming mode, reaching EOF before hitting max_count means more
+                // matches could still appear in later tokens. Report NEED_MORE so the
+                // enclosing tag is marked partial (prevents non-monotonic streaming when
+                // e.g. an identifier regex greedily accepts a prefix at EOF).
+                if (ctx.is_streaming() && (p.max_count == -1 || match_count < p.max_count)) {
+                    ctx.parse_depth--;
+                    if (ctx.is_debug()) {
+                        fprintf(stderr, "%sREPEAT -> NEED_MORE (at EOF, count=%d)\n", debug_indent().c_str(),
+                                match_count);
+                    }
+                    return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, pos, std::move(nodes));
+                }
                 if (ctx.is_debug()) {
                     fprintf(stderr, "%sREPEAT: at end of input, count=%d\n", debug_indent().c_str(), match_count);
                 }
@@ -635,6 +728,14 @@ struct parser_executor {
             auto result = common_parse_utf8_codepoint(ctx.input, pos);
 
             if (result.status == utf8_parse_result::INCOMPLETE) {
+                // At EOF (or mid-codepoint). In streaming mode, the next token may yield
+                // more characters that also match this class, so report NEED_MORE even when
+                // match_count >= min_count. Otherwise enclosing tags (e.g. tool-arg-name)
+                // would be marked complete with a prefix value, producing non-monotonic
+                // streaming output ("a" then later "ar").
+                if (ctx.is_streaming() && (p.max_count == -1 || match_count < p.max_count)) {
+                    return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_NEED_MORE_INPUT, start_pos, pos);
+                }
                 if (match_count >= p.min_count) {
                     // We have enough matches, succeed with what we have
                     return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos);
@@ -770,8 +871,12 @@ struct parser_executor {
     }
 
     common_peg_parse_result operator()(const common_peg_until_parser & p) const {
-        trie matcher(p.delimiters);
-
+        // If this Until has no delimiters of its own, use the next_sequence_delimiters supplied
+        // by the enclosing sequence parser (state-machine context). This makes rest() nodes
+        // context-aware: they stop where the surrounding sequence grammar structure requires.
+        const std::vector<std::string> & effective_delimiters =
+            p.delimiters.empty() ? ctx.next_sequence_delimiters : p.delimiters;
+        trie matcher(effective_delimiters);
         // Scan input and check for delimiters
         size_t pos = start_pos;
         size_t last_valid_pos = start_pos;
@@ -885,8 +990,12 @@ struct parser_executor {
     common_peg_parse_result operator()(const common_peg_atomic_parser & p) {
         auto result = arena.parse(p.child, ctx, start_pos);
         if (result.need_more_input()) {
-            // Clear nodes so they don't propagate up.
-            result.nodes.clear();
+            // In streaming mode: preserve partial AST nodes so the mapper state machine
+            // can track incremental tool call state during streaming.
+            // In non-streaming mode: clear nodes to prevent spurious partial output.
+            if (!ctx.is_streaming()) {
+                result.nodes.clear();
+            }
         }
         return result;
     }
@@ -1334,8 +1443,7 @@ common_peg_parser common_peg_parser_builder::json_object() {
             choice({
                 literal("}"),
                 sequence({members, ws, literal("}")})
-            }),
-            ws
+            })
         });
     });
 }
@@ -1350,8 +1458,7 @@ common_peg_parser common_peg_parser_builder::json_array() {
             choice({
                 literal("]"),
                 sequence({elements, ws, literal("]")})
-            }),
-            ws
+            })
         });
     });
 }

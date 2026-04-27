@@ -143,9 +143,12 @@ struct common_peg_parse_result {
 };
 
 enum common_peg_parse_flags {
-    COMMON_PEG_PARSE_FLAG_NONE    = 0,
-    COMMON_PEG_PARSE_FLAG_LENIENT = 1 << 0,
-    COMMON_PEG_PARSE_FLAG_DEBUG   = 1 << 1,
+    COMMON_PEG_PARSE_FLAG_NONE      = 0,
+    COMMON_PEG_PARSE_FLAG_LENIENT   = 1 << 0,
+    COMMON_PEG_PARSE_FLAG_DEBUG     = 1 << 1,
+    // Set during partial/streaming parsing. Atomic parsers preserve partial child nodes
+    // so the mapper state machine can track incremental tool call state across steps.
+    COMMON_PEG_PARSE_FLAG_STREAMING = 1 << 2,
 };
 
 inline common_peg_parse_flags operator|(common_peg_parse_flags a, common_peg_parse_flags b) {
@@ -171,6 +174,11 @@ struct common_peg_parse_context {
 
     int parse_depth;
 
+    // Set by sequence parser to the leading literals of the next sibling before parsing each child.
+    // An Until(no-delimiter) parser uses these as stop delimiters, making it context-aware:
+    // it stops where the surrounding sequence structurally requires, without hardcoding the delimiters.
+    std::vector<std::string> next_sequence_delimiters;
+
     common_peg_parse_context(common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_NONE)
         : flags(flags), parse_depth(0) {}
 
@@ -179,6 +187,7 @@ struct common_peg_parse_context {
 
     bool is_lenient() const { return flags & COMMON_PEG_PARSE_FLAG_LENIENT; }
     bool is_debug() const { return flags & COMMON_PEG_PARSE_FLAG_DEBUG; }
+    bool is_streaming() const { return flags & COMMON_PEG_PARSE_FLAG_STREAMING; }
 };
 
 class common_peg_arena;
