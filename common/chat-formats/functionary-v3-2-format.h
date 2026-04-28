@@ -1,0 +1,18 @@
+#pragma once
+
+#include "chat-formats/json-tagged-format.h"
+
+// Functionary-v3.2 chat format: `>>>NAME\n{json_args}`. Pure JSON-tagged shape:
+// the `tool_call` rule wraps `func_name "\n" tool_args`. No explicit
+// tool-close tag — the presenter's on_finalize() commits the still-pending
+// tool call when the AST walk ends.
+
+class common_chat_functionary_v3_2_tracker     : public common_chat_json_tagged_tracker {};
+class common_chat_functionary_v3_2_decoder     : public common_chat_json_tagged_decoder {
+  public:
+    using common_chat_json_tagged_decoder::common_chat_json_tagged_decoder;
+};
+class common_chat_functionary_v3_2_transformer : public common_chat_json_tagged_transformer {
+  public:
+    using common_chat_json_tagged_transformer::common_chat_json_tagged_transformer;
+};

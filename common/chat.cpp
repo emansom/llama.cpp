@@ -1226,7 +1226,7 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
     common_chat_params data;
 
     data.prompt           = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format           = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format           = COMMON_CHAT_FORMAT_PEG_FUNCTIONARY_V3_2;
     data.preserved_tokens = {
         ">>>all",
     };

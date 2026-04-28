@@ -3,17 +3,18 @@
 # Functionary v3.2 chat grammar (Lark / llguidance)
 #
 # Covers the full output format for both tool-call and content-only responses.
-# Tool call format: >>>function_name\n{json_args}
-# The generation prompt ends with ">>>" so the model outputs the recipient name.
-# Content-only: plain text before ">>>" or no ">>>" at all.
+# The generation prompt ends with ">>>" and the model outputs:
+#   - For content-only: "all\n<text>"
+#   - For tool calls:   "<func_name>\n<json_args>" then optional ">>><func_name>\n<json_args>"+
 #
 # {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
 
-start: content_part? tool_calls?
-content_part: content ">>>"
-content: /([^>]|>[^>]|>>[^>])*/
+start: content_part | tool_calls
 
-tool_calls: tool_call+
+content_part: "all\n" content
+content: /(.|\n)*?/
+
+tool_calls: tool_call (">>>" tool_call)*
 tool_call: func_name "\n" tool_args
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/

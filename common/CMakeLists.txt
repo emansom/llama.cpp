@@ -71,6 +71,7 @@ add_library(${TARGET}
     chat-formats/format-presenter.cpp
     chat-formats/format-pipeline.h
     chat-formats/format-pipeline.cpp
+    chat-formats/functionary-v3-2-format.h
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

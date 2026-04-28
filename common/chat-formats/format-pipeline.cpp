@@ -1,5 +1,6 @@
 #include "chat-formats/format-pipeline.h"
 
+#include "chat-formats/functionary-v3-2-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/ministral-3-format.h"
 
@@ -50,6 +51,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
     bool                    is_partial_parse,
     common_reasoning_format reasoning_format) {
     switch (format) {
+        case COMMON_CHAT_FORMAT_PEG_FUNCTIONARY_V3_2:
+            return make_pipeline_default<
+                common_chat_functionary_v3_2_tracker,
+                common_chat_functionary_v3_2_decoder,
+                common_chat_functionary_v3_2_transformer>(msg, is_partial_parse, reasoning_format);
+
         case COMMON_CHAT_FORMAT_PEG_KIMI_K2:
             return make_pipeline_default<
                 common_chat_kimi_k2_tracker,
