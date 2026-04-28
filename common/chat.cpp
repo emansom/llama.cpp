@@ -1255,7 +1255,7 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
     common_chat_params data;
 
     data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format             = COMMON_CHAT_FORMAT_PEG_KIMI_K2;
     data.supports_thinking  = true;
     data.preserved_tokens  = {
         "<|tool_calls_section_begin|>",

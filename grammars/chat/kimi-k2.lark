@@ -15,8 +15,8 @@ think_block: "<think>" reasoning "</think>"
 reasoning: /(.|\n)*?/
 content: /([^<]|<(?!\|tool_calls_section_begin\|)|\<\|(?!tool_calls_section_begin\|)|\<\|t(?!ool_calls_section_begin\|))*/
 
-tool_calls_section: "<|tool_calls_section_begin|>"? tool_call+ "<|tool_calls_section_end|>"?
-tool_call: "<|tool_call_begin|>" tool_id "<|tool_call_argument_begin|>" tool_args "<|tool_call_end|>"?
+tool_calls_section: "<|tool_calls_section_begin|>" tool_call+ "<|tool_calls_section_end|>"
+tool_call: "<|tool_call_begin|>" tool_id "<|tool_call_argument_begin|>" tool_args "<|tool_call_end|>"
 tool_id: "functions." func_name ":" CALL_INDEX
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/

@@ -145,41 +145,52 @@ std::vector<common_chat_decoded_event> common_chat_json_tagged_decoder::decode(
     // remember the IDs of the children we already emitted so the visitor's
     // later traversal of those same nodes is suppressed.
     if (tag_is(node, "tool")) {
-        if (node.is_partial) {
+        // For non-partial tools we emit OPEN, NAME (and ID if the format
+        // has one), ARGS_RAW, CLOSE in one shot from the subtree. For
+        // partial tools we still emit OPEN+NAME so streaming clients can
+        // see the tool is starting; ARGS may still be incomplete and is
+        // omitted until the args subtree is non-partial.
+        if (!arena_) {
             return events;
         }
-        events.push_back({K::TOOL_OPEN, {}, {}, {}, false, false});
-        if (arena_) {
-            // Tag depth bound: tool > tool-id rule > tool-id tag > func-name
-            // rule > tool-name tag is 4 levels; the default of 3 is too
-            // shallow. tool > tool-args rule > tool-args tag is only 2.
-            constexpr int kMaxTagSearchDepth = 6;
-            auto name_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_NAME, kMaxTagSearchDepth);
-            auto id_id   = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ID,   kMaxTagSearchDepth);
-            auto args_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ARGS, kMaxTagSearchDepth);
-            if (id_id != COMMON_PEG_INVALID_AST_ID) {
-                const auto & id_node = arena_->get(id_id);
-                if (!id_node.is_partial) {
-                    events.push_back({K::TOOL_ID, trim(id_node.text), {}, {}, false, false});
-                }
-                handled_ids_.insert(id_id);
-            }
-            if (name_id != COMMON_PEG_INVALID_AST_ID) {
-                const auto & name_node = arena_->get(name_id);
-                if (!name_node.is_partial) {
-                    events.push_back({K::TOOL_NAME, trim(name_node.text), {}, {}, false, false});
-                }
-                handled_ids_.insert(name_id);
-            }
-            if (args_id != COMMON_PEG_INVALID_AST_ID) {
-                const auto & args_node = arena_->get(args_id);
-                if (!args_node.is_partial) {
-                    events.push_back({K::TOOL_ARGS_RAW, std::string(args_node.text), {}, {}, false, false});
-                }
-                handled_ids_.insert(args_id);
-            }
+        // Tag depth bound: tool > tool-id rule > tool-id tag > func-name
+        // rule > tool-name tag is 4 levels; the default of 3 is too
+        // shallow. tool > tool-args rule > tool-args tag is only 2.
+        constexpr int kMaxTagSearchDepth = 6;
+        auto name_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_NAME, kMaxTagSearchDepth);
+        auto id_id   = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ID,   kMaxTagSearchDepth);
+        auto args_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ARGS, kMaxTagSearchDepth);
+        // Partial tool with no name yet — wait. The tracker still observes
+        // the partial 'tool' node (and stays IN_TOOL_CALL), but we have
+        // nothing useful to commit until the name appears.
+        if (node.is_partial && name_id == COMMON_PEG_INVALID_AST_ID) {
+            return events;
         }
-        events.push_back({K::TOOL_CLOSE, {}, {}, {}, false, false});
+        events.push_back({K::TOOL_OPEN, {}, {}, {}, false, node.is_partial});
+        if (id_id != COMMON_PEG_INVALID_AST_ID) {
+            const auto & id_node = arena_->get(id_id);
+            if (!id_node.is_partial) {
+                events.push_back({K::TOOL_ID, trim(id_node.text), {}, {}, false, false});
+            }
+            handled_ids_.insert(id_id);
+        }
+        if (name_id != COMMON_PEG_INVALID_AST_ID) {
+            const auto & name_node = arena_->get(name_id);
+            if (!name_node.is_partial) {
+                events.push_back({K::TOOL_NAME, trim(name_node.text), {}, {}, false, false});
+            }
+            handled_ids_.insert(name_id);
+        }
+        if (args_id != COMMON_PEG_INVALID_AST_ID) {
+            const auto & args_node = arena_->get(args_id);
+            if (!args_node.is_partial) {
+                events.push_back({K::TOOL_ARGS_RAW, std::string(args_node.text), {}, {}, false, false});
+            }
+            handled_ids_.insert(args_id);
+        }
+        if (!node.is_partial) {
+            events.push_back({K::TOOL_CLOSE, {}, {}, {}, false, false});
+        }
         return events;
     }
     if (handled_ids_.count(node.id)) {
