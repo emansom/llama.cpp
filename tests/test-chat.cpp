@@ -1053,8 +1053,9 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
     }
     assert_msg_equals(tc.expect, msg_accum, true);
 
-    // Test grammar if present in params
-    if (!parser.params_.grammar.empty()) {
+    // Test grammar if present in params (skip Lark grammars — they route to llguidance, not GBNF)
+    const bool is_lark_grammar_str = parser.params_.grammar.rfind("%llguidance", 0) == 0;
+    if (!parser.params_.grammar.empty() && !is_lark_grammar_str) {
         auto grammar = build_grammar(parser.params_.grammar);
         if (!grammar) {
             throw std::runtime_error("Failed to build grammar: " + parser.params_.grammar);
@@ -4457,6 +4458,7 @@ int main(int argc, char ** argv) {
     }
 
     if (only_run_filtered) {
+        common_chat_grammar_init("grammars/chat");
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All template tests passed!" << '\n';
         return 0;
@@ -4512,6 +4514,9 @@ int main(int argc, char ** argv) {
         test_convert_responses_to_chatcmpl();
         test_developer_role_to_system_workaround();
         test_reka_edge_common_path();
+        // Load model chat grammar files so PEG parsers work in tests.
+        // Tests run from the llama.cpp/ repo root, so grammars are at grammars/chat.
+        common_chat_grammar_init("grammars/chat");
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }
