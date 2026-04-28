@@ -1164,10 +1164,11 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
             sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
         }
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
@@ -1209,10 +1210,11 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
@@ -1236,10 +1238,11 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
         const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
             ? inject_tool_schema(base_grammar, inputs.tools)
             : base_grammar;
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
@@ -1274,10 +1277,11 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
         const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
             ? inject_tool_schema(base_grammar, inputs.tools)
             : base_grammar;
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
@@ -1310,10 +1314,11 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
 
     {
         const auto base_grammar = common_chat_grammar_get("lfm2");
-        data.grammar          = base_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
     return data;
 }
@@ -1343,10 +1348,11 @@ static common_chat_params common_chat_params_init_lfm2_5(const common_chat_templ
 
     {
         const auto base_grammar = common_chat_grammar_get("lfm2-5");
-        data.grammar          = base_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
@@ -1373,10 +1379,11 @@ static common_chat_params common_chat_params_init_gigachat_v3(
         const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
             ? inject_tool_schema(base_grammar, inputs.tools)
             : base_grammar;
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
     return data;
 }
@@ -1406,10 +1413,11 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
     }
 
     return data;
