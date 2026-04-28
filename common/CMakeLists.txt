@@ -73,6 +73,7 @@ add_library(${TARGET}
     chat-formats/format-pipeline.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
+    chat-formats/ministral-3-format.h
     chat.cpp
     chat.h
     gbnf-to-peg.cpp

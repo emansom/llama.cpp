@@ -1,0 +1,28 @@
+%llguidance {}
+
+# Ministral-3 chat grammar — parser-side variant for `reasoning_format = NONE`.
+#
+# Mirrors `ministral-3.lark` for tool-call / response-format / content turn
+# shapes, but treats the `[THINK]...[/THINK]` block as content (markers
+# preserved verbatim) rather than extracting it as reasoning. Selected by
+# `init_ministral_3` when `inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE`.
+# The sampling grammar is unchanged (llguidance still constrains the model
+# to the full Ministral-3 format).
+#
+# {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
+
+start: analysis_content? content (tool_call_section | response_format | )
+analysis_content: "[THINK]" /(.|\n)*?/ "[/THINK]"
+content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/
+
+tool_call_section: tool_call+
+tool_call: "[TOOL_CALLS]" func_name "[ARGS]" tool_args
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}
+
+response_format: "```json\n" response_content "\n```"
+response_content: {{RESPONSE_SCHEMA}}
+
+%ignore " "

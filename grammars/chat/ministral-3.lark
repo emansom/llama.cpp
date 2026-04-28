@@ -13,10 +13,10 @@
 start: think_block? content (tool_call_section | response_format | )
 think_block: "[THINK]" reasoning "[/THINK]"
 reasoning: /(.|\n)*?/
-content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/ 
+content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/
 
-tool_call_section: "[TOOL_CALLS]" tool_call+
-tool_call: "[" func_name "]" "[ARGS]" tool_args
+tool_call_section: tool_call+
+tool_call: "[TOOL_CALLS]" func_name "[ARGS]" tool_args
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 tool_args: {{TOOL_SCHEMA}}

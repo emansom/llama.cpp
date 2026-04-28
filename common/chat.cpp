@@ -1074,7 +1074,7 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
     data.thinking_start_tag = "[THINK]";
     data.thinking_end_tag   = "[/THINK]";
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_MINISTRAL_3;
     data.preserved_tokens  = {
         "[THINK]",
         "[/THINK]",
@@ -1083,19 +1083,30 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
     };
 
     // Grammar file covers tool-call, response-format, and content-only paths.
+    // The sampling-time grammar is always the full Ministral-3 grammar
+    // (llguidance still constrains the model to emit `[THINK]…[/THINK]` blocks
+    // when the model decides to think). The PEG parser-side grammar swaps to
+    // the no-reasoning variant when reasoning_format=NONE, so the THINK block
+    // surfaces as content (markers preserved) rather than reasoning_content.
     {
-        const auto base_grammar = common_chat_grammar_get("ministral-3");
-        std::string sampling_grammar = base_grammar;
+        const auto sampling_base = common_chat_grammar_get("ministral-3");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("ministral-3-no-reasoning")
+            : sampling_base;
+
+        std::string sampling_grammar = sampling_base;
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
         if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
             sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
         }
-        data.grammar          = sampling_grammar;
-        data.parser           = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_lazy     = false;
-        data.grammar_triggers = {};
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
     }
 
     return data;

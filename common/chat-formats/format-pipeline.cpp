@@ -1,5 +1,7 @@
 #include "chat-formats/format-pipeline.h"
 
+#include "chat-formats/ministral-3-format.h"
+
 void common_chat_format_pipeline::run(const common_peg_ast_arena & arena,
                                       const common_peg_parse_result & result) {
     if (!valid()) {
@@ -46,9 +48,14 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
     common_chat_msg &       msg,
     bool                    is_partial_parse,
     common_reasoning_format reasoning_format) {
-    (void)format;
-    (void)msg;
-    (void)is_partial_parse;
-    (void)reasoning_format;
-    return common_chat_format_pipeline{};
+    switch (format) {
+        case COMMON_CHAT_FORMAT_PEG_MINISTRAL_3:
+            return make_pipeline_default<
+                common_chat_ministral_3_tracker,
+                common_chat_ministral_3_decoder,
+                common_chat_ministral_3_transformer>(msg, is_partial_parse, reasoning_format);
+
+        default:
+            return common_chat_format_pipeline{};
+    }
 }
