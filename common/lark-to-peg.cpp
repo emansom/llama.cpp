@@ -590,10 +590,12 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
 
         // Apply semantic tags based on conventional rule names (drives common_chat_peg_mapper)
         const std::string & n = normalized_name;
-        if (n == "tool-call" || n == "tool-calls") {
+        if (n == "tool-call") {
             body = builder.tag("tool", body);
         } else if (n == "func-name" || n == "tool-name" || n == "function-name") {
             body = builder.tag("tool-name", body);
+        } else if (n == "tool-id") {
+            body = builder.tag("tool-id", body);
         } else if (n == "tool-args" || n == "arguments" || n == "args") {
             body = builder.tag("tool-args", body);
         } else if (n == "content" || n == "analysis-content" || n == "response-content") {

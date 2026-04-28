@@ -150,8 +150,20 @@ std::vector<common_chat_decoded_event> common_chat_json_tagged_decoder::decode(
         }
         events.push_back({K::TOOL_OPEN, {}, {}, {}, false, false});
         if (arena_) {
-            auto name_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_NAME);
-            auto args_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ARGS);
+            // Tag depth bound: tool > tool-id rule > tool-id tag > func-name
+            // rule > tool-name tag is 4 levels; the default of 3 is too
+            // shallow. tool > tool-args rule > tool-args tag is only 2.
+            constexpr int kMaxTagSearchDepth = 6;
+            auto name_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_NAME, kMaxTagSearchDepth);
+            auto id_id   = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ID,   kMaxTagSearchDepth);
+            auto args_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ARGS, kMaxTagSearchDepth);
+            if (id_id != COMMON_PEG_INVALID_AST_ID) {
+                const auto & id_node = arena_->get(id_id);
+                if (!id_node.is_partial) {
+                    events.push_back({K::TOOL_ID, trim(id_node.text), {}, {}, false, false});
+                }
+                handled_ids_.insert(id_id);
+            }
             if (name_id != COMMON_PEG_INVALID_AST_ID) {
                 const auto & name_node = arena_->get(name_id);
                 if (!name_node.is_partial) {
