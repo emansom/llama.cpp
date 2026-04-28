@@ -358,39 +358,85 @@ struct LarkParser {
             if (!pat.empty() && (pat[0] == '(' || pat.find('|') != std::string::npos)) {
                 return builder.rest();
             }
-            // Sequence of character classes: split `[class1][class2]…` into a
-            // sequence of chars() calls so each class is parsed correctly.
-            // Each class may be followed by a quantifier `*`, `+`, or `?`.
-            if (!pat.empty() && pat[0] == '[') {
-                std::vector<common_peg_parser> parts;
+            // Sequence of character classes (and optional simple literals/groups)
+            // Walk the pattern token by token, decoding:
+            //   - '[…][quant?]'  -> chars(class) with quantifier
+            //   - 'literal'      -> literal(string) (a single non-special char)
+            //   - '\\.'          -> literal(string) for the escaped char
+            //   - '(\.[0-9]+)?'  -> recursively parse the inner shape with quant
+            // Anything we can't decode falls back to rest() so llguidance still
+            // enforces the precise shape at sampling time.
+            std::function<bool(const std::string &, std::vector<common_peg_parser>&)> parse_sequence_shape =
+                [&](const std::string & p, std::vector<common_peg_parser>& parts) -> bool {
                 size_t i = 0;
-                while (i < pat.size()) {
-                    if (pat[i] != '[') {
-                        // Not at the start of a class — fall back to whole-pattern chars()
-                        parts.clear();
-                        break;
+                while (i < p.size()) {
+                    int  min_n = 1;
+                    int  max_n = 1;
+                    auto apply_quant = [&](size_t & next) {
+                        if (next < p.size()) {
+                            if      (p[next] == '*') { min_n = 0; max_n = -1; ++next; }
+                            else if (p[next] == '+') { min_n = 1; max_n = -1; ++next; }
+                            else if (p[next] == '?') { min_n = 0; max_n = 1;  ++next; }
+                        }
+                    };
+                    if (p[i] == '[') {
+                        size_t end = p.find(']', i + 1);
+                        if (end == std::string::npos) return false;
+                        std::string cls = p.substr(i, end - i + 1);
+                        size_t next = end + 1;
+                        apply_quant(next);
+                        parts.push_back(builder.chars(cls, min_n, max_n));
+                        i = next;
+                    } else if (p[i] == '(') {
+                        size_t depth = 1;
+                        size_t end   = i + 1;
+                        while (end < p.size() && depth > 0) {
+                            if      (p[end] == '\\' && end + 1 < p.size()) end += 2;
+                            else if (p[end] == '(') { ++depth; ++end; }
+                            else if (p[end] == ')') { --depth; ++end; }
+                            else                    ++end;
+                        }
+                        if (depth != 0) return false;
+                        std::string inner = p.substr(i + 1, end - i - 2);
+                        size_t next = end;
+                        apply_quant(next);
+                        std::vector<common_peg_parser> inner_parts;
+                        if (!parse_sequence_shape(inner, inner_parts)) return false;
+                        common_peg_parser inner_p = inner_parts.size() == 1
+                            ? inner_parts[0]
+                            : builder.sequence(inner_parts);
+                        if (min_n == 1 && max_n == 1) {
+                            parts.push_back(inner_p);
+                        } else {
+                            parts.push_back(builder.repeat(inner_p, min_n, max_n));
+                        }
+                        i = next;
+                    } else if (p[i] == '\\' && i + 1 < p.size()) {
+                        std::string lit(1, p[i + 1]);
+                        size_t next = i + 2;
+                        apply_quant(next);
+                        common_peg_parser lit_p = builder.literal(lit);
+                        if (min_n == 1 && max_n == 1) parts.push_back(lit_p);
+                        else                          parts.push_back(builder.repeat(lit_p, min_n, max_n));
+                        i = next;
+                    } else if (p[i] != '*' && p[i] != '+' && p[i] != '?' && p[i] != '|' && p[i] != '.') {
+                        std::string lit(1, p[i]);
+                        size_t next = i + 1;
+                        apply_quant(next);
+                        common_peg_parser lit_p = builder.literal(lit);
+                        if (min_n == 1 && max_n == 1) parts.push_back(lit_p);
+                        else                          parts.push_back(builder.repeat(lit_p, min_n, max_n));
+                        i = next;
+                    } else {
+                        return false;
                     }
-                    size_t end = pat.find(']', i + 1);
-                    if (end == std::string::npos) {
-                        parts.clear();
-                        break;
-                    }
-                    std::string cls = pat.substr(i, end - i + 1);
-                    int min_n = 1;
-                    int max_n = 1;
-                    size_t next = end + 1;
-                    if (next < pat.size()) {
-                        if (pat[next] == '*') { min_n = 0; max_n = -1; ++next; }
-                        else if (pat[next] == '+') { min_n = 1; max_n = -1; ++next; }
-                        else if (pat[next] == '?') { min_n = 0; max_n = 1;  ++next; }
-                    }
-                    parts.push_back(builder.chars(cls, min_n, max_n));
-                    i = next;
                 }
-                if (!parts.empty()) {
-                    if (parts.size() == 1) return parts[0];
-                    return builder.sequence(parts);
-                }
+                return true;
+            };
+            std::vector<common_peg_parser> parts;
+            if (!pat.empty() && parse_sequence_shape(pat, parts) && !parts.empty()) {
+                if (parts.size() == 1) return parts[0];
+                return builder.sequence(parts);
             }
             // Single character class with no quantifier — use chars()
             return builder.chars(pat);
@@ -592,12 +638,20 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
         const std::string & n = normalized_name;
         if (n == "tool-call") {
             body = builder.tag("tool", body);
+        } else if (n == "tool-open") {
+            body = builder.tag("tool-open", body);
+        } else if (n == "tool-close") {
+            body = builder.tag("tool-close", body);
         } else if (n == "func-name" || n == "tool-name" || n == "function-name") {
             body = builder.tag("tool-name", body);
         } else if (n == "tool-id") {
             body = builder.tag("tool-id", body);
         } else if (n == "tool-args" || n == "arguments" || n == "args") {
             body = builder.tag("tool-args", body);
+        } else if (n == "tool-arg-name" || n == "arg-name") {
+            body = builder.tag("tool-arg-name", body);
+        } else if (n == "tool-arg-value" || n == "arg-value") {
+            body = builder.tag("tool-arg-value", body);
         } else if (n == "content" || n == "analysis-content" || n == "response-content") {
             // `analysis-content` is the no-reasoning variant: the rule body
             // covers `[THINK]…[/THINK]` text that should surface as content
