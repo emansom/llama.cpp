@@ -3,6 +3,9 @@
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
+#include "peg-parser.h"
+
+#include <unordered_set>
 
 // Family base for JSON-tagged chat formats — i.e. formats whose grammar uses
 // the conventional `tool-open` / `tool-name` / `tool-id` / `tool-args` /
@@ -26,6 +29,14 @@ class common_chat_json_tagged_decoder : public common_chat_format_decoder {
     using common_chat_format_decoder::common_chat_format_decoder;
 
     std::vector<common_chat_decoded_event> decode(const common_peg_ast_node & node) override;
+
+    void set_arena(const common_peg_ast_arena * arena) override { arena_ = arena; }
+
+  protected:
+    const common_peg_ast_arena * arena_ = nullptr;
+    // AST IDs whose events were already emitted as part of a parent "tool"
+    // node visit; the later child-walk visit must not double-emit.
+    std::unordered_set<common_peg_ast_id> handled_ids_;
 };
 
 class common_chat_json_tagged_transformer : public common_chat_format_transformer {

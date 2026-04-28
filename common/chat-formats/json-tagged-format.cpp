@@ -47,6 +47,18 @@ bool has_tool_name_descendant(const common_peg_ast_node & node) {
 }  // namespace
 
 void common_chat_json_tagged_tracker::advance(const common_peg_ast_node & node) {
+    // Lark-to-PEG wraps `tool_call`-named rules with the "tool" tag — a
+    // single AST node spans the whole call. Treat it like an open/close
+    // pair: enter IN_TOOL_CALL on visit, leave for DONE since the visitor
+    // moves on to the next sibling after the subtree.
+    if (tag_is(node, "tool")) {
+        if (!node.is_partial) {
+            state_ = common_chat_format_state::DONE;
+        } else {
+            state_ = common_chat_format_state::IN_TOOL_CALL;
+        }
+        return;
+    }
     if (tag_is(node, common_chat_peg_builder::TOOL_OPEN)) {
         if (!node.is_partial || has_tool_name_descendant(node)) {
             state_ = common_chat_format_state::IN_TOOL_CALL;
@@ -123,6 +135,42 @@ std::vector<common_chat_decoded_event> common_chat_json_tagged_decoder::decode(
     }
     if (tag_is(node, common_chat_peg_builder::CONTENT)) {
         events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
+        return events;
+    }
+    // Lark-to-PEG wraps `tool_call`-named rules with the "tool" tag (the body
+    // contains tool-name and tool-args children). The grammar-file-driven
+    // pipeline encounters this whole-tool-call node directly — there is no
+    // standalone `tool-open` token in the wire format. Synthesize the
+    // open/name/args/close event sequence from the subtree once, and
+    // remember the IDs of the children we already emitted so the visitor's
+    // later traversal of those same nodes is suppressed.
+    if (tag_is(node, "tool")) {
+        if (node.is_partial) {
+            return events;
+        }
+        events.push_back({K::TOOL_OPEN, {}, {}, {}, false, false});
+        if (arena_) {
+            auto name_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_NAME);
+            auto args_id = arena_->find_by_tag(node, common_chat_peg_builder::TOOL_ARGS);
+            if (name_id != COMMON_PEG_INVALID_AST_ID) {
+                const auto & name_node = arena_->get(name_id);
+                if (!name_node.is_partial) {
+                    events.push_back({K::TOOL_NAME, trim(name_node.text), {}, {}, false, false});
+                }
+                handled_ids_.insert(name_id);
+            }
+            if (args_id != COMMON_PEG_INVALID_AST_ID) {
+                const auto & args_node = arena_->get(args_id);
+                if (!args_node.is_partial) {
+                    events.push_back({K::TOOL_ARGS_RAW, std::string(args_node.text), {}, {}, false, false});
+                }
+                handled_ids_.insert(args_id);
+            }
+        }
+        events.push_back({K::TOOL_CLOSE, {}, {}, {}, false, false});
+        return events;
+    }
+    if (handled_ids_.count(node.id)) {
         return events;
     }
     if (tag_is(node, common_chat_peg_builder::TOOL_OPEN)) {
