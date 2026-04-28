@@ -358,7 +358,41 @@ struct LarkParser {
             if (!pat.empty() && (pat[0] == '(' || pat.find('|') != std::string::npos)) {
                 return builder.rest();
             }
-            // Simple character class — use chars()
+            // Sequence of character classes: split `[class1][class2]…` into a
+            // sequence of chars() calls so each class is parsed correctly.
+            // Each class may be followed by a quantifier `*`, `+`, or `?`.
+            if (!pat.empty() && pat[0] == '[') {
+                std::vector<common_peg_parser> parts;
+                size_t i = 0;
+                while (i < pat.size()) {
+                    if (pat[i] != '[') {
+                        // Not at the start of a class — fall back to whole-pattern chars()
+                        parts.clear();
+                        break;
+                    }
+                    size_t end = pat.find(']', i + 1);
+                    if (end == std::string::npos) {
+                        parts.clear();
+                        break;
+                    }
+                    std::string cls = pat.substr(i, end - i + 1);
+                    int min_n = 1;
+                    int max_n = 1;
+                    size_t next = end + 1;
+                    if (next < pat.size()) {
+                        if (pat[next] == '*') { min_n = 0; max_n = -1; ++next; }
+                        else if (pat[next] == '+') { min_n = 1; max_n = -1; ++next; }
+                        else if (pat[next] == '?') { min_n = 0; max_n = 1;  ++next; }
+                    }
+                    parts.push_back(builder.chars(cls, min_n, max_n));
+                    i = next;
+                }
+                if (!parts.empty()) {
+                    if (parts.size() == 1) return parts[0];
+                    return builder.sequence(parts);
+                }
+            }
+            // Single character class with no quantifier — use chars()
             return builder.chars(pat);
         }
 
@@ -562,7 +596,12 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
             body = builder.tag("tool-name", body);
         } else if (n == "tool-args" || n == "arguments" || n == "args") {
             body = builder.tag("tool-args", body);
-        } else if (n == "content") {
+        } else if (n == "content" || n == "analysis-content" || n == "response-content") {
+            // `analysis-content` is the no-reasoning variant: the rule body
+            // covers `[THINK]…[/THINK]` text that should surface as content
+            // (markers preserved verbatim) rather than as reasoning.
+            // `response-content` is the structured response_format payload
+            // (e.g. JSON between code fences) that surfaces as content.
             body = builder.tag("content", body);
         } else if (n == "reasoning" || n == "thought") {
             body = builder.tag("reasoning", body);
