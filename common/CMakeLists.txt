@@ -72,6 +72,8 @@ add_library(${TARGET}
     chat-formats/format-pipeline.h
     chat-formats/format-pipeline.cpp
     chat-formats/functionary-v3-2-format.h
+    chat-formats/gemma4-format.h
+    chat-formats/gemma4-format.cpp
     chat-formats/gigachat-v3-format.h
     chat-formats/glm-4-7-flash-format.h
     chat-formats/glm-4-7-flash-format.cpp

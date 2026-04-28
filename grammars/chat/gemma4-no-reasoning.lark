@@ -1,18 +1,24 @@
 %llguidance {}
 
-# Gemma 4 chat grammar (Lark / llguidance)
+# Gemma 4 chat grammar — parser-side variant for `reasoning_format = NONE`.
 #
-# Covers the full output format for tool-call, content-only, and response_format responses.
-# Tool call format:    <|tool_call>call:FUNC_NAME{key:<|"|>val<|"|>,...}<tool_call|>
-# Response format:     think_block? ```json\n{schema}\n```
-# Think format:        <|channel>thought ...content... <channel|>
+# Mirrors `gemma4.lark` for tool-call and response-format turn shapes,
+# but treats the `<|channel>thought ... <channel|>` block as content
+# (markers preserved verbatim) rather than extracting it as reasoning.
+# Selected by `init_gemma4` when
+# `inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE`.
 #
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
+# The thought-block-as-content shape uses the `analysis_content` rule
+# convention introduced for the no-reasoning variants: the body is captured
+# in a tagged 'analysis_content' rule, the literal channel-marker open and
+# close are matched in the enclosing 'think_block' rule and re-injected by
+# the format consumer's analysis_marker_open / analysis_marker_close.
 start: think_block? content (tool_calls | response_format | )
+think_block: "<|channel>thought" analysis_content "<channel|>"
+analysis_content: /(.|\n)*?/
 content: /([^<`]|<[^|]|<\|[^tc]|<\|t[^o]|<\|to[^o]|<\|too[^l]|<\|tool[^_]|<\|tool_[^c]|`[^`]|``[^`])*/
-think_block: "<|channel>thought" reasoning "<channel|>"
-reasoning: /(.|\n)*?/
 
 tool_calls: tool_call+
 tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"

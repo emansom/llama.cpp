@@ -1205,16 +1205,20 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // Grammar file covers think-block, tool-call, response-format, and content-only paths.
     // Gemma4 uses a custom dict format — no schema injection for tool args.
     {
-        const auto base_grammar = common_chat_grammar_get("gemma4");
-        std::string sampling_grammar = base_grammar;
+        const auto sampling_base = common_chat_grammar_get("gemma4");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("gemma4-no-reasoning")
+            : sampling_base;
+        std::string sampling_grammar = sampling_base;
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
         data.grammar             = sampling_grammar;
-        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.parser              = chat_grammar_to_peg(parser_base).save();
         data.grammar_file_parser = true;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
     }
 
     return data;
