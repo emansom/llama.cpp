@@ -1388,6 +1388,63 @@ static common_chat_params common_chat_params_init_gigachat_v3(
     return data;
 }
 
+// GLM-4.7-Flash format: <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>
+//
+// The chat template ends the generation prompt with either `<think>`
+// (forced-open thinking) or `<think></think>` (thinking disabled). We set
+// generation_prompt accordingly so the parser sees a complete `<think>...</think>`
+// span in both modes — the grammar requires the closing `</think>` and never
+// sees an unclosed think_block.
+static common_chat_params common_chat_params_init_glm_4_7_flash(const common_chat_template &    tmpl,
+                                                                const autoparser::generation_params & inputs) {
+    common_chat_params data;
+
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.format            = COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH;
+    data.supports_thinking = true;
+    data.preserved_tokens  = {
+        "<tool_call>",
+        "</tool_call>",
+        "<arg_key>",
+        "</arg_key>",
+        "<arg_value>",
+        "</arg_value>",
+        "<think>",
+        "</think>",
+    };
+
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+
+    {
+        const auto base_grammar = common_chat_grammar_get("glm-4-7-flash");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = false;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+
+        // Detect which thinking prefix the template appended to the prompt
+        // and set generation_prompt to match. With grammar_file_parser=false
+        // the generation_prompt is prepended to the parser input, so the
+        // grammar always sees a complete `<think>...</think>` span even when
+        // the template ran in forced-open thinking mode.
+        const auto & think_start = data.thinking_start_tag;  // "<think>"
+        const auto & think_end   = data.thinking_end_tag;    // "</think>"
+        if (string_ends_with(data.prompt, think_end)) {
+            data.generation_prompt = think_start + think_end;
+        } else if (string_ends_with(data.prompt, think_start)) {
+            data.generation_prompt = think_start;
+        }
+    }
+    return data;
+}
+
 static common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_template &    tmpl,
                                                                  const autoparser::generation_params & inputs) {
     common_chat_params data;
@@ -1700,6 +1757,16 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         return common_chat_params_init_deepseek_v3_2(tmpl, params);
     }
 
+    // GLM-4.7-Flash format detection — emits arg tags inline (no newlines):
+    //   `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>`.
+    // GLM-4.6 uses the same tags but with newlines between them, so the
+    // distinguishing marker is the inline pair `</arg_key><arg_value>`.
+    if (src.find("</arg_key><arg_value>") != std::string::npos &&
+        src.find("<tool_call>") != std::string::npos) {
+        LOG_DBG("Using specialized template: GLM-4.7-Flash\n");
+        return common_chat_params_init_glm_4_7_flash(tmpl, params);
+    }
+
     // Gemma4 format detection
     if (src.find("'<|tool_call>call:'") != std::string::npos) {
         if (src.find("{#- OpenAI Chat Completions:") == std::string::npos) {
@@ -1804,7 +1871,13 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
     }
 
     if (auto result = common_chat_try_specialized_template(tmpl, src, params)) {
-        result->generation_prompt = params.generation_prompt;
+        // Preserve any generation_prompt the per-format init set explicitly
+        // (e.g. GLM-4.7-Flash uses '<think>' or '<think></think>' so the
+        // grammar always sees a complete think_block). Otherwise default to
+        // the auto-detected prompt.
+        if (result->generation_prompt.empty()) {
+            result->generation_prompt = params.generation_prompt;
+        }
         return *result;
     }
 
@@ -1995,6 +2068,17 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             return msg;
         }
         throw std::runtime_error(std::string("Failed to parse input at pos ") + std::to_string(result.end) + ": " +
+                                 effective_input.substr(result.end));
+    }
+
+    // Stray bytes after a successful (complete) parse mean the model emitted
+    // something the grammar didn't account for. The grammar is the contract,
+    // so that's a hard error — same throw path as the parse-fail branch
+    // above, anchored in `effective_input` coordinates (#20424).
+    if (!is_partial && result.end < effective_input.size()) {
+        throw std::runtime_error(std::string("Chat grammar parse left ") +
+                                 std::to_string(effective_input.size() - result.end) +
+                                 " bytes unconsumed at pos " + std::to_string(result.end) + ": " +
                                  effective_input.substr(result.end));
     }
 

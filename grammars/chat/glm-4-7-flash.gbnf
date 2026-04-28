@@ -1,0 +1,28 @@
+# GLM-4.7-Flash chat grammar (GBNF)
+#
+# Tool call wire format:
+#   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...</tool_call>
+#
+# `<arg_key>` / `<arg_value>` pairs are inline (no whitespace separators) —
+# the marker that distinguishes GLM-4.7-Flash from GLM-4.6. Tools with no
+# required args may produce a bare `<tool_call>NAME</tool_call>`.
+
+root ::= think-block content tool-call-block?
+think-block ::= "<think>" reasoning "</think>"
+reasoning ::= [^<]*
+content ::= ([^<] | "<" [^t/])*
+
+tool-call-block ::= tool-call ( tool-call )*
+tool-call ::= tool-open func-name tool-arg* tool-close
+tool-open  ::= "<tool_call>"
+tool-close ::= "</tool_call>"
+
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+
+tool-arg ::= arg-key-open arg-name arg-key-close arg-value-open arg-value arg-value-close
+arg-key-open    ::= "<arg_key>"
+arg-key-close   ::= "</arg_key>"
+arg-value-open  ::= "<arg_value>"
+arg-value-close ::= "</arg_value>"
+arg-name ::= [^<]+
+arg-value ::= ([^<] | "<" [^/] | "</" [^a])*

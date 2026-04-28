@@ -1,0 +1,43 @@
+%llguidance {}
+
+# GLM-4.7-Flash chat grammar (Lark / llguidance)
+#
+# Tool call wire format (per the in-template format documentation):
+#
+#   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...<arg_key>Kn</arg_key><arg_value>Vn</arg_value></tool_call>
+#
+# The `<arg_key>...</arg_key><arg_value>...</arg_value>` pairs are inline
+# (no whitespace separators), which is what distinguishes GLM-4.7-Flash from
+# GLM-4.6.
+#
+# Tools with no required args may produce a bare `<tool_call>NAME</tool_call>`.
+#
+# Multiple parallel tool calls appear as consecutive `<tool_call>...</tool_call>`
+# blocks back-to-back.
+#
+# Reasoning is wrapped in `<think>...</think>`. The chat template ends the
+# generation prompt with either `<think>` (forced-open thinking) or `<think></think>`
+# (thinking disabled). The init function prepends that exact prefix to the
+# model output so the parser sees a complete `<think>...</think>` block in
+# both modes — closing tokens stay required.
+#
+# The `<tool_call>` literal lives directly in `tool_call_block`'s body so the
+# Until() that backs `content` can collect it as a leading delimiter without
+# having to traverse too many wrapper layers.
+
+start: think_block content tool_call_block?
+think_block: "<think>" reasoning "</think>"
+reasoning: /(.|\n)*?/
+content: /(.|\n)*?/
+
+tool_call_block: tool_call (tool_call)*
+tool_call: tool_open func_name tool_arg* tool_close
+tool_open:  "<tool_call>"
+tool_close: "</tool_call>"
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+tool_arg: "<arg_key>" arg_name "</arg_key>" "<arg_value>" arg_value "</arg_value>"
+arg_name: /[^<]+/
+arg_value: /(.|\n)*?/
