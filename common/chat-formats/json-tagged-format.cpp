@@ -133,7 +133,34 @@ std::vector<common_chat_decoded_event> common_chat_json_tagged_decoder::decode(
         events.push_back({K::REASONING_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
         return events;
     }
+    // The `analysis-content` rule wraps the BODY of a no-reasoning think block
+    // (e.g. `[THINK]…[/THINK]`) without including the literal markers in the
+    // tag span. To preserve the wire-shape markers in the surfaced content,
+    // synthesize them around the body text on the rule visit, then suppress
+    // the inner `tag content` child so it doesn't double-emit. The marker
+    // strings come from the per-format wire shape; this decoder defaults to
+    // Ministral-3's '[THINK]' / '[/THINK]'. Per-format subclasses can
+    // override analysis_marker_open() / analysis_marker_close() if they
+    // emit the no-reasoning think-block with different literals.
+    if (node.rule == "analysis-content") {
+        if (!node.is_partial) {
+            events.push_back({K::CONTENT_TEXT, analysis_marker_open(), {}, {}, false, false});
+            events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, false});
+            events.push_back({K::CONTENT_TEXT, analysis_marker_close(), {}, {}, false, false});
+        }
+        if (arena_) {
+            constexpr int kMaxTagSearchDepth = 4;
+            auto inner_id = arena_->find_by_tag(node, common_chat_peg_builder::CONTENT, kMaxTagSearchDepth);
+            if (inner_id != COMMON_PEG_INVALID_AST_ID) {
+                handled_ids_.insert(inner_id);
+            }
+        }
+        return events;
+    }
     if (tag_is(node, common_chat_peg_builder::CONTENT)) {
+        if (handled_ids_.count(node.id)) {
+            return events;
+        }
         events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
         return events;
     }

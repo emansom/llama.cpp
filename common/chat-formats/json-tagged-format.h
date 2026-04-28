@@ -32,10 +32,18 @@ class common_chat_json_tagged_decoder : public common_chat_format_decoder {
 
     void set_arena(const common_peg_ast_arena * arena) override { arena_ = arena; }
 
+    // Wire-shape markers around the no-reasoning analysis-content body. The
+    // base class returns Ministral-3's '[THINK]' / '[/THINK]' so simply-named
+    // subclasses Just Work. Per-format subclasses with different markers
+    // (e.g. '<think>'/'</think>') override.
+    virtual std::string analysis_marker_open()  const { return "[THINK]"; }
+    virtual std::string analysis_marker_close() const { return "[/THINK]"; }
+
   protected:
     const common_peg_ast_arena * arena_ = nullptr;
     // AST IDs whose events were already emitted as part of a parent "tool"
-    // node visit; the later child-walk visit must not double-emit.
+    // or "analysis-content" node visit; the later child-walk visit must not
+    // double-emit.
     std::unordered_set<common_peg_ast_id> handled_ids_;
 };
 

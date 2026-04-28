@@ -652,12 +652,22 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
             body = builder.tag("tool-arg-name", body);
         } else if (n == "tool-arg-value" || n == "arg-value") {
             body = builder.tag("tool-arg-value", body);
-        } else if (n == "content" || n == "analysis-content" || n == "response-content") {
-            // `analysis-content` is the no-reasoning variant: the rule body
-            // covers `[THINK]…[/THINK]` text that should surface as content
-            // (markers preserved verbatim) rather than as reasoning.
+        } else if (n == "content" || n == "response-content") {
             // `response-content` is the structured response_format payload
             // (e.g. JSON between code fences) that surfaces as content.
+            body = builder.tag("content", body);
+        } else if (n == "analysis-content") {
+            // `analysis-content` is the no-reasoning variant: the rule body
+            // is the BODY of a think-block (between '[THINK]' / '[/THINK]'
+            // markers or equivalent). It is tagged 'content' so the body
+            // surfaces in `result.content`. The per-format transformer is
+            // responsible for re-injecting the literal markers around the
+            // captured body so the surfaced content matches the wire shape
+            // exactly. (Tagging the wrapping rule directly would let
+            // streaming partials of the leading literal — e.g. '[T' from
+            // a partial '[THINK]' — leak into content as a tag-wrapped
+            // partial node, breaking diff monotonicity once the literal
+            // resolves.)
             body = builder.tag("content", body);
         } else if (n == "reasoning" || n == "thought") {
             body = builder.tag("reasoning", body);

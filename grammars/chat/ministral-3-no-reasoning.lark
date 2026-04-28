@@ -12,8 +12,15 @@
 # {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
 
-start: analysis_content? content (tool_call_section | response_format | )
-analysis_content: "[THINK]" /(.|\n)*?/ "[/THINK]"
+# `think_block` is NOT tagged (would leak partial '[T' from the literal as
+# content during streaming). The body is captured via 'analysis_content'
+# which IS tagged as content by lark-to-peg; the literal '[THINK]' /
+# '[/THINK]' markers are emitted by the per-format Ministral-3 transformer
+# as synthetic content text wrapping the body, so the surface content has
+# the markers preserved exactly as the test expects.
+start: think_block? content (tool_call_section | response_format | )
+think_block: "[THINK]" analysis_content "[/THINK]"
+analysis_content: /(.|\n)*?/
 content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/
 
 tool_call_section: tool_call+
