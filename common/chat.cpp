@@ -1365,7 +1365,7 @@ static common_chat_params common_chat_params_init_gigachat_v3(
     common_chat_params data;
 
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_GIGACHAT_V3;
     data.supports_thinking = false;
     data.preserved_tokens  = {
         "<|message_sep|>\n\n",

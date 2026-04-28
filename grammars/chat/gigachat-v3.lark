@@ -12,7 +12,8 @@ start: content tool_call?
 content: /([^<]|<(?!\|message_sep\|))*/
 
 tool_call: "<|message_sep|>\n\nfunction call<|role_sep|>\n" tool_body
-tool_body: "{" "\"name\"" ":" "\"" func_name "\"" "," "\"arguments\"" ":" tool_args "}"
+tool_body: "{" WS? "\"name\"" WS? ":" WS? "\"" func_name "\"" WS? "," WS? "\"arguments\"" WS? ":" WS? tool_args WS? "}"
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+WS: /[ \t\n]+/
 tool_args: {{TOOL_SCHEMA}}
