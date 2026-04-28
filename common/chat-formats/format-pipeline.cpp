@@ -4,6 +4,8 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
+#include "chat-formats/lfm2-5-format.h"
+#include "chat-formats/lfm2-format.h"
 #include "chat-formats/ministral-3-format.h"
 
 void common_chat_format_pipeline::run(const common_peg_ast_arena & arena,
@@ -76,6 +78,18 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_kimi_k2_tracker,
                 common_chat_kimi_k2_decoder,
                 common_chat_kimi_k2_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_LFM2:
+            return make_pipeline_default<
+                common_chat_lfm2_tracker,
+                common_chat_lfm2_decoder,
+                common_chat_lfm2_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_LFM2_5:
+            return make_pipeline_default<
+                common_chat_lfm2_5_tracker,
+                common_chat_lfm2_5_decoder,
+                common_chat_lfm2_5_transformer>(msg, is_partial_parse, reasoning_format);
 
         case COMMON_CHAT_FORMAT_PEG_MINISTRAL_3:
             return make_pipeline_default<

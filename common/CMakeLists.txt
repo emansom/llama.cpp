@@ -78,6 +78,9 @@ add_library(${TARGET}
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
+    chat-formats/lfm2-5-format.h
+    chat-formats/lfm2-format.h
+    chat-formats/lfm2-format.cpp
     chat-formats/ministral-3-format.h
     chat.cpp
     chat.h

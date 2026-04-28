@@ -1298,7 +1298,7 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
     common_chat_params data;
 
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_LFM2;
     data.supports_thinking = true;
     data.preserved_tokens  = {
         "<|tool_list_start|>",
@@ -1334,7 +1334,7 @@ static common_chat_params common_chat_params_init_lfm2_5(const common_chat_templ
     common_chat_params data;
 
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_LFM2_5;
     data.supports_thinking = true;
     data.preserved_tokens  = {
         "<|tool_call_start|>",
