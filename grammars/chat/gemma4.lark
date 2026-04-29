@@ -9,10 +9,18 @@
 #
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
-start: think_block? content (tool_calls | response_format | )
-content: /([^<`]|<[^|]|<\|[^tc]|<\|t[^o]|<\|to[^o]|<\|too[^l]|<\|tool[^_]|<\|tool_[^c]|`[^`]|``[^`])*/
+start: think_or_stray? content (think_block content)* (tool_calls | response_format | trailing_channel_marker | )
+think_or_stray: think_block | stray_open
+content: /([^<`]|<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)|`(?!``)|``(?!`))*/
 think_block: "<|channel>thought" reasoning "<channel|>"
 reasoning: /(.|\n)*?/
+# Some Gemma 4 fixtures emit a stray '<|channel>' (without 'thought') at the
+# start of the body. Match and discard it.
+stray_open: "<|channel>"
+# Some Gemma 4 fixtures emit trailing '<channel|>' after the body. Match
+# and discard it so the strict closing-tokens-required policy still
+# applies but the stray bytes don't surface as content.
+trailing_channel_marker: "<channel|>"
 
 tool_calls: tool_call+
 tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"
