@@ -79,6 +79,7 @@ add_library(${TARGET}
     chat-formats/gigachat-v3-format.h
     chat-formats/glm-4-7-flash-format.h
     chat-formats/glm-4-7-flash-format.cpp
+    chat-formats/gpt-oss-format.h
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

@@ -1,35 +1,22 @@
 %llguidance {}
 
-# GPT-OSS chat grammar (Lark / llguidance)
+# GPT-OSS chat grammar — parser-side variant for `reasoning_format = NONE`.
 #
-# OpenAI Harmony format. The model emits a stream of "turns" separated by
-# '<|end|><|start|>assistant'. Each turn is either:
-#
-#   * Analysis turn:    '<|channel|>analysis<|message|>BODY'      (reasoning)
-#   * Content turn:     '<|channel|>final|commentary<|message|>BODY'  (content)
-#   * Function tool:    ' to=functions.NAME<|channel|>...<|message|>{json}'
-#                    or '<|channel|>...  to=functions.NAME<|message|>{json}'
-#   * Builtin tool:     ' to=BUILTIN<|channel|>...<|message|>BODY'    (silently dropped)
-#                    or '<|channel|>... to=BUILTIN<|message|>BODY'
-#
-# A 'commentary to=assistant' header before another channel's body is a
-# stray marker that should be skipped.
-#
-# {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
-# {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
+# Mirrors `gpt-oss.lark` for tool-call, response-format, builtin and
+# content-turn shapes, but treats the analysis turn body as content
+# (markers preserved verbatim) rather than extracting it as reasoning.
+# Selected by `init_gpt_oss` when
+# `inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE`.
 
+# Same multi-turn outer shape as the reasoning variant.
 start: stray_to_assistant? turn (turn_separator stray_to_assistant? turn)*
 turn_separator: "<|end|>" "<|start|>" "assistant"
 
-# 'commentary to=assistant' is a stray prefix the model occasionally
-# emits before the real channel header — match and discard it.
 stray_to_assistant: "<|channel|>commentary to=assistant"
 
 turn: tool_call | builtin_tool_call | analysis_turn | response_format_turn | content_turn
 
 # Function tool calls — recipient appears in either the role header or the channel header.
-# Renamed to 'tool_call' so lark-to-peg auto-tags it with the 'tool' wrapper tag
-# that the json-tagged decoder family recognizes.
 tool_call: function_role_first | function_channel_first
 function_role_first: " to=functions." func_name "<|channel|>" channel_type constrain? "<|message|>" tool_args
 function_channel_first: "<|channel|>" channel_type " to=functions." func_name constrain? "<|message|>" tool_args
@@ -37,8 +24,7 @@ func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 tool_args: {{TOOL_SCHEMA}}
 
-# Builtin tool calls — recipient is a non-functions identifier (e.g.
-# 'container.exec', 'python'). The body is silently dropped.
+# Builtin tool calls.
 builtin_tool_call: builtin_role_first | builtin_channel_first
 builtin_role_first: " to=" builtin_recipient "<|channel|>" channel_type constrain? "<|message|>" builtin_body
 builtin_channel_first: "<|channel|>" channel_type " to=" builtin_recipient constrain? "<|message|>" builtin_body
@@ -46,9 +32,11 @@ builtin_recipient: BUILTIN_RECIPIENT
 BUILTIN_RECIPIENT: /[a-zA-Z_][a-zA-Z0-9_.\-]*/
 builtin_body: /(.|\n)*?/
 
-# Analysis (reasoning) turn — captures the body as `reasoning`.
-analysis_turn: "<|channel|>analysis<|message|>" reasoning
-reasoning: /(.|\n)*?/
+# Analysis turn — body captured as `analysis-content`. The literal channel
+# markers are matched in the enclosing `analysis_turn` rule; the json-tagged
+# decoder re-injects them via `analysis_marker_open()` / `analysis_marker_close()`.
+analysis_turn: "<|channel|>analysis<|message|>" analysis_content
+analysis_content: /(.|\n)*?/
 
 # Response-format turn — schema-constrained JSON in the final channel.
 response_format_turn: "<|channel|>final" constrain "<|message|>" response_content

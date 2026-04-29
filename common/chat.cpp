@@ -1142,7 +1142,7 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     }
 
     data.prompt            = prompt;
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_GPT_OSS;
     data.supports_thinking = true;
 
     // These special tokens are required to parse properly, so we include them
@@ -1155,9 +1155,15 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
 
     // Grammar file covers tool-call, response-format, and content-only paths.
+    // The parser-side grammar branches on `reasoning_format`: NONE keeps the
+    // analysis turn as content (markers preserved verbatim); other modes
+    // extract analysis bodies as reasoning. The sampling grammar is unchanged.
     {
-        const auto base_grammar = common_chat_grammar_get("gpt-oss");
-        std::string sampling_grammar = base_grammar;
+        const auto sampling_base = common_chat_grammar_get("gpt-oss");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("gpt-oss-no-reasoning")
+            : sampling_base;
+        std::string sampling_grammar = sampling_base;
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
@@ -1165,10 +1171,11 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
             sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
         }
         data.grammar             = sampling_grammar;
-        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.parser              = chat_grammar_to_peg(parser_base).save();
         data.grammar_file_parser = true;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
     }
 
     return data;

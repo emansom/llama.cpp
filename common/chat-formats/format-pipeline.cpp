@@ -5,6 +5,7 @@
 #include "chat-formats/gemma4-format.h"
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
+#include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
@@ -86,6 +87,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_glm_4_7_flash_tracker,
                 common_chat_glm_4_7_flash_decoder,
                 common_chat_glm_4_7_flash_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_GPT_OSS:
+            return make_pipeline_default<
+                common_chat_gpt_oss_tracker,
+                common_chat_gpt_oss_decoder,
+                common_chat_gpt_oss_transformer>(msg, is_partial_parse, reasoning_format);
 
         case COMMON_CHAT_FORMAT_PEG_KIMI_K2:
             return make_pipeline_default<
