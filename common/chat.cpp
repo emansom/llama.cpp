@@ -2059,14 +2059,9 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             pipeline.run(ctx.ast, result);
             return;
         }
-        std::unique_ptr<common_chat_peg_mapper> mapper;
-        if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-            mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-        } else {
-            mapper = std::make_unique<common_chat_peg_mapper>(msg);
-        }
-        mapper->is_partial_parse = is_partial;
-        mapper->from_ast(ctx.ast, result);
+        common_chat_peg_mapper mapper(msg);
+        mapper.is_partial_parse = is_partial;
+        mapper.from_ast(ctx.ast, result);
     };
 
     if (result.fail()) {
