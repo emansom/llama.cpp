@@ -14,14 +14,15 @@ reasoning: /(.|\n)*?/
 content: /([^<`]|<(?!｜DSML｜function_calls)|`[^`]|``[^`])*/
 
 DSML: "｜DSML｜"
-tool_calls_block: "<" DSML "function_calls>" " "* invoke+ " "* "</" DSML "function_calls>"
-invoke: "<" DSML "invoke" " " "name=\"" func_name "\">\n" param* "</" DSML "invoke>"
+WS: /[ \t\n]+/
+tool_calls_block: "<" DSML "function_calls>" WS? tool_call (WS? tool_call)* WS? "</" DSML "function_calls>"
+tool_call: "<" DSML "invoke" WS "name=\"" func_name "\">" WS? arg* "</" DSML "invoke>"
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
-param: "<" DSML "parameter" " " "name=\"" param_name "\"" " " "string=\"" BOOL_STR "\">" param_value "</" DSML "parameter>\n"
-param_name: /[a-zA-Z_][a-zA-Z0-9_]*/
+arg: "<" DSML "parameter" WS "name=\"" arg_name "\"" WS "string=\"" BOOL_STR "\">" arg_value "</" DSML "parameter>" WS?
+arg_name: /[a-zA-Z_][a-zA-Z0-9_]*/
 BOOL_STR: "true" | "false"
-param_value: /[^<]*/
+arg_value: /[^<]*/
 
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}

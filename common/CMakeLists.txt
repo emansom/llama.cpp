@@ -71,6 +71,8 @@ add_library(${TARGET}
     chat-formats/format-presenter.cpp
     chat-formats/format-pipeline.h
     chat-formats/format-pipeline.cpp
+    chat-formats/deepseek-v3-2-format.h
+    chat-formats/deepseek-v3-2-format.cpp
     chat-formats/functionary-v3-2-format.h
     chat-formats/gemma4-format.h
     chat-formats/gemma4-format.cpp

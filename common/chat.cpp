@@ -1454,7 +1454,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
     common_chat_params data;
 
     data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
+    data.format            = COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_2;
     data.supports_thinking = true;
     data.thinking_start_tag = "<think>";
     data.thinking_end_tag   = "</think>";
@@ -1468,6 +1468,12 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
 
     // Grammar file covers think-block, tool-call, response-format, and content-only paths.
     // DeepSeek uses XML-style DSML parameters — no JSON schema injection for tool args.
+    //
+    // The chat template ends the generation prompt with '<think>' (forced-open
+    // thinking). Use grammar_file_parser=false so the auto-detected
+    // generation_prompt (which captures '<think>') is prepended to the parser
+    // input, giving the grammar the complete '<think>...</think>' span it
+    // expects.
     {
         const auto base_grammar = common_chat_grammar_get("deepseek-v3.2");
         std::string sampling_grammar = base_grammar;
@@ -1476,9 +1482,22 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
         }
         data.grammar             = sampling_grammar;
         data.parser              = chat_grammar_to_peg(base_grammar).save();
-        data.grammar_file_parser = true;
+        data.grammar_file_parser = false;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};
+
+        // Detect which thinking prefix the template appended to the prompt
+        // and set generation_prompt to match. With grammar_file_parser=false
+        // the generation_prompt is prepended to the parser input, so the
+        // grammar always sees a complete '<think>...</think>' span even when
+        // the template ran in forced-open thinking mode.
+        const auto & think_start = data.thinking_start_tag;  // "<think>"
+        const auto & think_end   = data.thinking_end_tag;    // "</think>"
+        if (string_ends_with(data.prompt, think_end)) {
+            data.generation_prompt = think_start + think_end;
+        } else if (string_ends_with(data.prompt, think_start)) {
+            data.generation_prompt = think_start;
+        }
     }
 
     return data;
