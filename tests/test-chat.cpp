@@ -3228,9 +3228,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .run();
 
-        // Multiple tool calls with reasoning, call *inside thinking block*
+        // Multiple tool calls with reasoning followed by a tool-call section.
+        // The closing </think> is REQUIRED by the grammar (closing-tokens-required
+        // policy); the model emits it before transitioning to the section markers.
         tst.test(
-               "<think>I need to call two functions"
+               "<think>I need to call two functions</think>"
                "<|tool_calls_section_begin|>"
                "<|tool_call_begin|>functions.special_function:0<|tool_call_argument_begin|>{\"arg1\": 1}<|tool_call_end|>"
                "<|tool_call_begin|>functions.python:1<|tool_call_argument_begin|>{\"code\": \"print('hey')\"}<|tool_call_end|>"
@@ -3247,26 +3249,27 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             })
             .run();
 
-        // Multiple tool calls with reasoning, call *inside thinking block* and *without section markers or end markers
+        // Single tool call after a properly-closed think block. Closing tokens
+        // — </think>, section begin/end, and <|tool_call_end|> — are REQUIRED.
         tst.test(
-               "<think>I need to call two functions"
-               "<|tool_call_begin|>functions.special_function:0<|tool_call_argument_begin|>{\"arg1\": 1}"
-               "<|tool_call_begin|>functions.python:1<|tool_call_argument_begin|>{\"code\": \"print('hey')\"}")
+               "<think>Just one call this time</think>"
+               "<|tool_calls_section_begin|>"
+               "<|tool_call_begin|>functions.python:0<|tool_call_argument_begin|>{\"code\": \"print('hey')\"}<|tool_call_end|>"
+               "<|tool_calls_section_end|>")
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .parallel_tool_calls(true)
-            .tools({
-                special_function_tool, python_tool
-        })
-            .expect_reasoning("I need to call two functions")
+            .tools({ python_tool })
+            .expect_reasoning("Just one call this time")
             .expect_tool_calls({
-                { "special_function", R"({"arg1": 1})", "functions.special_function:0" },
-                { "python", "{\"code\": \"print('hey')\"}", "functions.python:1" },
+                { "python", "{\"code\": \"print('hey')\"}", "functions.python:0" },
             })
             .run();
 
-        // Real life test - execute_command
-        tst.test("<|tool_call_begin|>functions.execute_command:0<|tool_call_argument_begin|>{\"command\": \"ls -lah\""
-            ", \"cwd\": \"/home/jarvis/development/exllamav3\", \"timeout\": 10}")
+        // Real life test - execute_command. Section + tool-call closing tokens
+        // are REQUIRED by the grammar (closing-tokens-required policy).
+        tst.test("<|tool_calls_section_begin|>"
+            "<|tool_call_begin|>functions.execute_command:0<|tool_call_argument_begin|>{\"command\": \"ls -lah\""
+            ", \"cwd\": \"/home/jarvis/development/exllamav3\", \"timeout\": 10}<|tool_call_end|>"
+            "<|tool_calls_section_end|>")
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .parallel_tool_calls(true)
             .tools({
