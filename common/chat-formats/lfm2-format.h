@@ -1,9 +1,12 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
+
+#include <string>
 
 // LFM2 chat format (Python-style):
 //   <|tool_call_start|>[name(k="v",...)]<|tool_call_end|>
@@ -54,3 +57,10 @@ class common_chat_lfm2_transformer : public common_chat_format_transformer {
 };
 
 extern const common_chat_format_state_rules lfm2_state_rules;
+
+// Render the LFM2 prompt. Mirrors `models/templates/LFM2-8B-A1B.jinja`
+// byte-for-byte. The writer also covers LFM2.5: that variant differs only
+// in the system-prompt tools wrapping (no `<|tool_list_start|>` markers and
+// different separator) — it has its own writer in lfm2-5-format.cpp.
+std::string common_chat_lfm2_render(const autoparser::generation_params & inputs,
+                                    const std::string & bos_token);
