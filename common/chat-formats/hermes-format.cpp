@@ -173,12 +173,12 @@ std::string render_tool_block(const ordered_json & tool_in) {
     } else {
         out += to_jinja_json(parameters);
     }
-    // The Jinja template (line 77) emits a single `}` here, leaving the
-    // outer `{"type": "function", "function": ...}` wrapper unclosed. The
-    // emitted text is therefore not strictly valid JSON --- the model
-    // tolerates it. We mirror the byte-for-byte shape rather than
-    // "fixing" the template.
-    out += "}";
+    // Two closing braces: one for the `function` object, one for the
+    // outer `{"type": "function", "function": ...}` wrapper. The upstream
+    // Hermes Jinja templates were missing the second close --- fixed in
+    // models/templates/NousResearch-Hermes-{2-Pro,3}-Llama-3*-tool_use.jinja
+    // alongside this writer.
+    out += "}}";
     return out;
 }
 
