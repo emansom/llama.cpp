@@ -263,3 +263,17 @@ std::vector<common_chat_shaped_event> common_chat_deepseek_v3_2_transformer::on_
     }
     return out;
 }
+
+// DeepSeek-V3.2 FSM-state-to-grammar-rule registry. DSML XML param format:
+// each `<parameter>...</parameter>` is matched by the `arg` rule and visited
+// in IN_TOOL_PARAM. Tool calls live inside a `tool-call` envelope nested
+// within a `tool-calls-block`.
+const common_chat_format_state_rules deepseek_v3_2_state_rules = {
+    {
+        { common_chat_format_state::IN_CONTENT,    "content" },
+        { common_chat_format_state::IN_REASONING,  "reasoning" },
+        { common_chat_format_state::IN_TOOL_CALL,  "tool-call" },
+        { common_chat_format_state::IN_TOOL_NAME,  "func-name" },
+        { common_chat_format_state::IN_TOOL_PARAM, "arg" },
+    }
+};

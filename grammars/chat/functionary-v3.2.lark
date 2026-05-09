@@ -2,15 +2,28 @@
 
 # Functionary v3.2 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# The generation prompt ends with ">>>" and the model outputs:
-#   - For content-only: "all\n<text>"
-#   - For tool calls:   "<func_name>\n<json_args>" then optional ">>><func_name>\n<json_args>"+
+# Two named entries:
+#
+#   - `start` (default) — assistant-turn continuation consumed by the sampler.
+#     The generation prompt ends with ">>>" and the model emits:
+#       content-only:  "all\n<text>"
+#       tool calls:    "<func_name>\n<json_args>" (">>><func_name>\n<json_args>")*
+#
+#   - `conversation` — full conversation wire shape, used by the bidirectional
+#     walker (selected via `arena.set_root(arena.get_rule("conversation"))`).
+#
+# Conversation wire shape (per meetkai-functionary-medium-v3.2.jinja):
+#   <|start_header_id|>system<|end_header_id|>\n\n<text><|eot_id|>
+#   <|start_header_id|>user<|end_header_id|>\n\n<text><|eot_id|>
+#   <|start_header_id|>tool<|end_header_id|>\n\n<text><|eot_id|>
+#   <|start_header_id|>assistant<|end_header_id|>\n\n>>>BODY<|eot_id|>
+#   <|start_header_id|>assistant<|end_header_id|>\n\n>>>     (generation prompt)
 #
 # {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
 
 start: content_part | tool_calls
 
+# --- Assistant turn continuation (sampler entry) -------------------------------
 content_part: "all\n" content
 content: /(.|\n)*?/
 
@@ -19,3 +32,17 @@ tool_call: func_name "\n" tool_args
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 tool_args: {{TOOL_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | tool_result_turn | assistant_full_turn
+system_turn:         "<|start_header_id|>system<|end_header_id|>\n\n"        turn_body_text "<|eot_id|>"
+user_turn:           "<|start_header_id|>user<|end_header_id|>\n\n"          turn_body_text "<|eot_id|>"
+tool_result_turn:    "<|start_header_id|>tool<|end_header_id|>\n\n"          turn_body_text "<|eot_id|>"
+assistant_full_turn: "<|start_header_id|>assistant<|end_header_id|>\n\n>>>"  turn_body_text "<|eot_id|>"
+assistant_open:      "<|start_header_id|>assistant<|end_header_id|>\n\n>>>"
+
+# Body of any wrapped turn. Opaque for now — future packages refine this when
+# the bidirectional walker needs to extract the inner structure of past
+# assistant turns.
+turn_body_text: /([^<]|<(?!\|eot_id\|))*/

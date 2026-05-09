@@ -2,14 +2,27 @@
 
 # Gemma 4 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for tool-call, content-only, and response_format responses.
-# Tool call format:    <|tool_call>call:FUNC_NAME{key:<|"|>val<|"|>,...}<tool_call|>
-# Response format:     think_block? ```json\n{schema}\n```
-# Think format:        <|channel>thought ...content... <channel|>
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The model
+#     emits an optional `<|channel>thought ...<channel|>` reasoning block, then
+#     content, then either tool calls (`<|tool_call>call:NAME{args}<tool_call|>`)
+#     or a `\`\`\`json` response_format block.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# Conversation wire shape (per google-gemma-4-31B-it.jinja):
+#   <|turn>system\n<system_body>[<|tool>...<tool|>]+<turn|>\n   (system + tool defs)
+#   <|turn>user\n<user_body><turn|>\n
+#   <|turn>model\n<assistant_body>[<|tool_call>...<tool_call|>]<turn|>\n
+#                                  ^-- assistant body may contain <|channel>thought
+#                                      <|tool_response>response:NAME{...}<tool_response|>
+#   <|turn>model\n[<|channel>thought\n<channel|>]                     (generation prompt)
 #
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
 start: think_or_stray? content (think_block content)* (tool_calls | response_format | trailing_channel_marker | )
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_or_stray: think_block | stray_open
 content: /([^<`]|<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)|`(?!``)|``(?!`))*/
 think_block: "<|channel>thought" reasoning "<channel|>"
@@ -40,5 +53,15 @@ GEMMA4_BOOL: "true" | "false"
 
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: "<|turn>" role_name "\n" turn_body_text "<turn|>\n"
+role_name: "system" | "user" | "model"
+assistant_open: "<|turn>model\n" thought_open_marker?
+thought_open_marker: "<|channel>thought\n<channel|>"
+
+# Body of a wrapped turn — anything that isn't the start of <turn|>.
+turn_body_text: /([^<]|<(?!turn\|>))*/
 
 %ignore /[ \t\n\r]/

@@ -247,3 +247,17 @@ std::vector<common_chat_shaped_event> common_chat_glm_4_7_flash_transformer::on_
     }
     return out;
 }
+
+// GLM-4.7-Flash FSM-state-to-grammar-rule registry. Per-arg XML format
+// (<arg_key>K</arg_key><arg_value>V</arg_value>) — uses IN_TOOL_ARG_KEY /
+// IN_TOOL_ARG_VAL for the `arg-name` and `arg-value` rules respectively.
+const common_chat_format_state_rules glm_4_7_flash_state_rules = {
+    {
+        { common_chat_format_state::IN_CONTENT,      "content" },
+        { common_chat_format_state::IN_REASONING,    "reasoning" },
+        { common_chat_format_state::IN_TOOL_CALL,    "tool-call" },
+        { common_chat_format_state::IN_TOOL_NAME,    "func-name" },
+        { common_chat_format_state::IN_TOOL_ARG_KEY, "arg-name" },
+        { common_chat_format_state::IN_TOOL_ARG_VAL, "arg-value" },
+    }
+};

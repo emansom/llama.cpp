@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/json-tagged-format.h"
 
 // GPT-OSS chat format (OpenAI Harmony):
@@ -36,3 +37,5 @@ class common_chat_gpt_oss_transformer : public common_chat_json_tagged_transform
   public:
     using common_chat_json_tagged_transformer::common_chat_json_tagged_transformer;
 };
+
+extern const common_chat_format_state_rules gpt_oss_state_rules;

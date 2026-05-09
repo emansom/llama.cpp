@@ -1,11 +1,9 @@
 # GLM-4.7-Flash chat grammar (GBNF)
 #
-# Tool call wire format:
-#   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...</tool_call>
-#
-# `<arg_key>` / `<arg_value>` pairs are inline (no whitespace separators) —
-# the marker that distinguishes GLM-4.7-Flash from GLM-4.6. Tools with no
-# required args may produce a bare `<tool_call>NAME</tool_call>`.
+# Two named entries:
+#   - `root` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
 
 root ::= think-block content tool-call-block?
 think-block ::= "<think>" reasoning "</think>"
@@ -26,3 +24,17 @@ arg-value-open  ::= "<arg_value>"
 arg-value-close ::= "</arg_value>"
 arg-name ::= [^<]+
 arg-value ::= ([^<] | "<" [^/] | "</" [^a])*
+
+# --- Full-conversation walker entry ---
+conversation ::= prefix? turn+ assistant-open?
+prefix ::= "[gMASK]<sop>"
+turn ::= system-turn | user-turn | tool-observation-turn | assistant-full-turn
+
+system-turn ::= "<|system|>" turn-body-text
+user-turn ::= "<|user|>" turn-body-text
+tool-observation-turn ::= "<|observation|>" turn-body-text
+assistant-full-turn ::= "<|assistant|>" turn-body-text
+assistant-open ::= "<|assistant|>"
+
+# Turn body — stops at any role marker.
+turn-body-text ::= ( [^<] | "<" [^|] | "<|" [^uaso] )*

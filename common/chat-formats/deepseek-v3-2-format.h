@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chat-formats/format-decoder.h"
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 #include "peg-parser.h"
@@ -70,3 +71,5 @@ class common_chat_deepseek_v3_2_transformer : public common_chat_format_transfor
     bool        first_arg_ = true;
     std::string args_json_buffer_;  // accumulating "{...}" text
 };
+
+extern const common_chat_format_state_rules deepseek_v3_2_state_rules;

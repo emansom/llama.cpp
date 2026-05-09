@@ -23,3 +23,12 @@ gemma4-number ::= "-"? [0-9]+ ( "." [0-9]+ )? ( [eE] [+-]? [0-9]+ )?
 
 response-format ::= "```json\n" response-content "\n```"
 response-content ::= {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry ---
+conversation ::= turn+ assistant-open?
+turn ::= "<|turn>" role-name "\n" turn-body-text "<turn|>\n"
+role-name ::= "system" | "user" | "model"
+assistant-open ::= "<|turn>model\n" thought-open-marker?
+thought-open-marker ::= "<|channel>thought\n<channel|>"
+
+turn-body-text ::= ( [^<] | "<" [^t] | "<t" [^u] | "<tu" [^r] | "<tur" [^n] | "<turn" [^|] )*

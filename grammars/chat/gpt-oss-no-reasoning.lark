@@ -52,3 +52,15 @@ CHANNEL_TYPE: "commentary" | "analysis" | "final"
 
 constrain: " "? "<|constrain|>" CONSTRAIN_TYPE
 CONSTRAIN_TYPE: /[A-Za-z0-9_\-]+/
+
+# --- Full-conversation walker entry --------------------------------------------
+# Identical to `gpt-oss.lark` — the no-reasoning variant only differs in how
+# the assistant analysis-turn body is surfaced; the conversation wire shape is
+# the same.
+conversation: harmony_turn+ assistant_open?
+harmony_turn: "<|start|>" harmony_header_text "<|message|>" harmony_body_text harmony_terminator
+assistant_open: "<|start|>assistant"
+
+harmony_header_text: /([^<]|<(?!\|message\|))+/
+harmony_body_text: /([^<]|<(?!\|end\|)(?!\|return\|)(?!\|call\|))*/
+harmony_terminator: "<|end|>" | "<|return|>" | "<|call|>"

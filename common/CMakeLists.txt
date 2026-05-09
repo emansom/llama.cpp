@@ -71,22 +71,30 @@ add_library(${TARGET}
     chat-formats/format-presenter.cpp
     chat-formats/format-pipeline.h
     chat-formats/format-pipeline.cpp
+    chat-formats/format-state-registry.h
+    chat-formats/format-state-registry.cpp
     chat-formats/deepseek-v3-2-format.h
     chat-formats/deepseek-v3-2-format.cpp
     chat-formats/functionary-v3-2-format.h
+    chat-formats/functionary-v3-2-format.cpp
     chat-formats/gemma4-format.h
     chat-formats/gemma4-format.cpp
     chat-formats/gigachat-v3-format.h
+    chat-formats/gigachat-v3-format.cpp
     chat-formats/glm-4-7-flash-format.h
     chat-formats/glm-4-7-flash-format.cpp
     chat-formats/gpt-oss-format.h
+    chat-formats/gpt-oss-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
+    chat-formats/kimi-k2-format.cpp
     chat-formats/lfm2-5-format.h
+    chat-formats/lfm2-5-format.cpp
     chat-formats/lfm2-format.h
     chat-formats/lfm2-format.cpp
     chat-formats/ministral-3-format.h
+    chat-formats/ministral-3-format.cpp
     chat.cpp
     chat.h
     gbnf-to-peg.cpp

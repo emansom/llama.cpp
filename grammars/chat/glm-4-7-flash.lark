@@ -2,30 +2,41 @@
 
 # GLM-4.7-Flash chat grammar (Lark / llguidance)
 #
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The model
+#     emits a (possibly forced-open) `<think>...</think>` reasoning block,
+#     then content, then optional `<tool_call>` blocks.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
 # Tool call wire format (per the in-template format documentation):
 #
 #   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...<arg_key>Kn</arg_key><arg_value>Vn</arg_value></tool_call>
 #
-# The `<arg_key>...</arg_key><arg_value>...</arg_value>` pairs are inline
-# (no whitespace separators), which is what distinguishes GLM-4.7-Flash from
-# GLM-4.6.
-#
-# Tools with no required args may produce a bare `<tool_call>NAME</tool_call>`.
-#
-# Multiple parallel tool calls appear as consecutive `<tool_call>...</tool_call>`
-# blocks back-to-back.
+# The `<arg_key>...</arg_key><arg_value>...</arg_value>` pairs are inline (no
+# whitespace separators), distinguishing GLM-4.7-Flash from GLM-4.6.
 #
 # Reasoning is wrapped in `<think>...</think>`. The chat template ends the
-# generation prompt with either `<think>` (forced-open thinking) or `<think></think>`
-# (thinking disabled). The init function prepends that exact prefix to the
-# model output so the parser sees a complete `<think>...</think>` block in
-# both modes — closing tokens stay required.
+# generation prompt with either `<think>` (forced-open thinking) or
+# `<think></think>` (thinking disabled). The init function prepends that exact
+# prefix to the model output so the parser sees a complete `<think>...</think>`
+# block in both modes — closing tokens stay required.
 #
-# The `<tool_call>` literal lives directly in `tool_call_block`'s body so the
-# Until() that backs `content` can collect it as a leading delimiter without
-# having to traverse too many wrapper layers.
+# Conversation wire shape (per GLM-4.7-Flash.jinja):
+#   [gMASK]<sop>                                   (BOS-like prefix)
+#   <|system|>BODY                                 (optional, when tools given or system message)
+#   <|user|>BODY                                   (user turn)
+#   <|assistant|>(<think>REASONING</think>|</think>)BODY[<tool_call>...]   (assistant turn)
+#   <|observation|><tool_response>BODY</tool_response>...  (tool result; <|observation|> reused for consecutive tool turns)
+#   <|assistant|>(<think>|</think>)                (generation prompt)
+#
+# Turns are delimited by the next role-marker open; there is no explicit per-turn
+# closing literal. The full-conversation rules use negative-lookahead bodies that
+# stop at any role marker.
 
 start: think_block content tool_call_block?
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_block: "<think>" reasoning "</think>"
 reasoning: /(.|\n)*?/
 content: /(.|\n)*?/
@@ -41,3 +52,18 @@ FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 tool_arg: "<arg_key>" arg_name "</arg_key>" "<arg_value>" arg_value "</arg_value>"
 arg_name: /[^<]+/
 arg_value: /(.|\n)*?/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: prefix? turn+ assistant_open?
+prefix: "[gMASK]<sop>"
+turn: system_turn | user_turn | tool_observation_turn | assistant_full_turn
+
+system_turn:           "<|system|>"      turn_body_text
+user_turn:             "<|user|>"        turn_body_text
+tool_observation_turn: "<|observation|>" turn_body_text
+assistant_full_turn:   "<|assistant|>"   turn_body_text
+assistant_open:        "<|assistant|>"
+
+# Body of any wrapped turn — anything until the next role marker (`<|user|>`,
+# `<|assistant|>`, `<|system|>`, `<|observation|>`).
+turn_body_text: /([^<]|<(?!\|user\|)(?!\|assistant\|)(?!\|system\|)(?!\|observation\|))*/

@@ -275,3 +275,18 @@ std::vector<common_chat_shaped_event> common_chat_lfm2_transformer::on_finalize(
     }
     return out;
 }
+
+// LFM2 FSM-state-to-grammar-rule registry. Per-arg KV format (Python-style
+// `name(k=v, ...)`) — uses IN_TOOL_ARG_KEY / IN_TOOL_ARG_VAL states for the
+// `arg-name` and `arg-value` rules respectively. No tool-id; reasoning via
+// the standard <think>/</think> block.
+const common_chat_format_state_rules lfm2_state_rules = {
+    {
+        { common_chat_format_state::IN_CONTENT,      "content" },
+        { common_chat_format_state::IN_REASONING,    "reasoning" },
+        { common_chat_format_state::IN_TOOL_CALL,    "tool-call" },
+        { common_chat_format_state::IN_TOOL_NAME,    "func-name" },
+        { common_chat_format_state::IN_TOOL_ARG_KEY, "arg-name" },
+        { common_chat_format_state::IN_TOOL_ARG_VAL, "arg-value" },
+    }
+};

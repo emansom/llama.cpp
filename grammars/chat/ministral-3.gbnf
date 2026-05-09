@@ -1,8 +1,9 @@
 # Ministral-3 chat grammar (GBNF)
 #
-# Covers the full output format for tool-call, content-only, and response_format responses.
-# {{TOOL_SCHEMA}}     replaced at runtime.
-# {{RESPONSE_SCHEMA}} replaced at runtime.
+# Two named entries:
+#   - `root` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
 
 root ::= think-block? content ( tool-call-section | response-format | )
 think-block ::= "[THINK]" reasoning "[/THINK]"
@@ -16,3 +17,17 @@ tool-args ::= {{TOOL_SCHEMA}}
 
 response-format ::= "```json\n" response-content "\n```"
 response-content ::= {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry ---
+conversation ::= system-prompt-block? available-tools-block? entry+
+entry ::= user-inst | tool-results | assistant-inline-text
+user-inst ::= "[INST]" entry-body-text "[/INST]"
+tool-results ::= "[TOOL_RESULTS]" entry-body-text "[/TOOL_RESULTS]"
+system-prompt-block ::= "[SYSTEM_PROMPT]" entry-body-text "[/SYSTEM_PROMPT]"
+available-tools-block ::= "[AVAILABLE_TOOLS]" entry-body-text "[/AVAILABLE_TOOLS]"
+
+# Body of any wrapped block — stops at "[/" (any closing tag).
+entry-body-text ::= ( [^[] | "[" [^/] )*
+
+# Assistant inline text — stops at "[INST]" or "[TOOL_RESULTS]" openers.
+assistant-inline-text ::= ( [^[] | "[" [^IT] | "[I" [^N] | "[T" [^O] )+

@@ -2,15 +2,36 @@
 
 # Kimi K2 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# Tool call format:
+# The grammar describes the entire conversation wire shape. Two named entries:
+#
+#   - `assistant_body` — what the sampler constrains during generation; the
+#     model emits this continuation when invoked with `<|im_assistant|>assistant
+#     <|im_middle|>` already in the prompt. The grammar file's `start:` rule
+#     points here so llguidance picks it up directly.
+#
+#   - `conversation` — the full system / user / assistant / tool-result wire
+#     shape. Selected via `arena.set_root(arena.get_rule("conversation"))` by
+#     the bidirectional pipeline when walking or rendering whole conversations.
+#
+# Tool call format inside an assistant turn:
 #   <|tool_calls_section_begin|>
 #   <|tool_call_begin|>functions.FUNC_NAME:INDEX<|tool_call_argument_begin|>{json}<|tool_call_end|>
 #   <|tool_calls_section_end|>
 #
+# Conversation wire shape (per moonshotai-Kimi-K2.jinja):
+#   <|im_system|>tool_declare<|im_middle|>{tools_json}<|im_end|>     (optional, when tools given)
+#   ( <|im_system|>system<|im_middle|>BODY<|im_end|>
+#   | <|im_user|>user<|im_middle|>BODY<|im_end|>
+#   | <|im_assistant|>assistant<|im_middle|>BODY<|im_end|>
+#   | <|im_system|>tool<|im_middle|>"## Return of "ID"\n"BODY<|im_end|> ) +
+#   <|im_assistant|>assistant<|im_middle|>                            (optional generation prompt)
+#
 # {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
 
-start: think_block? content tool_calls_section?
+start: assistant_body
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+assistant_body: think_block? content tool_calls_section?
 think_block: "<think>" reasoning "</think>"
 reasoning: /(.|\n)*?/
 content: /([^<]|<(?!\|tool_calls_section_begin\|)|\<\|(?!tool_calls_section_begin\|)|\<\|t(?!ool_calls_section_begin\|))*/
@@ -22,3 +43,23 @@ func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 CALL_INDEX: /[0-9]+/
 tool_args: {{TOOL_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: tool_declare_turn? turn+ assistant_open?
+turn: system_turn | user_turn | tool_result_turn | assistant_full_turn
+tool_declare_turn:   "<|im_system|>tool_declare<|im_middle|>" turn_body_text         "<|im_end|>"
+system_turn:         "<|im_system|>system<|im_middle|>"       turn_body_text         "<|im_end|>"
+user_turn:           "<|im_user|>user<|im_middle|>"           turn_body_text         "<|im_end|>"
+tool_result_turn:    "<|im_system|>tool<|im_middle|>"         turn_body_text         "<|im_end|>"
+assistant_full_turn: "<|im_assistant|>assistant<|im_middle|>" think_block? content_in_turn tool_calls_section? "<|im_end|>"
+assistant_open:      "<|im_assistant|>assistant<|im_middle|>"
+
+# Body of a non-assistant turn — anything that isn't the start of <|im_end|>.
+# rest()-style: the regex falls back to a context-aware Until and the parent
+# sequence supplies <|im_end|> as the next-sibling delimiter.
+turn_body_text: /([^<]|<(?!\|im_end\|))*/
+
+# Assistant content inside a wrapped turn. Like `content` but used in a
+# context where both <|tool_calls_section_begin|> and <|im_end|> can follow;
+# both are supplied as next-sibling delimiters by the parent sequence.
+content_in_turn: /([^<]|<(?!\|tool_calls_section_begin\|)(?!\|im_end\|))*/

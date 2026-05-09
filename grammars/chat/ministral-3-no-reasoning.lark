@@ -9,6 +9,11 @@
 # The sampling grammar is unchanged (llguidance still constrains the model
 # to the full Ministral-3 format).
 #
+# Two named entries (same as ministral-3.lark):
+#   - `start` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
 # {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
 
@@ -19,6 +24,8 @@
 # as synthetic content text wrapping the body, so the surface content has
 # the markers preserved exactly as the test expects.
 start: think_block? content (tool_call_section | response_format | )
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_block: "[THINK]" analysis_content "[/THINK]"
 analysis_content: /(.|\n)*?/
 content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/
@@ -31,5 +38,19 @@ tool_args: {{TOOL_SCHEMA}}
 
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+# Identical to `ministral-3.lark` — the no-reasoning variant only changes how
+# the assistant-turn `[THINK]` block is surfaced; the conversation wire shape
+# is the same.
+conversation: system_prompt_block? available_tools_block? entry+
+entry: user_inst | tool_results | assistant_inline_text
+user_inst:               "[INST]"            entry_body_text "[/INST]"
+tool_results:            "[TOOL_RESULTS]"    entry_body_text "[/TOOL_RESULTS]"
+system_prompt_block:     "[SYSTEM_PROMPT]"   entry_body_text "[/SYSTEM_PROMPT]"
+available_tools_block:   "[AVAILABLE_TOOLS]" entry_body_text "[/AVAILABLE_TOOLS]"
+
+entry_body_text: /([^\[]|\[(?!\/))*/
+assistant_inline_text: /(.|\n)*?/
 
 %ignore " "

@@ -1,7 +1,9 @@
 # GigaChat v3 chat grammar (GBNF)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# Tool call format: <|message_sep|>\n\nfunction call<|role_sep|>\n{"name":"...","arguments":{...}}
+# Two named entries:
+#   - `root` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
 
 root ::= content tool-call?
 content ::= ( [^<] | "<" [^|] )*
@@ -10,3 +12,13 @@ tool-call ::= "<|message_sep|>\n\nfunction call<|role_sep|>\n" tool-body
 tool-body ::= "{" "\"name\"" ":" "\"" func-name "\"" "," "\"arguments\"" ":" tool-args "}"
 func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
 tool-args ::= "{" ( [^}] | "{" [^}]* "}" )* "}"
+
+# --- Full-conversation walker entry ---
+conversation ::= turn+ assistant-open?
+turn ::= role-marker "<|role_sep|>\n" turn-body-text "<|message_sep|>\n\n"
+role-marker ::= "developer system" | "system" | "user" | "assistant"
+              | "function call" | "function descriptions" | "function result"
+              | "user memory" | "added files"
+assistant-open ::= "assistant<|role_sep|>\n"
+
+turn-body-text ::= ( [^<] | "<" [^|] | "<|" [^m] | "<|m" [^e] )*

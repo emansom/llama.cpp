@@ -2,13 +2,27 @@
 
 # GigaChat v3 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# Tool call format:
-#   <|message_sep|>\n\nfunction call<|role_sep|>\n{"name":"FUNC_NAME","arguments":{json}}
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The
+#     model emits content followed optionally by the function-call turn:
+#       <content><|message_sep|>\n\nfunction call<|role_sep|>\n{json}
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# Conversation wire shape (per GigaChat3 templates):
+#   <role><|role_sep|>\n<body><|message_sep|>\n\n
+#
+# where <role> is one of: "developer system", "system", "user", "assistant",
+# "function call", "function descriptions", "function result", "user memory",
+# "added files".
+#
+# Generation prompt: "assistant<|role_sep|>\n" (no trailing <|message_sep|>).
 #
 # {{TOOL_SCHEMA}} is replaced at runtime with per-tool %json {schema} rules.
 
 start: content tool_call?
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 content: /([^<]|<(?!\|message_sep\|))*/
 
 tool_call: "<|message_sep|>\n\nfunction call<|role_sep|>\n" tool_body
@@ -17,3 +31,20 @@ func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 WS: /[ \t\n]+/
 tool_args: {{TOOL_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: role_marker "<|role_sep|>\n" turn_body_text "<|message_sep|>\n\n"
+role_marker: "developer system"
+           | "system"
+           | "user"
+           | "assistant"
+           | "function call"
+           | "function descriptions"
+           | "function result"
+           | "user memory"
+           | "added files"
+assistant_open: "assistant<|role_sep|>\n"
+
+# Body of any wrapped turn — opaque text up to <|message_sep|>.
+turn_body_text: /([^<]|<(?!\|message_sep\|))*/

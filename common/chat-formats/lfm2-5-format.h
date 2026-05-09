@@ -16,3 +16,5 @@ class common_chat_lfm2_5_transformer : public common_chat_lfm2_transformer {
   public:
     using common_chat_lfm2_transformer::common_chat_lfm2_transformer;
 };
+
+extern const common_chat_format_state_rules lfm2_5_state_rules;

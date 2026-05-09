@@ -1,7 +1,9 @@
 # LFM2.5 chat grammar (GBNF)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# Tool call format: (optional <|tool_call_start|>) [name(arg="val",...)]
+# Two named entries:
+#   - `root` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
 
 root ::= think-block? content "<|tool_call_start|>"? tool-calls?
 think-block ::= "<think>" reasoning "</think>"
@@ -17,3 +19,14 @@ arg-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
 arg-value ::= quoted-string | lfm-number | "True" | "False" | "None"
 quoted-string ::= "\"" ( [^"\\] | "\\" [^\n] )* "\""
 lfm-number ::= "-"? [0-9]+ ( "." [0-9]+ )?
+
+# --- Full-conversation walker entry ---
+conversation ::= turn+ assistant-open?
+turn ::= system-turn | user-turn | tool-turn | assistant-full-turn
+system-turn ::= "<|im_start|>system\n" turn-body-text "<|im_end|>\n"
+user-turn ::= "<|im_start|>user\n" turn-body-text "<|im_end|>\n"
+tool-turn ::= "<|im_start|>tool\n" turn-body-text "<|im_end|>\n"
+assistant-full-turn ::= "<|im_start|>assistant\n" turn-body-text "<|im_end|>\n"
+assistant-open ::= "<|im_start|>assistant\n"
+
+turn-body-text ::= ( [^<] | "<" [^|] | "<|" [^i] | "<|i" [^m] )*

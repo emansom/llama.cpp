@@ -39,4 +39,16 @@ GEMMA4_BOOL: "true" | "false"
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
 
+# --- Full-conversation walker entry --------------------------------------------
+# Identical to `gemma4.lark` — the no-reasoning variant only changes how the
+# assistant-turn `<|channel>thought` block is surfaced; the conversation wire
+# shape is the same.
+conversation: turn+ assistant_open?
+turn: "<|turn>" role_name "\n" turn_body_text "<turn|>\n"
+role_name: "system" | "user" | "model"
+assistant_open: "<|turn>model\n" thought_open_marker?
+thought_open_marker: "<|channel>thought\n<channel|>"
+
+turn_body_text: /([^<]|<(?!turn\|>))*/
+
 %ignore /[ \t\n\r]/

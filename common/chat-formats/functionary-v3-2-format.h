@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/json-tagged-format.h"
 
 // Functionary-v3.2 chat format: `>>>NAME\n{json_args}`. Pure JSON-tagged shape:
@@ -16,3 +17,5 @@ class common_chat_functionary_v3_2_transformer : public common_chat_json_tagged_
   public:
     using common_chat_json_tagged_transformer::common_chat_json_tagged_transformer;
 };
+
+extern const common_chat_format_state_rules functionary_v3_2_state_rules;

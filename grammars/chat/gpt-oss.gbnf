@@ -21,3 +21,12 @@ tool-args ::= {{TOOL_SCHEMA}}
 
 response-format ::= "<|start|>assistant<|channel|>final" constrain? "<|message|>" response-content
 response-content ::= {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry ---
+conversation ::= harmony-turn+ assistant-open?
+harmony-turn ::= "<|start|>" harmony-header-text "<|message|>" harmony-body-text harmony-terminator
+assistant-open ::= "<|start|>assistant"
+
+harmony-header-text ::= ( [^<] | "<" [^|] | "<|" [^m] )+
+harmony-body-text ::= ( [^<] | "<" [^|] | "<|" [^erc] )*
+harmony-terminator ::= "<|end|>" | "<|return|>" | "<|call|>"

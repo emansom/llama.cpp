@@ -2,13 +2,27 @@
 
 # DeepSeek v3.2 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for tool-call, content-only, and response_format responses.
-# Tool call format:    XML-like DSML tags
-# Response format:     think_block? content ```json\n{schema}\n```
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The model
+#     emits an optional `<think>...</think>` reasoning block, content, and
+#     either a DSML function-calls block or a `\`\`\`json` response_format block.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
 #
+# Conversation wire shape (per deepseek-ai-DeepSeek-V3.2.jinja):
+#   <system_prompt>                                    (free-form text + tools header)
+#   <｜User｜><user_content>                            (user turn — no closing token)
+#   <｜Assistant｜><asst_body><｜end▁of▁sentence｜>    (assistant turn)
+#   \n\n<function_results>\n<result>...</result>... \n</function_results>
+#                                                       (tool results block; multiple result entries share the wrapper)
+#   <｜Assistant｜>                                     (generation prompt; possibly + <think> or <think></think>)
+#
+# DSML markers use the full-width bar character "｜".
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
 start: think_block? content (tool_calls_block | response_format | )
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_block: "<think>" reasoning "</think>"
 reasoning: /(.|\n)*?/
 content: /([^<`]|<(?!｜DSML｜function_calls)|`[^`]|``[^`])*/
@@ -26,3 +40,29 @@ arg_value: /[^<]*/
 
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+# DeepSeek-V3.2 uses an asymmetric structure: only the assistant turn has an
+# explicit close (`<｜end▁of▁sentence｜>`); user turn content flows until the
+# next role marker. Tool results are wrapped in `<function_results>...
+# </function_results>` blocks that may follow assistant turns with tool_calls.
+conversation: system_prefix_text? entry+ assistant_open?
+entry: user_turn | assistant_turn | tool_results_block
+user_turn: "<｜User｜>" user_body_text
+assistant_turn: "<｜Assistant｜>" assistant_body_text "<｜end▁of▁sentence｜>"
+tool_results_block: tool_results_open tool_result+ tool_results_close
+tool_results_open: "\n\n<function_results>"
+tool_results_close: "\n</function_results>"
+tool_result: "\n<result>" tool_result_body_text "</result>"
+assistant_open: "<｜Assistant｜>" assistant_open_marker?
+# After the generation-prompt assistant marker, the template may emit either
+# `<think>` (forced-open thinking) or `<think></think>` (thinking disabled).
+assistant_open_marker: "<think></think>" | "<think>"
+
+# Free-form text before the first explicit role marker (system prompt etc.).
+system_prefix_text: /([^<]|<(?!｜))+/
+
+# Body up to the next role marker — opaque text.
+user_body_text:        /([^<]|<(?!｜))+/
+assistant_body_text:   /(.|\n)*?/
+tool_result_body_text: /([^<]|<(?!\/result>))*/

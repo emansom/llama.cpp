@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chat-formats/format-decoder.h"
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 #include "peg-parser.h"
@@ -59,3 +60,5 @@ class common_chat_gemma4_transformer : public common_chat_format_transformer {
 
     std::vector<common_chat_shaped_event> shape(const common_chat_decoded_event & event) override;
 };
+
+extern const common_chat_format_state_rules gemma4_state_rules;

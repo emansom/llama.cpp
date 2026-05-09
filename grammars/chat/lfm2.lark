@@ -2,11 +2,23 @@
 
 # LFM2 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for both tool-call and content-only responses.
-# Tool call format: <|tool_call_start|>[name(arg="val",...)]<|tool_call_end|>
-# Uses Python-style keyword arguments.
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The model
+#     emits content + optional tool_call_block in Python-style call syntax:
+#       <|tool_call_start|>[name(arg="val",...)]<|tool_call_end|>
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# Conversation wire shape (per LFM2-8B-A1B.jinja):
+#   <|im_start|>system\n<body>[<|tool_list_start|>[...]<|tool_list_end|>]<|im_end|>\n
+#   <|im_start|>user\n<body><|im_end|>\n
+#   <|im_start|>assistant\n<body><|im_end|>\n
+#   <|im_start|>tool\n<|tool_response_start|><body><|tool_response_end|><|im_end|>\n
+#   <|im_start|>assistant\n                            (generation prompt)
 
 start: think_block? content tool_call_block?
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_block: "<think>" reasoning "</think>"
 reasoning: /(.|\n)*?/
 content: /([^<]|<(?!\|tool_call_start\|))*/
@@ -28,3 +40,17 @@ QUOTED_STRING: "\"" /([^"\\]|\\.)*/ "\""
 LFM_NUMBER: /-?[0-9]+(\.[0-9]+)?/
 LFM_BOOL: "True" | "False"
 WS: /[ \t]+/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | tool_turn | assistant_full_turn
+system_turn:         "<|im_start|>system\n"    turn_body_text "<|im_end|>\n"
+user_turn:           "<|im_start|>user\n"      turn_body_text "<|im_end|>\n"
+assistant_full_turn: "<|im_start|>assistant\n" turn_body_text "<|im_end|>\n"
+tool_turn:           "<|im_start|>tool\n<|tool_response_start|>" tool_response_body_text "<|tool_response_end|><|im_end|>\n"
+assistant_open:      "<|im_start|>assistant\n"
+
+# Body of a non-tool wrapped turn — anything that isn't the start of <|im_end|>.
+turn_body_text: /([^<]|<(?!\|im_end\|))*/
+# Body of a tool result turn — anything that isn't the start of <|tool_response_end|>.
+tool_response_body_text: /([^<]|<(?!\|tool_response_end\|))*/

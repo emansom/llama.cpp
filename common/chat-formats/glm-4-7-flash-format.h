@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chat-formats/format-decoder.h"
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 
@@ -46,3 +47,5 @@ class common_chat_glm_4_7_flash_transformer : public common_chat_format_transfor
     bool        first_arg_ = true;
     std::string args_json_buffer_;
 };
+
+extern const common_chat_format_state_rules glm_4_7_flash_state_rules;

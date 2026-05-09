@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chat-formats/format-decoder.h"
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 
@@ -51,3 +52,5 @@ class common_chat_lfm2_transformer : public common_chat_format_transformer {
     bool        first_arg_ = true;
     std::string args_json_buffer_;
 };
+
+extern const common_chat_format_state_rules lfm2_state_rules;

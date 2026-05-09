@@ -20,3 +20,18 @@ param-value ::= [^<]*
 
 response-format ::= "```json\n" response-content "\n```"
 response-content ::= {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry ---
+conversation ::= system-prefix-text? entry+ assistant-open?
+entry ::= user-turn | assistant-turn | tool-results-block
+user-turn ::= "<｜User｜>" user-body-text
+assistant-turn ::= "<｜Assistant｜>" assistant-body-text "<｜end▁of▁sentence｜>"
+tool-results-block ::= "\n\n<function_results>" tool-result+ "\n</function_results>"
+tool-result ::= "\n<result>" tool-result-body-text "</result>"
+assistant-open ::= "<｜Assistant｜>" assistant-open-marker?
+assistant-open-marker ::= "<think></think>" | "<think>"
+
+system-prefix-text ::= ( [^<] | "<" [^｜] )+
+user-body-text ::= ( [^<] | "<" [^｜] )+
+assistant-body-text ::= ( [^<] | "<" [^｜] )*
+tool-result-body-text ::= ( [^<] | "<" [^/] | "</" [^r] )*

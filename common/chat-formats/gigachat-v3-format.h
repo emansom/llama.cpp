@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chat-formats/format-state-registry.h"
 #include "chat-formats/json-tagged-format.h"
 
 // GigaChat-v3 chat format: `<|message_sep|>\n\nfunction call<|role_sep|>\n{json}`.
@@ -14,3 +15,5 @@ class common_chat_gigachat_v3_transformer : public common_chat_json_tagged_trans
   public:
     using common_chat_json_tagged_transformer::common_chat_json_tagged_transformer;
 };
+
+extern const common_chat_format_state_rules gigachat_v3_state_rules;

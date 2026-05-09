@@ -2,15 +2,35 @@
 
 # Ministral-3 chat grammar (Lark / llguidance)
 #
-# Covers the full output format for tool-call, content-only, and response_format responses.
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The
+#     model emits an optional [THINK]/[/THINK] reasoning block, content, and
+#     either tool calls ([TOOL_CALLS]name[ARGS]json...) or a response_format
+#     fenced JSON block.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# Conversation wire shape (per mistralai-Ministral-3-14B-Reasoning-2512.jinja):
+#   [SYSTEM_PROMPT]<system content>[/SYSTEM_PROMPT]      (optional)
+#   [AVAILABLE_TOOLS]<tools json>[/AVAILABLE_TOOLS]      (optional, when tools)
+#   [INST]<user content>[/INST]                          (user turn)
+#   <assistant content + optional tool calls + EOS>      (assistant turn — no marker wrapping)
+#   [TOOL_RESULTS]<tool result content>[/TOOL_RESULTS]   (tool result)
+#
 # Tool call format:    [TOOL_CALLS][FUNC_NAME][ARGS]{json}
 # Response format:     [THINK]?content ```json\n{schema}\n```
 # Reasoning format:    [THINK]reasoning[/THINK]
+#
+# Generation prompt: there is no explicit marker — the model continues right
+# after the last [/INST] or [/TOOL_RESULTS]. The conversation grammar's
+# `assistant_inline_text` matches the implicit assistant turn.
 #
 # {{TOOL_SCHEMA}}     replaced at runtime with per-tool %json {schema} rules.
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {response_schema} rule.
 
 start: think_block? content (tool_call_section | response_format | )
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
 think_block: "[THINK]" reasoning "[/THINK]"
 reasoning: /(.|\n)*?/
 content: /([^\[`]|(?!\[TOOL_CALLS\])\[|(?!```json)`|``(?!`))*/
@@ -23,5 +43,25 @@ tool_args: {{TOOL_SCHEMA}}
 
 response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+# The grammar describes the marker-wrapped blocks ([SYSTEM_PROMPT], [INST],
+# [TOOL_RESULTS], [AVAILABLE_TOOLS]) and the assistant turn that flows between
+# them. The assistant turn has no explicit wrapping markers — it ends when
+# the next [INST] or [TOOL_RESULTS] begins, or at end of input.
+conversation: system_prompt_block? available_tools_block? entry+
+entry: user_inst | tool_results | assistant_inline_text
+user_inst:             "[INST]"            entry_body_text "[/INST]"
+tool_results:          "[TOOL_RESULTS]"    entry_body_text "[/TOOL_RESULTS]"
+system_prompt_block:   "[SYSTEM_PROMPT]"   entry_body_text "[/SYSTEM_PROMPT]"
+available_tools_block: "[AVAILABLE_TOOLS]" entry_body_text "[/AVAILABLE_TOOLS]"
+
+# Body of any wrapped block — anything that isn't the start of a closing tag.
+entry_body_text: /([^\[]|\[(?!\/))*/
+
+# Assistant inline text — opaque content (may include [TOOL_CALLS], [THINK],
+# etc.) up to the next wrapped block. Falls back to rest() in lark-to-peg
+# and uses next-sibling-delimiters from the enclosing context.
+assistant_inline_text: /(.|\n)*?/
 
 %ignore " "
