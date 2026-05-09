@@ -8,6 +8,7 @@
 #include "chat-formats/gemma4-format.h"
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
+#include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
@@ -1087,24 +1088,15 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
 static common_chat_params common_chat_params_init_gpt_oss(const common_chat_template &    tmpl,
                                                           const autoparser::generation_params & inputs) {
     common_chat_params data;
+    (void) tmpl;
 
-    // Copy reasoning to the "thinking" field as expected by the gpt-oss template
-    auto adjusted_messages = json::array();
-    for (auto msg : inputs.messages) {
-        if (msg.contains("reasoning_content") && msg.at("reasoning_content").is_string()) {
-            msg["thinking"] = msg.at("reasoning_content");
-            if (msg.contains("tool_calls") && msg.at("tool_calls").is_array() && !msg.at("tool_calls").empty()) {
-                msg.erase("content");
-            }
-        }
-        adjusted_messages.push_back(msg);
-    }
+    // The writer performs the `reasoning_content` -> `thinking` preprocessing
+    // and drops `content` when `tool_calls` is present (matches the template's
+    // raise_exception preconditions).
+    auto prompt = common_chat_gpt_oss_render(inputs);
 
-    auto prompt = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override= */ adjusted_messages);
-
-    // Check if we need to replace the return token with end token during
-    // inference and without generation prompt. For more details see:
-    // https://github.com/ggml-org/llama.cpp/issues/15417
+    // Replace the trailing `<|return|>` with `<|end|>` during inference when
+    // add_generation_prompt is false. See https://github.com/ggml-org/llama.cpp/issues/15417
     if (inputs.is_inference && !inputs.add_generation_prompt) {
         static constexpr std::string_view return_token = "<|return|>";
         static constexpr std::string_view end_token    = "<|end|>";

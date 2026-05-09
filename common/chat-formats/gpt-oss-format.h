@@ -1,7 +1,10 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/json-tagged-format.h"
+
+#include <string>
 
 // GPT-OSS chat format (OpenAI Harmony):
 //   https://github.com/openai/gpt-oss
@@ -39,3 +42,19 @@ class common_chat_gpt_oss_transformer : public common_chat_json_tagged_transform
 };
 
 extern const common_chat_format_state_rules gpt_oss_state_rules;
+
+// Render the GPT-OSS prompt. Mirrors `models/templates/openai-gpt-oss-120b.jinja`
+// byte-for-byte. The template uses OpenAI's Harmony multi-turn format with
+// channel-tagged messages. Notable mechanisms:
+//   * Always-emitted system message with model identity, knowledge cutoff,
+//     current date (from `inputs.now`), reasoning effort, and the
+//     "Valid channels" closer.
+//   * Optional developer message (extracted from the first system/developer
+//     message + tool namespace).
+//   * Per-message rendering with channel tags: `analysis` for thinking,
+//     `final` for content, `commentary` for tool calls/responses.
+//   * Future-final-message lookahead: tool-call messages drop their analysis
+//     channel emission when a later assistant final message exists.
+//   * `<|return|>` terminator for the last assistant message when
+//     `add_generation_prompt=false` (training shape); `<|end|>` otherwise.
+std::string common_chat_gpt_oss_render(const autoparser::generation_params & inputs);
