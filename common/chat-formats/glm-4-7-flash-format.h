@@ -1,9 +1,12 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
+
+#include <string>
 
 // GLM-4.7-Flash chat format (per-arg XML):
 //   <tool_call>NAME<arg_key>K1</arg_key><arg_value>V1</arg_value>...<arg_key>Kn</arg_key><arg_value>Vn</arg_value></tool_call>
@@ -49,3 +52,8 @@ class common_chat_glm_4_7_flash_transformer : public common_chat_format_transfor
 };
 
 extern const common_chat_format_state_rules glm_4_7_flash_state_rules;
+
+// Render the GLM-4.7-Flash prompt. Mirrors `models/templates/GLM-4.7-Flash.jinja`
+// byte-for-byte. Note: the template emits the BOS-like prefix `[gMASK]<sop>`
+// inline (no `bos_token` substitution).
+std::string common_chat_glm_4_7_flash_render(const autoparser::generation_params & inputs);

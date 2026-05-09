@@ -5,6 +5,7 @@
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/functionary-v3-2-format.h"
 #include "chat-formats/gigachat-v3-format.h"
+#include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
@@ -1413,8 +1414,9 @@ static common_chat_params common_chat_params_init_gigachat_v3(
 static common_chat_params common_chat_params_init_glm_4_7_flash(const common_chat_template &    tmpl,
                                                                 const autoparser::generation_params & inputs) {
     common_chat_params data;
+    (void) tmpl;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_glm_4_7_flash_render(inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH;
     data.supports_thinking = true;
     data.preserved_tokens  = {
