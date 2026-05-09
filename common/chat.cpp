@@ -4,6 +4,7 @@
 #include "chat-auto-parser.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/functionary-v3-2-format.h"
+#include "chat-formats/gemma4-format.h"
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
@@ -1155,7 +1156,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
                                                          const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_gemma4_render(inputs, tmpl.bos_token());
 
     if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<turn|>\n")) {
         // This may happen if the model generates content + tool_call, the

@@ -8,6 +8,7 @@
 
 #include "chat.h"
 #include "chat-formats/functionary-v3-2-format.h"
+#include "chat-formats/gemma4-format.h"
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
@@ -880,6 +881,135 @@ static void test_ministral_3_render(testing & t) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Gemma 4 writer parity tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_gemma4_render(testing & t) {
+    auto tmpls = load_template("models/templates/google-gemma-4-31B-it.jinja");
+    t.assert_true("Gemma 4 template loads", tmpls != nullptr);
+    if (!tmpls) {
+        return;
+    }
+
+    auto check = [&](const std::string & name,
+                     const ordered_json & messages,
+                     const ordered_json & tools,
+                     bool add_generation_prompt,
+                     bool enable_thinking) {
+        const std::string jinja_out = render_via_jinja(
+            tmpls.get(), messages, tools, add_generation_prompt, enable_thinking);
+        auto gp = to_generation_params(messages, tools, add_generation_prompt, enable_thinking);
+        const std::string bos_token;
+        const std::string writer_out = common_chat_gemma4_render(gp, bos_token);
+        if (jinja_out == writer_out) {
+            t.assert_true(name + " bytes match", true);
+        } else {
+            std::cerr << "\n=== Gemma 4 mismatch: " << name << " ===\n";
+            std::cerr << "Jinja  bytes (" << jinja_out.size() << "): " << jinja_out  << "\n";
+            std::cerr << "Writer bytes (" << writer_out.size() << "): " << writer_out << "\n";
+            t.assert_true(name + " bytes match", false);
+        }
+    };
+
+    t.test("user-only no thinking", [&](testing & t) {
+        (void) t;
+        check("user_only",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/false);
+    });
+
+    t.test("user-only with thinking", [&](testing & t) {
+        (void) t;
+        check("user_only_think",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/true);
+    });
+
+    t.test("system + user", [&](testing & t) {
+        (void) t;
+        check("system_user",
+              ordered_json::array({
+                  {{"role", "system"}, {"content", "You are X"}},
+                  {{"role", "user"},   {"content", "Hi"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/false);
+    });
+
+    t.test("multi-turn", [&](testing & t) {
+        (void) t;
+        check("multi_turn",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "Hello"}},
+                  {{"role", "assistant"}, {"content", "Hi there"}},
+                  {{"role", "user"},      {"content", "Goodbye"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/false);
+    });
+
+    t.test("with single-arg tool", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}, {"description", "The city"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        check("with_tool",
+              ordered_json::array({{{"role", "user"}, {"content", "Hi"}}}),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/false);
+    });
+
+    t.test("assistant tool call + tool result", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        ordered_json tool_call = {
+            {"type", "function"},
+            {"id", "call_0"},
+            {"function", {
+                {"name", "get_weather"},
+                {"arguments", {{"city", "Paris"}}},
+            }},
+        };
+        check("tool_cycle",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "What's the weather?"}},
+                  {{"role", "assistant"}, {"content", ""}, {"tool_calls", ordered_json::array({tool_call})}},
+                  {{"role", "tool"},      {"tool_call_id", "call_0"}, {"name", "get_weather"}, {"content", "{\"temp\":18}"}},
+              }),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true,
+              /*enable_thinking=*/false);
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -903,6 +1033,7 @@ int main(int argc, char * argv[]) {
     t.test("lfm2 writer parity",             test_lfm2_render);
     t.test("lfm2-5 writer parity",           test_lfm2_5_render);
     t.test("ministral-3 writer parity",      test_ministral_3_render);
+    t.test("gemma4 writer parity",           test_gemma4_render);
 
     return t.summary();
 }

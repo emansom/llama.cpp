@@ -1,10 +1,13 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 #include "peg-parser.h"
+
+#include <string>
 
 #include <unordered_set>
 
@@ -62,3 +65,15 @@ class common_chat_gemma4_transformer : public common_chat_format_transformer {
 };
 
 extern const common_chat_format_state_rules gemma4_state_rules;
+
+// Render the Gemma 4 prompt. Mirrors `models/templates/google-gemma-4-31B-it.jinja`
+// byte-for-byte. The template is the most intricate of the migrated formats:
+//   * System block emitted when tools, system message, or `enable_thinking`.
+//   * TypeScript-style schema with `<|"|>...<|"|>` Gemma string markers.
+//   * Continuation detection that suppresses duplicate `<|turn>model` when
+//     consecutive non-tool messages are both assistant.
+//   * Forward-scan of consecutive `tool` messages following an assistant
+//     `tool_calls` message (legacy `tool_responses` field also supported).
+//   * Per-content-type rendering (text / image / audio / video).
+std::string common_chat_gemma4_render(const autoparser::generation_params & inputs,
+                                      const std::string & bos_token);
