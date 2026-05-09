@@ -85,6 +85,8 @@ add_library(${TARGET}
     chat-formats/glm-4-7-flash-format.cpp
     chat-formats/gpt-oss-format.h
     chat-formats/gpt-oss-format.cpp
+    chat-formats/hermes-format.h
+    chat-formats/hermes-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
