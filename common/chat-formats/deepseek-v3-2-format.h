@@ -1,10 +1,13 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
 #include "chat-formats/format-transformer.h"
 #include "peg-parser.h"
+
+#include <string>
 
 #include <unordered_set>
 
@@ -73,3 +76,16 @@ class common_chat_deepseek_v3_2_transformer : public common_chat_format_transfor
 };
 
 extern const common_chat_format_state_rules deepseek_v3_2_state_rules;
+
+// Render the DeepSeek-V3.2 prompt. Mirrors
+// `models/templates/deepseek-ai-DeepSeek-V3.2.jinja` byte-for-byte.
+//
+// Wire format uses DSML XML markers (`<｜DSML｜function_calls>` / `<｜DSML｜
+// invoke>` / `<｜DSML｜parameter>`), DeepSeek role markers (`<｜User｜>` /
+// `<｜Assistant｜>` / `<｜end▁of▁sentence｜>`), and a state machine that
+// inserts `<think>...</think>` markers around assistant turns based on
+// where the assistant is positioned relative to the last user/developer
+// message. Tool results are wrapped in a `<function_results>...
+// </function_results>` envelope shared by all consecutive tool messages.
+std::string common_chat_deepseek_v3_2_render(const autoparser::generation_params & inputs,
+                                             const std::string & bos_token);

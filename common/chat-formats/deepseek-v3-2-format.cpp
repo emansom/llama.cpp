@@ -277,3 +277,287 @@ const common_chat_format_state_rules deepseek_v3_2_state_rules = {
         { common_chat_format_state::IN_TOOL_PARAM, "arg" },
     }
 };
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DeepSeek-V3.2 prompt writer
+// ──────────────────────────────────────────────────────────────────────────────
+
+namespace {
+using ordered_json = nlohmann::ordered_json;
+
+constexpr const char * DSML       = "\xef\xbd\x9c" "DSML" "\xef\xbd\x9c";  // U+FF5C "fullwidth bar"
+constexpr const char * USER_OPEN  = "<\xef\xbd\x9c" "User" "\xef\xbd\x9c>";
+constexpr const char * ASST_OPEN  = "<\xef\xbd\x9c" "Assistant" "\xef\xbd\x9c>";
+constexpr const char * EOS_MARKER = "<\xef\xbd\x9c" "end\xe2\x96\x81of\xe2\x96\x81sentence" "\xef\xbd\x9c>";
+
+// JSON serializer matching Jinja `tojson` defaults (ensure_ascii=true would
+// escape non-ASCII, which we don't reproduce; for the ASCII-only fixtures
+// the output is identical). Items use `, ` and keys `: ` separators.
+std::string to_jinja_json(const ordered_json & v) {
+    if (v.is_null())   return "null";
+    if (v.is_boolean()) return v.get<bool>() ? "true" : "false";
+    if (v.is_string() || v.is_number()) return v.dump();
+    if (v.is_array()) {
+        std::string out = "[";
+        bool first = true;
+        for (const auto & item : v) {
+            if (!first) out += ", ";
+            first = false;
+            out += to_jinja_json(item);
+        }
+        out += "]";
+        return out;
+    }
+    if (v.is_object()) {
+        std::string out = "{";
+        bool first = true;
+        for (auto it = v.begin(); it != v.end(); ++it) {
+            if (!first) out += ", ";
+            first = false;
+            out += ordered_json(it.key()).dump();
+            out += ": ";
+            out += to_jinja_json(it.value());
+        }
+        out += "}";
+        return out;
+    }
+    return "";
+}
+
+// The fixed tools header text (from line 14 of the Jinja template; many
+// embedded `<｜DSML｜...>` literal markers).
+std::string tools_header() {
+    const std::string d = DSML;
+    std::string h;
+    h += "## Tools\n\nYou have access to a set of tools you can use to answer the user's question.\n";
+    h += "You can invoke functions by writing a \"<" + d + "function_calls>\" block like the following as part of your reply to the user:\n";
+    h += "<" + d + "function_calls>\n";
+    h += "<" + d + "invoke name=\"$FUNCTION_NAME\">\n";
+    h += "<" + d + "parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</" + d + "parameter>\n";
+    h += "...\n";
+    h += "</" + d + "invoke>\n";
+    h += "<" + d + "invoke name=\"$FUNCTION_NAME2\">\n";
+    h += "...\n";
+    h += "</" + d + "invoke>\n";
+    h += "</" + d + "function_calls>\n\n";
+    h += "String and scalar parameters should be specified as is without any escaping or quotes, while lists and objects should use JSON format. The \"string\" attribute should be set to \"true\" for string type parameters and \"false\" for other types (numbers, booleans, arrays, objects).\n\n";
+    h += "If the thinking_mode is enabled, then after function results you should strongly consider outputting a thinking block. Here is an example:\n\n";
+    h += "<" + d + "function_calls>\n...\n</" + d + "function_calls>\n\n";
+    h += "<function_results>\n...\n</function_results>\n\n";
+    h += "<think>...thinking about results</think>\n\n";
+    h += "Here are the functions available in JSONSchema format:\n<functions>\n";
+    return h;
+}
+
+}  // namespace
+
+std::string common_chat_deepseek_v3_2_render(const autoparser::generation_params & inputs,
+                                             const std::string & bos_token) {
+    std::ostringstream out;
+
+    const bool thinking = inputs.enable_thinking;
+
+    // 1. Build system_prompt: concatenate all `system` role messages.
+    std::string system_prompt;
+    bool        is_first_sp = true;
+    if (inputs.messages.is_array()) {
+        for (const auto & msg : inputs.messages) {
+            if (msg.value("role", std::string{}) != "system") {
+                continue;
+            }
+            std::string content;
+            if (msg.contains("content") && msg["content"].is_string()) {
+                content = msg["content"].get<std::string>();
+            }
+            if (is_first_sp) {
+                system_prompt += content;
+                is_first_sp = false;
+            } else {
+                system_prompt += "\n\n" + content;
+            }
+        }
+    }
+
+    // 2. Tools schema appended to system_prompt.
+    if (inputs.tools.is_array() && !inputs.tools.empty()) {
+        std::string schemas;
+        for (const auto & tool : inputs.tools) {
+            if (tool.is_object() && tool.value("type", std::string{}) == "function" &&
+                tool.contains("function")) {
+                schemas += to_jinja_json(tool["function"]) + "\n";
+            }
+        }
+        const std::string tools_block = tools_header() + schemas + "</functions>\n";
+        if (!system_prompt.empty()) {
+            system_prompt += "\n\n" + tools_block;
+        } else {
+            system_prompt = tools_block;
+        }
+    }
+
+    // 3. BOS + system_prompt.
+    out << bos_token << system_prompt;
+
+    // 4. Find last_user_idx (last user/developer message).
+    int last_user_idx = -1;
+    if (inputs.messages.is_array()) {
+        for (size_t i = 0; i < inputs.messages.size(); ++i) {
+            const std::string r = inputs.messages[i].value("role", std::string{});
+            if (r == "user" || r == "developer") {
+                last_user_idx = static_cast<int>(i);
+            }
+        }
+    }
+
+    // 5. State-machine main loop.
+    bool pending_asst_marker = false;
+    bool pending_tool_marker = false;
+
+    if (!inputs.messages.is_array()) {
+        return out.str();
+    }
+    for (size_t i = 0; i < inputs.messages.size(); ++i) {
+        const auto & message = inputs.messages[i];
+        const std::string role = message.value("role", std::string{});
+
+        if (role == "user") {
+            std::string content;
+            if (message.contains("content") && message["content"].is_string()) {
+                content = message["content"].get<std::string>();
+            }
+            out << USER_OPEN << content;
+            pending_asst_marker = true;
+            pending_tool_marker = false;
+        } else if (role == "assistant") {
+            const bool is_after_last_user = static_cast<int>(i) > last_user_idx;
+
+            if (pending_asst_marker) {
+                out << ASST_OPEN;
+                if (is_after_last_user && thinking) {
+                    out << "<think>";
+                    if (message.contains("reasoning_content") &&
+                        message["reasoning_content"].is_string() &&
+                        !message["reasoning_content"].get<std::string>().empty()) {
+                        out << message["reasoning_content"].get<std::string>();
+                    }
+                    out << "</think>";
+                } else {
+                    out << "</think>";
+                }
+            } else if (pending_tool_marker) {
+                if (is_after_last_user && thinking) {
+                    out << "\n\n<think>";
+                    if (message.contains("reasoning_content") &&
+                        message["reasoning_content"].is_string() &&
+                        !message["reasoning_content"].get<std::string>().empty()) {
+                        out << message["reasoning_content"].get<std::string>();
+                    }
+                    out << "</think>";
+                } else {
+                    out << "\n\n</think>";
+                }
+            }
+            pending_asst_marker = false;
+            pending_tool_marker = false;
+
+            // Content.
+            if (message.contains("content") && message["content"].is_string() &&
+                !message["content"].get<std::string>().empty()) {
+                out << message["content"].get<std::string>();
+            }
+
+            // Tool calls.
+            if (message.contains("tool_calls") && message["tool_calls"].is_array() &&
+                !message["tool_calls"].empty()) {
+                const std::string d = DSML;
+                out << "\n\n<" << d << "function_calls>\n";
+                for (const auto & tool : message["tool_calls"]) {
+                    if (!tool.contains("function") || !tool["function"].is_object()) continue;
+                    const auto & func = tool["function"];
+                    out << "<" << d << "invoke name=\"" << func.value("name", std::string{}) << "\">\n";
+
+                    // Resolve arguments to a JSON object (parse if string).
+                    ordered_json args = func.value("arguments", ordered_json::object());
+                    if (args.is_string()) {
+                        try {
+                            args = ordered_json::parse(args.get<std::string>());
+                        } catch (...) {
+                            args = ordered_json::object();
+                        }
+                    }
+                    if (args.is_object()) {
+                        for (auto it = args.begin(); it != args.end(); ++it) {
+                            const std::string & key = it.key();
+                            const ordered_json & val = it.value();
+                            if (val.is_string()) {
+                                out << "<" << d << "parameter name=\"" << key << "\" string=\"true\">"
+                                    << val.get<std::string>()
+                                    << "</" << d << "parameter>\n";
+                            } else {
+                                out << "<" << d << "parameter name=\"" << key << "\" string=\"false\">"
+                                    << to_jinja_json(val)
+                                    << "</" << d << "parameter>\n";
+                            }
+                        }
+                    }
+                    out << "</" << d << "invoke>\n";
+                }
+                out << "</" << d << "function_calls>";
+            }
+
+            out << EOS_MARKER;
+        } else if (role == "tool") {
+            // Find the previous assistant message (with tool_calls) before this index.
+            int assistant_idx = -1;
+            for (size_t j = 0; j < i; ++j) {
+                if (inputs.messages[j].value("role", std::string{}) == "assistant" &&
+                    inputs.messages[j].contains("tool_calls") &&
+                    inputs.messages[j]["tool_calls"].is_array() &&
+                    !inputs.messages[j]["tool_calls"].empty()) {
+                    assistant_idx = static_cast<int>(j);
+                }
+            }
+            if (assistant_idx < 0) continue;
+
+            const int call_order = static_cast<int>(i) - assistant_idx;
+            const auto & assistant_msg = inputs.messages[assistant_idx];
+            const int tool_call_count = static_cast<int>(assistant_msg["tool_calls"].size());
+
+            if (call_order == 1) {
+                out << "\n\n<function_results>";
+            }
+            std::string content;
+            if (message.contains("content") && message["content"].is_string()) {
+                content = message["content"].get<std::string>();
+            }
+            out << "\n<result>" << content << "</result>";
+
+            if (call_order == tool_call_count) {
+                out << "\n</function_results>";
+                pending_asst_marker = false;
+                pending_tool_marker = true;
+            }
+        }
+        // system messages are absorbed into system_prompt above; skip in loop.
+    }
+
+    // 6. Generation prompt.
+    if (inputs.add_generation_prompt) {
+        if (pending_asst_marker) {
+            out << ASST_OPEN;
+            if (thinking) {
+                out << "<think>";
+            } else {
+                out << "<think></think>";
+            }
+        } else if (pending_tool_marker) {
+            if (thinking) {
+                out << "\n\n<think>";
+            } else {
+                out << "\n\n<think></think>";
+            }
+        }
+    }
+
+    return out.str();
+}

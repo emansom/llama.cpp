@@ -2,6 +2,7 @@
 
 #include "chat-auto-parser-helpers.h"
 #include "chat-auto-parser.h"
+#include "chat-formats/deepseek-v3-2-format.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/functionary-v3-2-format.h"
 #include "chat-formats/gemma4-format.h"
@@ -1433,7 +1434,7 @@ static common_chat_params common_chat_params_init_deepseek_v3_2(const common_cha
                                                                  const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_deepseek_v3_2_render(inputs, tmpl.bos_token());
     data.format            = COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_2;
     data.supports_thinking = true;
     data.thinking_start_tag = "<think>";
