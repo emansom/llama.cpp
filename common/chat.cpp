@@ -3,6 +3,7 @@
 #include "chat-auto-parser-helpers.h"
 #include "chat-auto-parser.h"
 #include "chat-formats/format-pipeline.h"
+#include "chat-formats/functionary-v3-2-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
@@ -1237,7 +1238,7 @@ static common_chat_params common_chat_params_init_functionary_v3_2(const common_
                                                                    const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt           = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt           = common_chat_functionary_v3_2_render(inputs, tmpl.bos_token());
     data.format           = COMMON_CHAT_FORMAT_PEG_FUNCTIONARY_V3_2;
     data.preserved_tokens = {
         ">>>all",
