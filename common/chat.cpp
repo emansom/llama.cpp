@@ -7,6 +7,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
+#include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
@@ -1350,7 +1351,7 @@ static common_chat_params common_chat_params_init_lfm2_5(const common_chat_templ
                                                          const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_lfm2_5_render(inputs, tmpl.bos_token());
     data.format            = COMMON_CHAT_FORMAT_PEG_LFM2_5;
     data.supports_thinking = true;
     data.preserved_tokens  = {

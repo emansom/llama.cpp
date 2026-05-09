@@ -11,6 +11,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/kimi-k2-format.h"
+#include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
 #include "testing.h"
 
@@ -661,6 +662,104 @@ static void test_lfm2_render(testing & t) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// LFM2.5 writer parity tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_lfm2_5_render(testing & t) {
+    auto tmpls = load_template("models/templates/LFM2.5-Instruct.jinja");
+    t.assert_true("LFM2.5 template loads", tmpls != nullptr);
+    if (!tmpls) {
+        return;
+    }
+
+    auto check = [&](const std::string & name,
+                     const ordered_json & messages,
+                     const ordered_json & tools,
+                     bool add_generation_prompt) {
+        const std::string jinja_out = render_via_jinja(
+            tmpls.get(), messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        auto gp = to_generation_params(messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        const std::string bos_token;
+        const std::string writer_out = common_chat_lfm2_5_render(gp, bos_token);
+        if (jinja_out == writer_out) {
+            t.assert_true(name + " bytes match", true);
+        } else {
+            std::cerr << "\n=== LFM2.5 mismatch: " << name << " ===\n";
+            std::cerr << "Jinja  bytes (" << jinja_out.size() << "): " << jinja_out  << "\n";
+            std::cerr << "Writer bytes (" << writer_out.size() << "): " << writer_out << "\n";
+            t.assert_true(name + " bytes match", false);
+        }
+    };
+
+    t.test("user-only no tools", [&](testing & t) {
+        (void) t;
+        check("user_only",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("system + user", [&](testing & t) {
+        (void) t;
+        check("system_user",
+              ordered_json::array({
+                  {{"role", "system"}, {"content", "You are X"}},
+                  {{"role", "user"},   {"content", "Hi"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("multi-turn", [&](testing & t) {
+        (void) t;
+        check("multi_turn",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "Hello"}},
+                  {{"role", "assistant"}, {"content", "Hi there"}},
+                  {{"role", "user"},      {"content", "Goodbye"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("with tools (no system)", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        check("with_tools_no_sys",
+              ordered_json::array({{{"role", "user"}, {"content", "Hi"}}}),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("past-assistant thinking stripped", [&](testing & t) {
+        (void) t;
+        // Two assistant messages: the earlier one's <think>...</think> should
+        // be stripped; the latest one's reasoning is preserved.
+        check("past_thinking_stripped",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "First"}},
+                  {{"role", "assistant"}, {"content", "<think>past reasoning</think>past answer"}},
+                  {{"role", "user"},      {"content", "Second"}},
+                  {{"role", "assistant"}, {"content", "<think>current reasoning</think>current answer"}},
+                  {{"role", "user"},      {"content", "Third"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -682,6 +781,7 @@ int main(int argc, char * argv[]) {
     t.test("gigachat-v3 writer parity",      test_gigachat_v3_render);
     t.test("glm-4-7-flash writer parity",    test_glm_4_7_flash_render);
     t.test("lfm2 writer parity",             test_lfm2_render);
+    t.test("lfm2-5 writer parity",           test_lfm2_5_render);
 
     return t.summary();
 }
