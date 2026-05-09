@@ -4,6 +4,7 @@
 #include "chat-auto-parser.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/functionary-v3-2-format.h"
+#include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
@@ -1378,7 +1379,7 @@ static common_chat_params common_chat_params_init_gigachat_v3(
 
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_gigachat_v3_render(inputs, tmpl.bos_token());
     data.format            = COMMON_CHAT_FORMAT_PEG_GIGACHAT_V3;
     data.supports_thinking = false;
     data.preserved_tokens  = {

@@ -8,6 +8,7 @@
 
 #include "chat.h"
 #include "chat-formats/functionary-v3-2-format.h"
+#include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "testing.h"
 
@@ -315,6 +316,107 @@ static void test_functionary_v3_2_render(testing & t) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// GigaChat v3 writer parity tests (older `function call` separate-turn variant)
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_gigachat_v3_render(testing & t) {
+    auto tmpls = load_template("models/templates/GigaChat3-10B-A1.8B.jinja");
+    t.assert_true("GigaChat v3 template loads", tmpls != nullptr);
+    if (!tmpls) {
+        return;
+    }
+
+    auto check = [&](const std::string & name,
+                     const ordered_json & messages,
+                     const ordered_json & tools,
+                     bool add_generation_prompt) {
+        const std::string jinja_out = render_via_jinja(
+            tmpls.get(), messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        auto gp = to_generation_params(messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        const std::string bos_token;  // template emits bos_token verbatim; both sides empty.
+        const std::string writer_out = common_chat_gigachat_v3_render(gp, bos_token);
+        if (jinja_out == writer_out) {
+            t.assert_true(name + " bytes match", true);
+        } else {
+            std::cerr << "\n=== GigaChat v3 mismatch: " << name << " ===\n";
+            std::cerr << "Jinja  bytes (" << jinja_out.size() << "): " << jinja_out  << "\n";
+            std::cerr << "Writer bytes (" << writer_out.size() << "): " << writer_out << "\n";
+            t.assert_true(name + " bytes match", false);
+        }
+    };
+
+    t.test("user-only no tools", [&](testing & t) {
+        (void) t;
+        check("user_only",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("system + user", [&](testing & t) {
+        (void) t;
+        check("system_user",
+              ordered_json::array({
+                  {{"role", "system"}, {"content", "You are X"}},
+                  {{"role", "user"},   {"content", "Hi"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("multi-turn user/assistant", [&](testing & t) {
+        (void) t;
+        check("multi_turn",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "Hello"}},
+                  {{"role", "assistant"}, {"content", "Hi there"}},
+                  {{"role", "user"},      {"content", "Goodbye"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("with single-arg function tool", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "special_function"},
+                {"description", "I'm special"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"arg1", {{"type", "integer"}, {"description", "The arg."}}}}},
+                    {"required", ordered_json::array({"arg1"})},
+                }},
+            }},
+        };
+        check("with_function",
+              ordered_json::array({{{"role", "user"}, {"content", "Hi"}}}),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("assistant tool call + tool result", [&](testing & t) {
+        (void) t;
+        ordered_json tool_call = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"arguments", {{"city", "Paris"}}},
+            }},
+        };
+        check("tool_cycle",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "What's the weather?"}},
+                  {{"role", "assistant"}, {"content", ""}, {"tool_calls", ordered_json::array({tool_call})}},
+                  {{"role", "tool"},      {"tool_call_id", "call_0"}, {"content", "{\"temp\":18}"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -332,7 +434,8 @@ int main(int argc, char * argv[]) {
     common_chat_grammar_init("grammars/chat");
 
     t.test("kimi-k2 writer parity",          test_kimi_k2_render);
-    t.test("functionary-v3.2 writer parity",  test_functionary_v3_2_render);
+    t.test("functionary-v3.2 writer parity", test_functionary_v3_2_render);
+    t.test("gigachat-v3 writer parity",      test_gigachat_v3_render);
 
     return t.summary();
 }
