@@ -13,6 +13,7 @@
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
+#include "chat-formats/ministral-3-format.h"
 #include "testing.h"
 
 #include <fstream>
@@ -760,6 +761,125 @@ static void test_lfm2_5_render(testing & t) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Ministral-3 writer parity tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_ministral_3_render(testing & t) {
+    auto tmpls = load_template("models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja");
+    t.assert_true("Ministral-3 template loads", tmpls != nullptr);
+    if (!tmpls) {
+        return;
+    }
+
+    auto check = [&](const std::string & name,
+                     const ordered_json & messages,
+                     const ordered_json & tools,
+                     bool add_generation_prompt) {
+        const std::string jinja_out = render_via_jinja(
+            tmpls.get(), messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        auto gp = to_generation_params(messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        // Both bos and eos pass empty here: load_template() doesn't supply a
+        // tokenizer, so the Jinja path renders an empty `bos_token`/`eos_token`.
+        // Production callers pass `tmpl.bos_token()` / `tmpl.eos_token()`.
+        const std::string bos_token;
+        const std::string eos_token;
+        const std::string writer_out = common_chat_ministral_3_render(gp, bos_token, eos_token);
+        if (jinja_out == writer_out) {
+            t.assert_true(name + " bytes match", true);
+        } else {
+            std::cerr << "\n=== Ministral-3 mismatch: " << name << " ===\n";
+            std::cerr << "Jinja  bytes (" << jinja_out.size() << "): " << jinja_out  << "\n";
+            std::cerr << "Writer bytes (" << writer_out.size() << "): " << writer_out << "\n";
+            t.assert_true(name + " bytes match", false);
+        }
+    };
+
+    t.test("user-only no tools", [&](testing & t) {
+        (void) t;
+        check("user_only",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("system + user", [&](testing & t) {
+        (void) t;
+        check("system_user",
+              ordered_json::array({
+                  {{"role", "system"}, {"content", "You are X"}},
+                  {{"role", "user"},   {"content", "Hi"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("multi-turn user/assistant", [&](testing & t) {
+        (void) t;
+        check("multi_turn",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "Hello"}},
+                  {{"role", "assistant"}, {"content", "Hi there"}},
+                  {{"role", "user"},      {"content", "Goodbye"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("with tools", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        check("with_tools",
+              ordered_json::array({{{"role", "user"}, {"content", "Hi"}}}),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("assistant tool call + tool result", [&](testing & t) {
+        (void) t;
+        ordered_json tool_call = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"arguments", {{"city", "Paris"}}},
+            }},
+        };
+        check("tool_cycle",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "What's the weather?"}},
+                  {{"role", "assistant"}, {"content", ""}, {"tool_calls", ordered_json::array({tool_call})}},
+                  {{"role", "tool"},      {"tool_call_id", "call_0"}, {"content", "{\"temp\":18}"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("assistant with reasoning_content", [&](testing & t) {
+        (void) t;
+        // reasoning_content is preprocessed into a `thinking` typed-content
+        // block, which the Jinja template renders as `[THINK]...[/THINK]`.
+        check("with_reasoning",
+              ordered_json::array({
+                  {{"role", "user"},      {"content", "Solve 2+2"}},
+                  {{"role", "assistant"}, {"content", "4"}, {"reasoning_content", "Adding 2 and 2"}},
+                  {{"role", "user"},      {"content", "Thanks"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -782,6 +902,7 @@ int main(int argc, char * argv[]) {
     t.test("glm-4-7-flash writer parity",    test_glm_4_7_flash_render);
     t.test("lfm2 writer parity",             test_lfm2_render);
     t.test("lfm2-5 writer parity",           test_lfm2_5_render);
+    t.test("ministral-3 writer parity",      test_ministral_3_render);
 
     return t.summary();
 }

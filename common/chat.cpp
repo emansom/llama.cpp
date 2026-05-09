@@ -9,6 +9,7 @@
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
+#include "chat-formats/ministral-3-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
 #include "gbnf-to-peg.h"
@@ -1034,52 +1035,15 @@ static common_chat_params common_chat_params_init_ministral_3(const common_chat_
                                                               const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    // Build up messages to follow the format: https://huggingface.co/mistralai/Ministral-3-14B-Reasoning-2512/blob/main/chat_template.jinja
-    auto adjusted_messages = json::array();
-    for (const auto & msg : inputs.messages) {
-        auto role = msg.value("role", "");
-        if (role != "system" && role != "assistant") {
-            // Only adjust system and assistant messages. Interestingly, the system message may contain thinking.
-            adjusted_messages.push_back(msg);
-            continue;
-        }
-
-        auto content = json::array();
-
-        // If message contains `reasoning_content`, add it as a block of type `thinking`
-        if (msg.contains("reasoning_content") && msg.at("reasoning_content").is_string()) {
-            content.push_back({
-                { "type",     "thinking"                                     },
-                { "thinking", msg.at("reasoning_content").get<std::string>() },
-            });
-        }
-
-        // If message contains `content`, add it as a block of type `text`
-        if (msg.contains("content")) {
-            if (msg.at("content").is_string()) {
-                content.push_back({
-                    { "type", "text"                               },
-                    { "text", msg.at("content").get<std::string>() },
-                });
-            } else if (msg.at("content").is_array()) {
-                auto blocks = msg.at("content");
-                content.insert(content.end(), blocks.begin(), blocks.end());
-            }
-        }
-
-        auto adjusted       = msg;
-        adjusted["content"] = content;
-        adjusted.erase("reasoning_content");
-        adjusted_messages.push_back(adjusted);
-    }
-
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
     auto has_response_format = inputs.json_schema.is_object() && !inputs.json_schema.empty();
 
     data.supports_thinking  = true;
     data.thinking_start_tag = "[THINK]";
     data.thinking_end_tag   = "[/THINK]";
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
+    // The writer performs the same `reasoning_content` -> typed-content
+    // preprocessing the previous Jinja-driven path did inline.
+    data.prompt            = common_chat_ministral_3_render(inputs, tmpl.bos_token(), tmpl.eos_token());
     data.format            = COMMON_CHAT_FORMAT_PEG_MINISTRAL_3;
     data.preserved_tokens  = {
         "[THINK]",

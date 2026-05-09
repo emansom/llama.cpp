@@ -1,7 +1,10 @@
 #pragma once
 
+#include "chat-auto-parser.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/json-tagged-format.h"
+
+#include <string>
 
 // Ministral-3 chat format: `[THINK]…[/THINK][TOOL_CALLS]name[ARGS]{json}`.
 //
@@ -21,3 +24,16 @@ class common_chat_ministral_3_transformer : public common_chat_json_tagged_trans
 };
 
 extern const common_chat_format_state_rules ministral_3_state_rules;
+
+// Render the Ministral-3 prompt. Mirrors
+// `models/templates/mistralai-Ministral-3-14B-Reasoning-2512.jinja`
+// byte-for-byte. Performs the same `reasoning_content` → typed-content
+// preprocessing the existing init function did before passing to Jinja
+// (`thinking` block + `text` block on system/assistant messages).
+//
+// The Ministral-3 template emits no explicit generation prompt --- the
+// model continues right after the last `[/INST]` or `[/TOOL_RESULTS]`.
+// `add_generation_prompt` is therefore unused.
+std::string common_chat_ministral_3_render(const autoparser::generation_params & inputs,
+                                           const std::string & bos_token,
+                                           const std::string & eos_token);
