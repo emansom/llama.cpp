@@ -10,6 +10,7 @@
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/hermes-format.h"
+#include "chat-formats/qwq-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
@@ -1296,6 +1297,55 @@ static common_chat_params common_chat_params_init_hermes(const common_chat_templ
     return data;
 }
 
+// QwQ (Qwen-QwQ-32B) format: tool-call wire shape mirrors Hermes/Qwen2.5
+// (`<tool_call>\n{"name":"X","arguments":{json}}\n</tool_call>`), but the
+// assistant turn additionally has a leading `<think>...</think>` reasoning
+// block --- the template's generation prompt ends with `<think>\n` (or
+// `<think>\n</think>` when enable_thinking=false), so the parser sees the
+// full think block once `generation_prompt` is prepended to model output.
+static common_chat_params common_chat_params_init_qwq(const common_chat_template &    tmpl,
+                                                      const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_qwq_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_HERMES;  // Same output pipeline as Hermes.
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+        "<think>",
+        "</think>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+
+    {
+        const auto base_grammar = common_chat_grammar_get("qwq");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = false;  // generation_prompt is prepended to parser input.
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+
+        // Detect which think prefix the template emitted; the parser needs to
+        // see the full `<think>...</think>` span. Mirrors GLM-4.7-Flash.
+        if (string_ends_with(data.prompt, "<think>\n</think>")) {
+            data.generation_prompt = "<think>\n</think>";
+        } else if (string_ends_with(data.prompt, "<think>\n")) {
+            data.generation_prompt = "<think>\n";
+        }
+    }
+    return data;
+}
+
 // LFM2 format: uses <|tool_list_start|>[...]<|tool_list_end|> in system prompt
 // and <|tool_call_start|>[name(arg="val")]<|tool_call_end|> for tool calls.
 // - Reasoning: <think>{reasoning}</think> (optional)
@@ -1766,6 +1816,18 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<tool_call>") != std::string::npos) {
         LOG_DBG("Using specialized template: Hermes\n");
         return common_chat_params_init_hermes(tmpl, params);
+    }
+
+    // QwQ (Qwen-QwQ-32B) detection: tool-call wire shape mirrors
+    // Hermes/Qwen2.5 (`<tool_call>\n{"name": ...`) and the generation prompt
+    // ends with `<think>\n`. The `<tool_call>\n{"name": "` literal narrows
+    // the format to the JSON-args family (excludes Nemotron's
+    // `<tool_call>\n<function=` shape) and the `<|im_start|>assistant\n
+    // <think>\n` literal narrows further to QwQ (excludes plain Qwen2.5).
+    if (src.find("<tool_call>\\n{\"name\": \"") != std::string::npos &&
+        src.find("<|im_start|>assistant\\n<think>\\n") != std::string::npos) {
+        LOG_DBG("Using specialized template: QwQ\n");
+        return common_chat_params_init_qwq(tmpl, params);
     }
 
     if (is_lfm2_template(src)) {

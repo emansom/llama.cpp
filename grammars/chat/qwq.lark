@@ -1,0 +1,50 @@
+%llguidance {}
+
+# QwQ (Qwen-QwQ-32B) chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn (after the template's
+# generation prompt `<|im_start|>assistant\n<think>\n` has been emitted):
+#   <think>\n<reasoning></think><content>(<tool_call>\n{json}\n?</tool_call>)*
+#
+# The init function sets `generation_prompt = "<think>\n"` (or
+# `"<think>\n</think>"` when enable_thinking is false) so the parser sees
+# the full `<think>...</think>...` span --- closing tokens stay required
+# per docs/POLICIES.md.
+#
+# Two named entries:
+#   - `start` (default) --- assistant-turn continuation; sampler entry.
+#   - `conversation` --- full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# {{TOOL_SCHEMA}} is replaced at runtime with the JSON-object matcher.
+
+start: assistant_body
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+assistant_body: think_block content tool_call_block?
+
+think_block: "<think>\n" reasoning "</think>"
+reasoning: /(.|\n)*?/
+
+content: /([^<]|<(?!tool_call>))*/
+
+tool_call_block: tool_call+
+tool_call: "<tool_call>\n" "{\"name\": \"" func_name "\", \"arguments\": " tool_args "}" tool_close
+# Real-world model outputs sometimes elide the `\n` before `</tool_call>`.
+tool_close: "\n</tool_call>" | "</tool_call>"
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+tool_args: {{TOOL_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | tool_turn | assistant_full_turn
+system_turn:         "<|im_start|>system\n"    turn_body_text "<|im_end|>\n"
+user_turn:           "<|im_start|>user\n"      turn_body_text "<|im_end|>\n"
+tool_turn:           "<|im_start|>tool\n"      turn_body_text "<|im_end|>\n"
+assistant_full_turn: "<|im_start|>assistant\n" turn_body_text "<|im_end|>\n"
+assistant_open:      "<|im_start|>assistant\n"
+
+turn_body_text: /([^<]|<(?!\|im_end\|))*/

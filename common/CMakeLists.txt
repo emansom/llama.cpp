@@ -87,6 +87,8 @@ add_library(${TARGET}
     chat-formats/gpt-oss-format.cpp
     chat-formats/hermes-format.h
     chat-formats/hermes-format.cpp
+    chat-formats/qwq-format.h
+    chat-formats/qwq-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
