@@ -2,8 +2,25 @@
 
 #include "chat-auto-parser.h"
 #include "chat-formats/format-state-registry.h"
+#include "chat-formats/json-tagged-format.h"
 
 #include <string>
+
+// Hermes uses the same JSON-tagged shape as Kimi-K2/Ministral-3/etc.
+// (envelope around `{"name": ..., "arguments": ...}`), so the codec
+// pipeline reuses the json-tagged base. The grammar's tool_call rule
+// auto-tags as "tool" and its `func_name` / `tool_args` sub-rules
+// auto-tag as "tool-name" / "tool-args" --- exactly what
+// common_chat_json_tagged_decoder expects.
+class common_chat_hermes_tracker     : public common_chat_json_tagged_tracker {};
+class common_chat_hermes_decoder     : public common_chat_json_tagged_decoder {
+  public:
+    using common_chat_json_tagged_decoder::common_chat_json_tagged_decoder;
+};
+class common_chat_hermes_transformer : public common_chat_json_tagged_transformer {
+  public:
+    using common_chat_json_tagged_transformer::common_chat_json_tagged_transformer;
+};
 
 // Hermes (NousResearch Hermes-2-Pro / Hermes-3 / Qwen2.5 / MiMo-VL family)
 // chat format. Wire shape:

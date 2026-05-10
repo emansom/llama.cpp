@@ -165,6 +165,7 @@ enum common_chat_format {
     COMMON_CHAT_FORMAT_PEG_GIGACHAT_V3,     // GigaChat XML-ish with JSON args
     COMMON_CHAT_FORMAT_PEG_QWEN3_CODER,     // <tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>
     COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH,   // <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>
+    COMMON_CHAT_FORMAT_PEG_HERMES,          // <tool_call>\n{"name":"NAME","arguments":{json}}\n</tool_call>
 
     COMMON_CHAT_FORMAT_COUNT,  // Not a format, just the # formats
 };

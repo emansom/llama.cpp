@@ -9,6 +9,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
+#include "chat-formats/hermes-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
@@ -1263,6 +1264,38 @@ static common_chat_params common_chat_params_init_kimi_k2(const common_chat_temp
     return data;
 }
 
+// Hermes (NousResearch Hermes-2-Pro / Hermes-3) format: assistant body is
+// `<content><tool_call>\n{"name":"NAME","arguments":{json}}\n</tool_call>(...)*`.
+// JSON-tagged shape; reuses the json-tagged-format codec pipeline.
+static common_chat_params common_chat_params_init_hermes(const common_chat_template &    tmpl,
+                                                         const autoparser::generation_params & inputs) {
+    common_chat_params data;
+
+    data.prompt           = common_chat_hermes_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_HERMES;
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+    };
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+
+    {
+        const auto base_grammar = common_chat_grammar_get("hermes");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+    }
+    return data;
+}
+
 // LFM2 format: uses <|tool_list_start|>[...]<|tool_list_end|> in system prompt
 // and <|tool_call_start|>[name(arg="val")]<|tool_call_end|> for tool calls.
 // - Reasoning: <think>{reasoning}</think> (optional)
@@ -1722,6 +1755,17 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|tool_call_begin|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Kimi K2 Thinking\n");
         return common_chat_params_init_kimi_k2(tmpl, params);
+    }
+
+    // Hermes (NousResearch Hermes-2-Pro / Hermes-3) detection: the canonical
+    // "function calling AI model" instruction string is unique to the Hermes
+    // tool_use templates. Other templates that use <tool_call>...</tool_call>
+    // markup (Qwen2.5, MiMo-VL) have different system text and continue to
+    // route through the auto-parser.
+    if (src.find("You are a function calling AI model") != std::string::npos &&
+        src.find("<tool_call>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Hermes\n");
+        return common_chat_params_init_hermes(tmpl, params);
     }
 
     if (is_lfm2_template(src)) {
