@@ -23,6 +23,7 @@
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/ministral-3-format.h"
 #include "chat-formats/qwen3-5-format.h"
+#include "chat-formats/seed-oss-format.h"
 #include "common.h"
 #include "lark-to-peg.h"
 #include "peg-parser.h"
@@ -576,6 +577,10 @@ static void test_state_rules_cohere_c4ai(testing & t) {
     assert_state_rules_validate(t, "cohere-c4ai", cohere_c4ai_state_rules);
 }
 
+static void test_state_rules_seed_oss(testing & t) {
+    assert_state_rules_validate(t, "seed-oss", seed_oss_state_rules);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Granite 4.0
 // ──────────────────────────────────────────────────────────────────────────────
@@ -679,6 +684,7 @@ int main(int argc, char * argv[]) {
     t.test("qwen3-5 state rules",          test_state_rules_qwen3_5);
     t.test("granite-4 state rules",        test_state_rules_granite_4);
     t.test("cohere-c4ai state rules",      test_state_rules_cohere_c4ai);
+    t.test("seed-oss state rules",         test_state_rules_seed_oss);
 
     return t.summary();
 }

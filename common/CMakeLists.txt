@@ -97,6 +97,8 @@ add_library(${TARGET}
     chat-formats/nemotron-format.cpp
     chat-formats/cohere-c4ai-format.h
     chat-formats/cohere-c4ai-format.cpp
+    chat-formats/seed-oss-format.h
+    chat-formats/seed-oss-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

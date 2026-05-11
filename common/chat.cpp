@@ -15,6 +15,7 @@
 #include "chat-formats/nemotron-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwq-format.h"
+#include "chat-formats/seed-oss-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
@@ -1383,6 +1384,43 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// ByteDance Seed-OSS format. Wire shape:
+//   (<seed:think>{reasoning}</seed:think>\n)?
+//   {content}
+//   (<seed:tool_call>\n<function=NAME>\n
+//     (<parameter=K>VALUE</parameter>\n)*
+//   </function>\n</seed:tool_call>)*
+static common_chat_params common_chat_params_init_seed_oss(const common_chat_template &    tmpl,
+                                                           const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_seed_oss_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_SEED_OSS;
+    data.preserved_tokens = {
+        "<seed:tool_call>",
+        "</seed:tool_call>",
+        "<seed:think>",
+        "</seed:think>",
+        "<seed:bos>",
+        "<seed:eos>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<seed:think>";
+    data.thinking_end_tag   = "</seed:think>";
+
+    {
+        const auto base_grammar = common_chat_grammar_get("seed-oss");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // Cohere c4ai Command-R format. Wire shape:
 //   <|START_THINKING|>{reasoning}<|END_THINKING|>
 //     (<|START_ACTION|>[json_array_of_tool_calls]<|END_ACTION|>
@@ -2005,6 +2043,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("g4_default_system_message") != std::string::npos) {
         LOG_DBG("Using specialized template: Granite 4.0\n");
         return common_chat_params_init_granite_4(tmpl, params);
+    }
+
+    // ByteDance Seed-OSS detection: `<seed:tool_call>` and `<seed:bos>` are
+    // unique to this template.
+    if (src.find("toolcall_begin_token") != std::string::npos &&
+        src.find("<seed:bos>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Seed-OSS\n");
+        return common_chat_params_init_seed_oss(tmpl, params);
     }
 
     // Cohere c4ai Command-R detection: emit-stage tokens

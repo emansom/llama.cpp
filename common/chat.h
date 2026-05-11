@@ -169,6 +169,7 @@ enum common_chat_format {
     COMMON_CHAT_FORMAT_PEG_QWEN3_5,         // <tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n</tool_call>
     COMMON_CHAT_FORMAT_PEG_GRANITE_4,       // IBM Granite 4.0: Hermes-like JSON tool wire shape, IBM role markers
     COMMON_CHAT_FORMAT_PEG_COHERE_C4AI,     // Cohere c4ai: <|START_THINKING|>...<|END_THINKING|><|START_ACTION|>[json]<|END_ACTION|>
+    COMMON_CHAT_FORMAT_PEG_SEED_OSS,        // ByteDance Seed-OSS: <seed:tool_call><function=NAME><parameter=K>V</parameter></function></seed:tool_call>
 
     COMMON_CHAT_FORMAT_COUNT,  // Not a format, just the # formats
 };

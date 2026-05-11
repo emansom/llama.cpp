@@ -1,0 +1,31 @@
+# ByteDance Seed-OSS chat grammar (GBNF)
+
+root ::= assistant-body
+
+assistant-body ::= with-thinking | without-thinking
+with-thinking ::= think-block content tool-call-block?
+without-thinking ::= content tool-call-block?
+
+think-block ::= "<seed:think>" reasoning "</seed:think>"
+reasoning ::= ( [^<] | "<" [^/] | "</" [^s] )*
+
+content ::= ( [^<] | "<" [^s] | "<s" [^e] )*
+
+tool-call-block ::= tool-call ( "\n"* tool-call )*
+tool-call ::= "<seed:tool_call>\n<function=" func-name ">\n" parameter+ "</function>\n</seed:tool_call>"
+
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+
+parameter ::= "<parameter=" arg-name ">" arg-value "</parameter>\n"
+arg-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+arg-value ::= ( [^<] | "<" [^/] | "</" [^p] )*
+
+conversation ::= turn+ assistant-open?
+turn ::= system-turn | user-turn | tool-turn | assistant-full-turn
+system-turn ::= "<seed:bos>system\n" turn-body-text "<seed:eos>"
+user-turn ::= "<seed:bos>user\n" turn-body-text "<seed:eos>"
+tool-turn ::= "<seed:bos>tool\n" turn-body-text "<seed:eos>"
+assistant-full-turn ::= "<seed:bos>assistant\n" turn-body-text "<seed:eos>"
+assistant-open ::= "<seed:bos>assistant\n"
+
+turn-body-text ::= ( [^<] | "<" [^s] | "<s" [^e] | "<se" [^e] )*

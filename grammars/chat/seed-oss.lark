@@ -1,0 +1,51 @@
+%llguidance {}
+
+# ByteDance Seed-OSS chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn:
+#   (<seed:think>{reasoning}</seed:think>\n)?
+#   {content}
+#   (<seed:tool_call>\n<function=NAME>\n
+#     (<parameter=K>VALUE</parameter>\n)*
+#   </function>\n</seed:tool_call>)*
+#
+# Per-arg XML tool format (similar to Qwen3.5) but values are inline
+# `<parameter=K>VALUE</parameter>` without surrounding newlines.
+#
+# Two named entries:
+#   - `start` (default) --- assistant-turn continuation; sampler entry.
+#   - `conversation` --- full conversation wire shape.
+
+start: assistant_body
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+assistant_body: with_thinking | without_thinking
+with_thinking: think_block content tool_call_block?
+without_thinking: content tool_call_block?
+
+think_block: "<seed:think>" reasoning "</seed:think>"
+reasoning: /([^<]|<(?!\/seed:think>))*/
+
+content: /([^<]|<(?!seed:tool_call>))*/
+
+tool_call_block: tool_call+
+tool_call: "<seed:tool_call>\n<function=" func_name ">\n" parameter+ "</function>\n</seed:tool_call>" "\n"?
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+parameter: "<parameter=" arg_name ">" arg_value "</parameter>\n"
+arg_name: ARG_NAME
+ARG_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+arg_value: /([^<]|<(?!\/parameter>))*/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | tool_turn | assistant_full_turn
+system_turn:         "<seed:bos>system\n"    turn_body_text "<seed:eos>"
+user_turn:           "<seed:bos>user\n"      turn_body_text "<seed:eos>"
+tool_turn:           "<seed:bos>tool\n"      turn_body_text "<seed:eos>"
+assistant_full_turn: "<seed:bos>assistant\n" turn_body_text "<seed:eos>"
+assistant_open:      "<seed:bos>assistant\n"
+
+turn_body_text: /([^<]|<(?!seed:eos>))*/
