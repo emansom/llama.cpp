@@ -10,6 +10,7 @@
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
+#include "chat-formats/apriel-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/ministral-3-format.h"
@@ -159,6 +160,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_simple_reasoning_tracker,
                 common_chat_simple_reasoning_decoder,
                 common_chat_simple_reasoning_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_APRIEL:
+            return make_pipeline_default<
+                common_chat_apriel_tracker,
+                common_chat_apriel_decoder,
+                common_chat_apriel_transformer>(msg, is_partial_parse, reasoning_format);
 
         default:
             return common_chat_format_pipeline{};

@@ -107,6 +107,8 @@ add_library(${TARGET}
     chat-formats/deepseek-r1-format.cpp
     chat-formats/simple-reasoning-format.h
     chat-formats/simple-reasoning-format.cpp
+    chat-formats/apriel-format.h
+    chat-formats/apriel-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

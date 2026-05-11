@@ -1,0 +1,15 @@
+# Apriel-1.6-Thinker chat grammar (GBNF)
+
+root ::= assistant-body
+
+assistant-body ::= reasoning-block content tool-calls-block?
+reasoning-block ::= reasoning "\n[BEGIN FINAL RESPONSE]\n"
+reasoning ::= ( [^[] | "[" [^B] )*
+
+content ::= ( [^<] | "<" [^t] | "<t" [^o] )*
+
+tool-calls-block ::= "<tool_calls>[" json-ws tool-call ( "," json-ws tool-call )* json-ws "]</tool_calls>"
+json-ws ::= ( " " | "\t" | "\n" )*
+tool-call ::= "{\"name\": \"" func-name "\", \"arguments\": " tool-args "}"
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+tool-args ::= "{" ( [^}] | "{" [^}]* "}" )* "}"

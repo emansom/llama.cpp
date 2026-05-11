@@ -1,0 +1,25 @@
+%llguidance {}
+
+# Apriel-1.5 (unsloth) chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn:
+#   <content>(<tool_calls>[json]</tool_calls>)?
+#
+# No reasoning block. Tool calls are a JSON array of
+# `{"name": "...", "arguments": {...}}` objects wrapped in
+# `<tool_calls>...</tool_calls>`.
+
+start: assistant_body
+
+assistant_body: content tool_calls_block?
+
+content: /([^<]|<(?!tool_calls>))*/
+
+tool_calls_block: "<tool_calls>[" tool_call_separator tool_call (tool_call_separator tool_call)* tool_call_separator? "]</tool_calls>"
+tool_call_separator: "," json_ws | json_ws
+tool_call: "{\"name\": \"" func_name "\", \"arguments\": " tool_args "}"
+
+json_ws: /[ \t\n]*/
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}
