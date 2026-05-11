@@ -10,6 +10,7 @@
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
+#include "chat-formats/glm-4-6-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/nemotron-format.h"
@@ -1384,6 +1385,61 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// GLM-4.6 format. Wire shape mirrors GLM-4.7-Flash but with newlines
+// between arg_key/arg_value pairs:
+//   <tool_call>NAME\n<arg_key>K</arg_key>\n<arg_value>V</arg_value>\n
+//     ...</tool_call>
+// Reuses the GLM-4.7-Flash output codec (same kv-extraction pattern); only
+// the grammar's tool_arg whitespace and the writer's tool-call rendering
+// differ.
+static common_chat_params common_chat_params_init_glm_4_6(const common_chat_template &    tmpl,
+                                                          const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_glm_4_6_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH;  // shares output pipeline
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<arg_key>",
+        "</arg_key>",
+        "<arg_value>",
+        "</arg_value>",
+        "<think>",
+        "</think>",
+        "<tool_response>",
+        "</tool_response>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    {
+        const auto base_grammar = common_chat_grammar_get("glm-4-6");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = false;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+
+        // GLM-4.6 generation prompt emits `<|assistant|>` (thinking on, no
+        // think block prefilled) or `<|assistant|>\n<think></think>`
+        // (thinking off). For the parser to see a complete `<think>...
+        // </think>` span we always need to prepend the empty `<think>
+        // </think>` literal when thinking is on (the model continues from
+        // after the literal); when thinking is off the literal is already
+        // in the prompt.
+        if (string_ends_with(data.prompt, "<think></think>")) {
+            data.generation_prompt = "<think></think>";
+        } else {
+            data.generation_prompt = "<think></think>";  // thinking-on: prepend empty think
+        }
+    }
+    return data;
+}
+
 // ByteDance Seed-OSS format. Wire shape:
 //   (<seed:think>{reasoning}</seed:think>\n)?
 //   {content}
@@ -2119,6 +2175,18 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<tool_call>") != std::string::npos) {
         LOG_DBG("Using specialized template: GLM-4.7-Flash\n");
         return common_chat_params_init_glm_4_7_flash(tmpl, params);
+    }
+
+    // GLM-4.6 detection: same `<arg_key>` / `<arg_value>` wire shape as
+    // GLM-4.7-Flash but with each tag on its own line. Detected AFTER 4.7-
+    // Flash so the inline `</arg_key><arg_value>` pair never reaches here;
+    // 4.6 keys on the `[gMASK]<sop>` BOS prefix and the same `<arg_key>`/
+    // `<tool_call>` literals.
+    if (src.find("[gMASK]<sop>") != std::string::npos &&
+        src.find("<arg_key>") != std::string::npos &&
+        src.find("<tool_call>") != std::string::npos) {
+        LOG_DBG("Using specialized template: GLM-4.6\n");
+        return common_chat_params_init_glm_4_6(tmpl, params);
     }
 
     // Gemma4 format detection

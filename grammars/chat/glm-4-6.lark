@@ -1,0 +1,48 @@
+%llguidance {}
+
+# GLM-4.6 chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn (after the template's
+# generation prompt `<|assistant|>` has been emitted):
+#   <think>{reasoning}</think>\n{content}(<tool_call>{name}\n<arg_key>K</arg_key>\n<arg_value>V</arg_value>\n...</tool_call>)*
+#
+# Differs from GLM-4.7-Flash by having newlines between arg_key/arg_value
+# pairs (the template emits them on separate lines). The output codec is
+# reused from GLM-4.7-Flash; only the grammar's tool_arg whitespace differs.
+#
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry.
+#   - `conversation` — full conversation wire shape.
+
+start: think_block content tool_call_block?
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+think_block: "<think>" reasoning "</think>"
+reasoning: /(.|\n)*?/
+content: /(.|\n)*?/
+
+tool_call_block: tool_call (tool_call_sep tool_call)*
+tool_call_sep: /\n*/
+tool_call: tool_open func_name "\n" tool_arg+ tool_close
+tool_open:  "<tool_call>"
+tool_close: "</tool_call>"
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+tool_arg: "<arg_key>" arg_name "</arg_key>" "\n" "<arg_value>" arg_value "</arg_value>" "\n"
+arg_name: /[^<]+/
+arg_value: /([^<]|<(?!\/arg_value>))*/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: prefix? turn+ assistant_open?
+prefix: "[gMASK]<sop>"
+turn: system_turn | user_turn | tool_observation_turn | assistant_full_turn
+
+system_turn:           "<|system|>"      turn_body_text
+user_turn:             "<|user|>"        turn_body_text
+tool_observation_turn: "<|observation|>" turn_body_text
+assistant_full_turn:   "<|assistant|>"   turn_body_text
+assistant_open:        "<|assistant|>"
+
+turn_body_text: /([^<]|<(?!\|user\|)(?!\|assistant\|)(?!\|system\|)(?!\|observation\|))*/
