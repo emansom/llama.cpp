@@ -8,7 +8,7 @@ root ::= assistant-body
 
 # --- Assistant turn continuation (sampler entry) ---
 assistant-body ::= think-block content tool-call-block?
-think-block ::= "<think>\n" reasoning "</think>"
+think-block ::= "<think>" reasoning "</think>"
 reasoning ::= ( [^<] | "<" [^/] | "</" [^t] )*
 content ::= ( [^<] | "<" [^t] | "<t" [^o] )*
 

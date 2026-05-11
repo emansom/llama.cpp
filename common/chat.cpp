@@ -11,6 +11,7 @@
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
+#include "chat-formats/nemotron-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwq-format.h"
 #include "chat-formats/kimi-k2-format.h"
@@ -1381,6 +1382,52 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// NVIDIA Nemotron-3 format. Assistant turn wire shape is identical to
+// Qwen3.5 (per-arg XML tool calls preceded by an optional `<think>...
+// </think>` reasoning block), so the output parser reuses the Qwen3.5
+// grammar and codec; only the writer differs (XML tools schema, special
+// past-assistant thinking-strip semantics, `<think></think>` no-reasoning
+// generation prompt).
+static common_chat_params common_chat_params_init_nemotron(const common_chat_template &    tmpl,
+                                                           const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_nemotron_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_QWEN3_5;
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+        "<think>",
+        "</think>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    {
+        const auto sampling_base = common_chat_grammar_get("qwen3-5");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("qwen3-5-no-reasoning")
+            : sampling_base;
+        data.grammar             = sampling_base;
+        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.grammar_file_parser = false;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+
+        if (string_ends_with(data.prompt, "<think></think>")) {
+            data.generation_prompt = "<think></think>";
+        } else if (string_ends_with(data.prompt, "<think>\n")) {
+            data.generation_prompt = "<think>\n";
+        }
+    }
+    return data;
+}
+
 // Qwen3.5 format: assistant turn is `<reasoning></think>\n\n<content>` followed
 // by zero or more `<tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>
 // \n...\n</function>\n</tool_call>` blocks (per-arg XML, like DeepSeek-V3.2).
@@ -1918,6 +1965,17 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("g4_default_system_message") != std::string::npos) {
         LOG_DBG("Using specialized template: Granite 4.0\n");
         return common_chat_params_init_granite_4(tmpl, params);
+    }
+
+    // NVIDIA Nemotron-3 detection: shares the per-arg XML tool wire shape
+    // with Qwen3.5 but renders tools as XML schema blocks (`<function><name>
+    // ...<parameters><parameter>...</parameter>...</parameters></function>`).
+    // The `truncate_history_thinking` namespace variable is unique to this
+    // template.
+    if (src.find("truncate_history_thinking") != std::string::npos &&
+        src.find("render_extra_keys") != std::string::npos) {
+        LOG_DBG("Using specialized template: NVIDIA Nemotron-3\n");
+        return common_chat_params_init_nemotron(tmpl, params);
     }
 
     // Qwen3.5 detection: per-arg XML tool format with vision support. The

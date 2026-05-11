@@ -93,6 +93,8 @@ add_library(${TARGET}
     chat-formats/qwen3-5-format.cpp
     chat-formats/granite-4-format.h
     chat-formats/granite-4-format.cpp
+    chat-formats/nemotron-format.h
+    chat-formats/nemotron-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
