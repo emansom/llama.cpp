@@ -101,6 +101,8 @@ add_library(${TARGET}
     chat-formats/seed-oss-format.cpp
     chat-formats/glm-4-6-format.h
     chat-formats/glm-4-6-format.cpp
+    chat-formats/qwen3-coder-format.h
+    chat-formats/qwen3-coder-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

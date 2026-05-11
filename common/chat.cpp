@@ -15,6 +15,7 @@
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/nemotron-format.h"
 #include "chat-formats/qwen3-5-format.h"
+#include "chat-formats/qwen3-coder-format.h"
 #include "chat-formats/qwq-format.h"
 #include "chat-formats/seed-oss-format.h"
 #include "chat-formats/kimi-k2-format.h"
@@ -1385,6 +1386,35 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// Qwen3-Coder format. Per-arg XML tool wire shape (same as Qwen3.5/Nemotron)
+// but no reasoning block --- Qwen3-Coder is a coder model. Output codec is
+// reused from Qwen3.5; only the grammar (no think_block) and writer differ.
+static common_chat_params common_chat_params_init_qwen3_coder(const common_chat_template &    tmpl,
+                                                              const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_qwen3_coder_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_QWEN3_5;  // shares output pipeline
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+    };
+
+    {
+        const auto base_grammar = common_chat_grammar_get("qwen3-coder");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // GLM-4.6 format. Wire shape mirrors GLM-4.7-Flash but with newlines
 // between arg_key/arg_value pairs:
 //   <tool_call>NAME\n<arg_key>K</arg_key>\n<arg_value>V</arg_value>\n
@@ -2115,6 +2145,17 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|START_ACTION|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Cohere c4ai\n");
         return common_chat_params_init_cohere_c4ai(tmpl, params);
+    }
+
+    // Qwen3-Coder detection: per-arg XML tool format (same as Qwen3.5) but
+    // distinguished by the absence of vision support (`add_vision_id` /
+    // `image_count`) and `truncate_history_thinking`. Uses unique system
+    // text "You are Qwen, a helpful AI assistant that can interact with a
+    // computer".
+    if (src.find("You are Qwen, a helpful AI assistant that can interact with a computer") != std::string::npos &&
+        src.find("<parameter=") != std::string::npos) {
+        LOG_DBG("Using specialized template: Qwen3-Coder\n");
+        return common_chat_params_init_qwen3_coder(tmpl, params);
     }
 
     // NVIDIA Nemotron-3 detection: shares the per-arg XML tool wire shape
