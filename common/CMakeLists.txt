@@ -95,6 +95,8 @@ add_library(${TARGET}
     chat-formats/granite-4-format.cpp
     chat-formats/nemotron-format.h
     chat-formats/nemotron-format.cpp
+    chat-formats/cohere-c4ai-format.h
+    chat-formats/cohere-c4ai-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

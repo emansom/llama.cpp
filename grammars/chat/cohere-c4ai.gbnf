@@ -1,0 +1,22 @@
+# Cohere c4ai chat grammar (GBNF)
+
+root ::= assistant-body
+
+assistant-body ::= think-block? ( tool-action-block | response-block )
+think-block ::= "<|START_THINKING|>" reasoning "<|END_THINKING|>"
+reasoning ::= ( [^<] | "<" [^|] | "<|" [^E] )*
+
+tool-action-block ::= "<|START_ACTION|>" tool-calls-array "<|END_ACTION|>"
+tool-calls-array ::= "[" ( [^\]] )* "]"
+
+response-block ::= "<|START_RESPONSE|>" content "<|END_RESPONSE|>"
+content ::= ( [^<] | "<" [^|] | "<|" [^E] )*
+
+conversation ::= turn+ assistant-open?
+turn ::= system-turn | user-turn | chatbot-turn
+system-turn ::= "<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>" turn-body-text "<|END_OF_TURN_TOKEN|>"
+user-turn ::= "<|START_OF_TURN_TOKEN|><|USER_TOKEN|>" turn-body-text "<|END_OF_TURN_TOKEN|>"
+chatbot-turn ::= "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>" turn-body-text "<|END_OF_TURN_TOKEN|>"
+assistant-open ::= "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+
+turn-body-text ::= ( [^<] | "<" [^|] | "<|" [^E] | "<|E" [^N] )*

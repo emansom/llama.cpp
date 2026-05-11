@@ -1,0 +1,35 @@
+%llguidance {}
+
+# Cohere c4ai chat grammar --- parser-side variant for `reasoning_format = NONE`.
+#
+# Mirrors `cohere-c4ai.lark` but tags the `<|START_THINKING|>...<|END_THINKING|>`
+# body as `analysis-content` (no-reasoning variant: surfaces as content with
+# the wire-shape markers reinjected by the codec). The response body is
+# tagged as `content` and the response markers are stripped.
+
+start: assistant_body
+
+assistant_body: think_block? (tool_action_block | response_block)
+
+# The `analysis-content` rule signals to lark-to-peg / the codec that the
+# body should surface in `result.content` with the literal markers prepended
+# and appended by the per-format codec.
+think_block: "<|START_THINKING|>" analysis_content "<|END_THINKING|>"
+analysis_content: /(.|\n)*?/
+
+tool_action_block: "<|START_ACTION|>" tool_calls_array "<|END_ACTION|>"
+tool_calls_array: /\[(.|\n)*?\]/
+
+response_block: "<|START_RESPONSE|>" content "<|END_RESPONSE|>"
+content: /(.|\n)*?/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | chatbot_turn
+
+system_turn:   "<|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>"  turn_body_text "<|END_OF_TURN_TOKEN|>"
+user_turn:     "<|START_OF_TURN_TOKEN|><|USER_TOKEN|>"    turn_body_text "<|END_OF_TURN_TOKEN|>"
+chatbot_turn:  "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>" turn_body_text "<|END_OF_TURN_TOKEN|>"
+assistant_open: "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
+
+turn_body_text: /([^<]|<(?!\|END_OF_TURN_TOKEN\|))*/

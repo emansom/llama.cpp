@@ -9,6 +9,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
+#include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/nemotron-format.h"
@@ -1382,6 +1383,45 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// Cohere c4ai Command-R format. Wire shape:
+//   <|START_THINKING|>{reasoning}<|END_THINKING|>
+//     (<|START_ACTION|>[json_array_of_tool_calls]<|END_ACTION|>
+//      | <|START_RESPONSE|>{content}<|END_RESPONSE|>)
+static common_chat_params common_chat_params_init_cohere_c4ai(const common_chat_template &    tmpl,
+                                                              const autoparser::generation_params & inputs) {
+    common_chat_params data;
+
+    data.prompt           = common_chat_cohere_c4ai_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_COHERE_C4AI;
+    data.preserved_tokens = {
+        "<|START_THINKING|>",
+        "<|END_THINKING|>",
+        "<|START_RESPONSE|>",
+        "<|END_RESPONSE|>",
+        "<|START_ACTION|>",
+        "<|END_ACTION|>",
+        "<|START_TOOL_RESULT|>",
+        "<|END_TOOL_RESULT|>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<|START_THINKING|>";
+    data.thinking_end_tag   = "<|END_THINKING|>";
+
+    {
+        const auto sampling_base = common_chat_grammar_get("cohere-c4ai");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("cohere-c4ai-no-reasoning")
+            : sampling_base;
+        data.grammar             = sampling_base;
+        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // NVIDIA Nemotron-3 format. Assistant turn wire shape is identical to
 // Qwen3.5 (per-arg XML tool calls preceded by an optional `<think>...
 // </think>` reasoning block), so the output parser reuses the Qwen3.5
@@ -1965,6 +2005,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("g4_default_system_message") != std::string::npos) {
         LOG_DBG("Using specialized template: Granite 4.0\n");
         return common_chat_params_init_granite_4(tmpl, params);
+    }
+
+    // Cohere c4ai Command-R detection: emit-stage tokens
+    // `<|START_RESPONSE|>` and `<|START_ACTION|>` are unique to this family.
+    if (src.find("<|START_RESPONSE|>") != std::string::npos &&
+        src.find("<|START_ACTION|>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Cohere c4ai\n");
+        return common_chat_params_init_cohere_c4ai(tmpl, params);
     }
 
     // NVIDIA Nemotron-3 detection: shares the per-arg XML tool wire shape

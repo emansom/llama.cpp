@@ -19,6 +19,7 @@
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
+#include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/ministral-3-format.h"
 #include "chat-formats/qwen3-5-format.h"
@@ -571,6 +572,10 @@ static void test_state_rules_granite_4(testing & t) {
     assert_state_rules_validate(t, "granite-4", granite_4_state_rules);
 }
 
+static void test_state_rules_cohere_c4ai(testing & t) {
+    assert_state_rules_validate(t, "cohere-c4ai", cohere_c4ai_state_rules);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Granite 4.0
 // ──────────────────────────────────────────────────────────────────────────────
@@ -673,6 +678,7 @@ int main(int argc, char * argv[]) {
     t.test("deepseek-v3.2 state rules",    test_state_rules_deepseek_v3_2);
     t.test("qwen3-5 state rules",          test_state_rules_qwen3_5);
     t.test("granite-4 state rules",        test_state_rules_granite_4);
+    t.test("cohere-c4ai state rules",      test_state_rules_cohere_c4ai);
 
     return t.summary();
 }
