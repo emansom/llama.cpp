@@ -167,6 +167,7 @@ enum common_chat_format {
     COMMON_CHAT_FORMAT_PEG_GLM_4_7_FLASH,   // <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>
     COMMON_CHAT_FORMAT_PEG_HERMES,          // <tool_call>\n{"name":"NAME","arguments":{json}}\n</tool_call>
     COMMON_CHAT_FORMAT_PEG_QWEN3_5,         // <tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>\n</function>\n</tool_call>
+    COMMON_CHAT_FORMAT_PEG_GRANITE_4,       // IBM Granite 4.0: Hermes-like JSON tool wire shape, IBM role markers
 
     COMMON_CHAT_FORMAT_COUNT,  // Not a format, just the # formats
 };

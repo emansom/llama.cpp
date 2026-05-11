@@ -13,6 +13,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
+#include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwq-format.h"
@@ -1463,6 +1464,105 @@ static void test_qwq_render(testing & t) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// IBM Granite 4.0 writer parity tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_granite_4_render(testing & t) {
+    auto tmpls = load_template("models/templates/ibm-granite-granite-4.0.jinja");
+    t.assert_true("Granite 4.0 template loads", tmpls != nullptr);
+    if (!tmpls) {
+        return;
+    }
+
+    auto check = [&](const std::string & name,
+                     const ordered_json & messages,
+                     const ordered_json & tools,
+                     bool add_generation_prompt) {
+        const std::string jinja_out = render_via_jinja(
+            tmpls.get(), messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        auto gp = to_generation_params(messages, tools, add_generation_prompt, /*enable_thinking=*/true);
+        const std::string writer_out = common_chat_granite_4_render(gp);
+        if (jinja_out == writer_out) {
+            t.assert_true(name + " bytes match", true);
+        } else {
+            std::cerr << "\n=== Granite 4.0 mismatch: " << name << " ===\n";
+            std::cerr << "Jinja  bytes (" << jinja_out.size() << "): " << jinja_out  << "\n";
+            std::cerr << "Writer bytes (" << writer_out.size() << "): " << writer_out << "\n";
+            t.assert_true(name + " bytes match", false);
+        }
+    };
+
+    t.test("user-only (default system)", [&](testing & t) {
+        (void) t;
+        check("user_only_default_sys",
+              ordered_json::array({{{"role", "user"}, {"content", "Hello"}}}),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("system + user", [&](testing & t) {
+        (void) t;
+        check("system_user",
+              ordered_json::array({
+                  {{"role", "system"}, {"content", "You are X"}},
+                  {{"role", "user"},   {"content", "Hi"}},
+              }),
+              ordered_json::array(),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("with tools", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        check("with_tools",
+              ordered_json::array({{{"role", "user"}, {"content", "Hi"}}}),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true);
+    });
+
+    t.test("assistant tool call + tool response", [&](testing & t) {
+        (void) t;
+        ordered_json tool = {
+            {"type", "function"},
+            {"function", {
+                {"name", "get_weather"},
+                {"description", "Get the weather"},
+                {"parameters", {
+                    {"type", "object"},
+                    {"properties", {{"city", {{"type", "string"}}}}},
+                    {"required", ordered_json::array({"city"})},
+                }},
+            }},
+        };
+        check("assistant_tool_call",
+              ordered_json::array({
+                  {{"role", "user"}, {"content", "weather?"}},
+                  {{"role", "assistant"},
+                   {"content", ""},
+                   {"tool_calls", ordered_json::array({{
+                       {"id", "call_1"},
+                       {"type", "function"},
+                       {"function", {{"name", "get_weather"}, {"arguments", {{"city", "Paris"}}}}}
+                   }})}},
+                  {{"role", "tool"}, {"tool_call_id", "call_1"}, {"content", "{\"temp\":18}"}},
+              }),
+              ordered_json::array({tool}),
+              /*add_generation_prompt=*/true);
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Qwen3.5 writer parity tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1621,6 +1721,7 @@ int main(int argc, char * argv[]) {
     t.test("hermes writer parity",           test_hermes_render);
     t.test("qwq writer parity",              test_qwq_render);
     t.test("qwen3.5 writer parity",          test_qwen3_5_render);
+    t.test("granite-4 writer parity",        test_granite_4_render);
 
     return t.summary();
 }

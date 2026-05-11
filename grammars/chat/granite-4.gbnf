@@ -1,0 +1,29 @@
+# IBM Granite 4.0 chat grammar (GBNF)
+#
+# Two named entries:
+#   - `root` (default) --- assistant-turn continuation; sampler entry.
+#   - `conversation` --- full conversation wire shape.
+
+root ::= assistant-body
+
+# --- Assistant turn continuation (sampler entry) ---
+assistant-body ::= content tool-call-block?
+content ::= ( [^<] | "<" [^t] | "<t" [^o] )*
+
+tool-call-block ::= tool-call+
+tool-call ::= "<tool_call>\n{\"name\": \"" func-name "\", \"arguments\": " tool-args "}" tool-close
+tool-close ::= "\n</tool_call>" | "</tool_call>"
+
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+tool-args ::= "{" ( [^}] | "{" [^}]* "}" )* "}"
+
+# --- Full-conversation walker entry ---
+conversation ::= turn+ assistant-open?
+turn ::= system-turn | user-turn | tool-turn | assistant-full-turn
+system-turn ::= "<|start_of_role|>system<|end_of_role|>" turn-body-text "<|end_of_text|>\n"
+user-turn ::= "<|start_of_role|>user<|end_of_role|>" turn-body-text "<|end_of_text|>\n"
+tool-turn ::= "<|start_of_role|>tool<|end_of_role|>" turn-body-text "<|end_of_text|>\n"
+assistant-full-turn ::= "<|start_of_role|>assistant<|end_of_role|>" turn-body-text "<|end_of_text|>\n"
+assistant-open ::= "<|start_of_role|>assistant<|end_of_role|>"
+
+turn-body-text ::= ( [^<] | "<" [^|] | "<|" [^e] | "<|e" [^n] )*

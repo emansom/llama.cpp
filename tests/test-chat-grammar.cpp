@@ -19,6 +19,7 @@
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
+#include "chat-formats/granite-4-format.h"
 #include "chat-formats/ministral-3-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "common.h"
@@ -566,6 +567,38 @@ static void test_state_rules_qwen3_5(testing & t) {
     assert_state_rules_validate(t, "qwen3-5", qwen3_5_state_rules);
 }
 
+static void test_state_rules_granite_4(testing & t) {
+    assert_state_rules_validate(t, "granite-4", granite_4_state_rules);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Granite 4.0
+// ──────────────────────────────────────────────────────────────────────────────
+
+static void test_grammar_granite_4_conversation(testing & t) {
+    const auto arena = build_arena_for_rule("granite-4", "conversation");
+    t.assert_true("granite-4 grammar loads", !arena.empty());
+    t.assert_true("granite-4 has conversation rule", arena.has_rule("conversation"));
+
+    t.test("system + user + assistant + generation prompt", [&](testing & t) {
+        const std::string input =
+            "<|start_of_role|>system<|end_of_role|>You are helpful.<|end_of_text|>\n"
+            "<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>Hi there<|end_of_text|>\n"
+            "<|start_of_role|>assistant<|end_of_role|>";
+        t.assert_true("accepts canonical conversation",
+                      parse_full(arena, input));
+    });
+
+    t.test("rejects body without <|end_of_text|>", [&](testing & t) {
+        const std::string input =
+            "<|start_of_role|>user<|end_of_role|>Hello"
+            "<|start_of_role|>assistant<|end_of_role|>";
+        t.assert_true("rejects malformed conversation",
+                      !parse_full(arena, input));
+    });
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Qwen3.5
 // ──────────────────────────────────────────────────────────────────────────────
@@ -625,6 +658,7 @@ int main(int argc, char * argv[]) {
     t.test("gpt-oss conversation grammar", test_grammar_gpt_oss_conversation);
     t.test("gpt-oss-no-reasoning conversation grammar", test_grammar_gpt_oss_no_reasoning_conversation);
     t.test("qwen3-5 conversation grammar", test_grammar_qwen3_5_conversation);
+    t.test("granite-4 conversation grammar", test_grammar_granite_4_conversation);
 
     // FSM-state-to-grammar-rule registry validation.
     t.test("kimi-k2 state rules",          test_state_rules_kimi_k2);
@@ -638,6 +672,7 @@ int main(int argc, char * argv[]) {
     t.test("glm-4-7-flash state rules",    test_state_rules_glm_4_7_flash);
     t.test("deepseek-v3.2 state rules",    test_state_rules_deepseek_v3_2);
     t.test("qwen3-5 state rules",          test_state_rules_qwen3_5);
+    t.test("granite-4 state rules",        test_state_rules_granite_4);
 
     return t.summary();
 }

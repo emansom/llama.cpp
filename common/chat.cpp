@@ -9,6 +9,7 @@
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
+#include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwq-format.h"
@@ -1347,6 +1348,39 @@ static common_chat_params common_chat_params_init_qwq(const common_chat_template
     return data;
 }
 
+// IBM Granite 4.0 format: assistant body uses Hermes-style JSON tool wire
+// shape (`<content>(<tool_call>\n{"name":"X","arguments":{json}}\n</tool_call>)*`)
+// but the surrounding role markers are IBM-specific
+// (`<|start_of_role|>...<|end_of_role|>...<|end_of_text|>`).
+static common_chat_params common_chat_params_init_granite_4(const common_chat_template &    tmpl,
+                                                            const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_granite_4_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_GRANITE_4;
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+    };
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+    {
+        const auto base_grammar = common_chat_grammar_get("granite-4");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+    }
+    return data;
+}
+
 // Qwen3.5 format: assistant turn is `<reasoning></think>\n\n<content>` followed
 // by zero or more `<tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>
 // \n...\n</function>\n</tool_call>` blocks (per-arg XML, like DeepSeek-V3.2).
@@ -1875,6 +1909,15 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|im_start|>assistant\\n<think>\\n") != std::string::npos) {
         LOG_DBG("Using specialized template: QwQ\n");
         return common_chat_params_init_qwq(tmpl, params);
+    }
+
+    // IBM Granite 4.0 detection: the `tools_system_message_prefix` and
+    // `g4_default_system_message` namespace variables are unique to this
+    // template (3.3 uses a different system text and `<|tool_call|>` markup).
+    if (src.find("tools_system_message_prefix") != std::string::npos &&
+        src.find("g4_default_system_message") != std::string::npos) {
+        LOG_DBG("Using specialized template: Granite 4.0\n");
+        return common_chat_params_init_granite_4(tmpl, params);
     }
 
     // Qwen3.5 detection: per-arg XML tool format with vision support. The
