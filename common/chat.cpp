@@ -10,6 +10,7 @@
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/hermes-format.h"
+#include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwq-format.h"
 #include "chat-formats/kimi-k2-format.h"
 #include "chat-formats/lfm2-5-format.h"
@@ -1346,6 +1347,52 @@ static common_chat_params common_chat_params_init_qwq(const common_chat_template
     return data;
 }
 
+// Qwen3.5 format: assistant turn is `<reasoning></think>\n\n<content>` followed
+// by zero or more `<tool_call>\n<function=NAME>\n<parameter=K>\nV\n</parameter>
+// \n...\n</function>\n</tool_call>` blocks (per-arg XML, like DeepSeek-V3.2).
+// The template's generation prompt ends with `<think>\n` (or `<think>\n\n
+// </think>\n\n` when enable_thinking=false), so the parser sees the full
+// `<think>...</think>...` span once `generation_prompt` is prepended.
+static common_chat_params common_chat_params_init_qwen3_5(const common_chat_template &    tmpl,
+                                                          const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+
+    data.prompt           = common_chat_qwen3_5_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_QWEN3_5;
+    data.preserved_tokens = {
+        "<tool_call>",
+        "</tool_call>",
+        "<tool_response>",
+        "</tool_response>",
+        "<think>",
+        "</think>",
+    };
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    {
+        const auto sampling_base = common_chat_grammar_get("qwen3-5");
+        const auto parser_base   = (inputs.reasoning_format == COMMON_REASONING_FORMAT_NONE)
+            ? common_chat_grammar_get("qwen3-5-no-reasoning")
+            : sampling_base;
+        data.grammar             = sampling_base;
+        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.grammar_file_parser = false;  // generation_prompt is prepended to parser input.
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
+
+        if (string_ends_with(data.prompt, "<think>\n\n</think>\n\n")) {
+            data.generation_prompt = "<think>\n\n</think>\n\n";
+        } else if (string_ends_with(data.prompt, "<think>\n")) {
+            data.generation_prompt = "<think>\n";
+        }
+    }
+    return data;
+}
+
 // LFM2 format: uses <|tool_list_start|>[...]<|tool_list_end|> in system prompt
 // and <|tool_call_start|>[name(arg="val")]<|tool_call_end|> for tool calls.
 // - Reasoning: <think>{reasoning}</think> (optional)
@@ -1828,6 +1875,16 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|im_start|>assistant\\n<think>\\n") != std::string::npos) {
         LOG_DBG("Using specialized template: QwQ\n");
         return common_chat_params_init_qwq(tmpl, params);
+    }
+
+    // Qwen3.5 detection: per-arg XML tool format with vision support. The
+    // `add_vision_id` namespace variable is unique to the Qwen3.5 template
+    // (StepFun3.5-Flash and Nemotron use the same `<function=`/`<parameter=`
+    // wire shape but lack vision rendering).
+    if (src.find("add_vision_id") != std::string::npos &&
+        src.find("<parameter=") != std::string::npos) {
+        LOG_DBG("Using specialized template: Qwen3.5\n");
+        return common_chat_params_init_qwen3_5(tmpl, params);
     }
 
     if (is_lfm2_template(src)) {

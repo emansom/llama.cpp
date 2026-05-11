@@ -1,0 +1,44 @@
+%llguidance {}
+
+# Qwen3.5 chat grammar --- parser-side variant for `reasoning_format = NONE`.
+#
+# Mirrors `qwen3-5.lark` but treats the `<think>...</think>` block as content
+# (markers preserved verbatim) rather than extracting it as reasoning.
+# Selected by `init_qwen3_5` when `inputs.reasoning_format == NONE`.
+#
+# The sampling grammar is unchanged (llguidance still constrains the model to
+# the full Qwen3.5 format).
+
+start: assistant_body
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+# `content` here matches the entire prefix up to (but not including) a tool
+# call, including any leading `<think>...</think>` block. The lark-to-peg
+# auto-tag for `content` makes the whole captured prefix appear in
+# `result.content`.
+assistant_body: content tool_call_block?
+
+content: /([^<]|<(?!tool_call>))*/
+
+tool_call_block: tool_call (tool_call_sep tool_call)*
+tool_call_sep: "\n"
+tool_call: "<tool_call>\n<function=" func_name ">\n" parameter* "</function>\n</tool_call>"
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+parameter: "<parameter=" arg_name ">\n" arg_value "\n</parameter>\n"
+arg_name: ARG_NAME
+ARG_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+arg_value: /([^<]|<(?!\/parameter>))*/
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: system_turn | user_turn | tool_turn | assistant_full_turn
+system_turn:         "<|im_start|>system\n"    turn_body_text "<|im_end|>\n"
+user_turn:           "<|im_start|>user\n"      turn_body_text "<|im_end|>\n"
+tool_turn:           "<|im_start|>tool\n"      turn_body_text "<|im_end|>\n"
+assistant_full_turn: "<|im_start|>assistant\n" turn_body_text "<|im_end|>\n"
+assistant_open:      "<|im_start|>assistant\n"
+
+turn_body_text: /([^<]|<(?!\|im_end\|))*/

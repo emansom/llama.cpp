@@ -11,6 +11,7 @@
 #include "chat-formats/lfm2-5-format.h"
 #include "chat-formats/lfm2-format.h"
 #include "chat-formats/ministral-3-format.h"
+#include "chat-formats/qwen3-5-format.h"
 
 void common_chat_format_pipeline::run(const common_peg_ast_arena & arena,
                                       const common_peg_parse_result & result) {
@@ -124,6 +125,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_ministral_3_tracker,
                 common_chat_ministral_3_decoder,
                 common_chat_ministral_3_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_QWEN3_5:
+            return make_pipeline_default<
+                common_chat_qwen3_5_tracker,
+                common_chat_qwen3_5_decoder,
+                common_chat_qwen3_5_transformer>(msg, is_partial_parse, reasoning_format);
 
         default:
             return common_chat_format_pipeline{};
