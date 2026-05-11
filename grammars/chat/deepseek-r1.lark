@@ -1,0 +1,43 @@
+%llguidance {}
+
+# DeepSeek-R1 family chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn (after the template's
+# generation prompt `<｜Assistant｜><think>\n` has been emitted):
+#   <reasoning></think><content>
+#
+# Reasoning-only model (no tool calls in scope). Used by:
+#   - deepseek-ai-DeepSeek-R1-Distill-Llama
+#   - deepseek-ai-DeepSeek-R1-Distill-Qwen
+#   - llama-cpp-deepseek-r1
+#
+# Two named entries:
+#   - `start` (default) --- assistant-turn continuation; sampler entry.
+#   - `conversation` --- full conversation wire shape.
+
+start: assistant_body
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+# The `<think>\n` opener is supplied by the generation prompt prefix; the
+# model emits the reasoning body then a `</think>` close.
+assistant_body: think_block content
+
+think_block: "<think>" reasoning "</think>"
+reasoning: /(.|\n)*?/
+
+content: /(.|\n)*/
+
+# --- Full-conversation walker entry --------------------------------------------
+# DeepSeek-R1 uses asymmetric markers: user turns have no explicit close, the
+# turn body flows until the next role marker. Tool blocks (when present) use
+# the DSML `<｜tool▁calls▁begin｜>` family; we treat them as opaque body bytes
+# at the walker level.
+conversation: prefix? entry+ assistant_open?
+prefix: "<\xef\xbd\x9cbegin\xe2\x96\x81of\xe2\x96\x81sentence\xef\xbd\x9c>"  # <｜begin▁of▁sentence｜>
+entry: user_turn | assistant_turn
+user_turn:        "<\xef\xbd\x9cUser\xef\xbd\x9c>"      user_body_text
+assistant_turn:   "<\xef\xbd\x9cAssistant\xef\xbd\x9c>" assistant_body_text "<\xef\xbd\x9cend\xe2\x96\x81of\xe2\x96\x81sentence\xef\xbd\x9c>"
+assistant_open:   "<\xef\xbd\x9cAssistant\xef\xbd\x9c>" "<think>\n"
+
+user_body_text:      /([^<]|<(?!\xef\xbd\x9c))+/
+assistant_body_text: /(.|\n)*?/

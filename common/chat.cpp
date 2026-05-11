@@ -10,6 +10,7 @@
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
+#include "chat-formats/deepseek-r1-format.h"
 #include "chat-formats/glm-4-6-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
@@ -1386,6 +1387,32 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// DeepSeek-R1 family: reasoning + content only (no tool calls in scope).
+// Used by deepseek-ai-DeepSeek-R1-Distill-Llama / -Qwen and llama-cpp-deepseek-r1.
+// Generation prompt: `<｜Assistant｜><think>\n` --- prepended to model output
+// so the parser sees the full `<think>...</think>...content` span.
+static common_chat_params common_chat_params_init_deepseek_r1(const common_chat_template &    tmpl,
+                                                              const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    data.prompt           = common_chat_deepseek_r1_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_SIMPLE_REASONING;
+    data.preserved_tokens = {"<think>", "</think>"};
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    {
+        const auto base_grammar = common_chat_grammar_get("deepseek-r1");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = false;  // generation_prompt prepended
+        data.grammar_lazy        = false;
+        data.generation_prompt   = "<think>\n";
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // Qwen3-Coder format. Per-arg XML tool wire shape (same as Qwen3.5/Nemotron)
 // but no reasoning block --- Qwen3-Coder is a coder model. Output codec is
 // reused from Qwen3.5; only the grammar (no think_block) and writer differ.
@@ -2145,6 +2172,18 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|START_ACTION|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Cohere c4ai\n");
         return common_chat_params_init_cohere_c4ai(tmpl, params);
+    }
+
+    // DeepSeek-R1 family detection. The R1-Distill and llama-cpp-deepseek-r1
+    // templates use `<think>`-based reasoning plus DeepSeek role markers
+    // (`<｜User｜>` / `<｜Assistant｜>`). Excluded: DeepSeek-V3.2 (DSML markup)
+    // and DeepSeek-V3.1 (`<｜tool▁calls▁begin｜>` shape), both handled above.
+    if (src.find("<\xef\xbd\x9c" "Assistant" "\xef\xbd\x9c><think>") != std::string::npos &&
+        src.find("<\xef\xbd\x9c" "User" "\xef\xbd\x9c>") != std::string::npos &&
+        src.find("dsml_token") == std::string::npos &&
+        src.find("<\xef\xbd\x9c" "tool" "\xe2\x96\x81" "calls" "\xe2\x96\x81" "begin" "\xef\xbd\x9c>") == std::string::npos) {
+        LOG_DBG("Using specialized template: DeepSeek-R1 family\n");
+        return common_chat_params_init_deepseek_r1(tmpl, params);
     }
 
     // Qwen3-Coder detection: per-arg XML tool format (same as Qwen3.5) but

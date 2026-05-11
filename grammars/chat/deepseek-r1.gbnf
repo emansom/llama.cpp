@@ -1,0 +1,8 @@
+# DeepSeek-R1 family chat grammar (GBNF)
+
+root ::= assistant-body
+
+assistant-body ::= think-block content
+think-block ::= "<think>" reasoning "</think>"
+reasoning ::= ( [^<] | "<" [^/] | "</" [^t] )*
+content ::= ( [^]+ )?
