@@ -111,6 +111,8 @@ add_library(${TARGET}
     chat-formats/apriel-format.cpp
     chat-formats/granite-3-3-format.h
     chat-formats/granite-3-3-format.cpp
+    chat-formats/deepseek-v3-1-format.h
+    chat-formats/deepseek-v3-1-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

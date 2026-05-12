@@ -1,0 +1,18 @@
+# DeepSeek-V3.1 chat grammar (GBNF)
+#
+# Multi-byte UTF-8 markers spelled as literal bytes since GBNF doesn't use
+# named tokens the same way Lark does. `｜` = 0xEF 0xBD 0x9C; `▁` = 0xE2 0x96 0x81.
+
+root ::= assistant-body
+
+assistant-body ::= thinking-on-body | thinking-off-body
+thinking-on-body ::= reasoning "</think>" content tool-calls-block?
+thinking-off-body ::= content tool-calls-block?
+
+reasoning ::= ( [^<] | "<" [^/] | "</" [^t] )*
+content ::= ( [^<] )*
+
+tool-calls-block ::= "<｜tool▁calls▁begin｜>" tool-call+ "<｜tool▁calls▁end｜>"
+tool-call ::= "<｜tool▁call▁begin｜>" func-name "<｜tool▁sep｜>" tool-args "<｜tool▁call▁end｜>"
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+tool-args ::= "{" ( [^}] | "{" [^}]* "}" )* "}"

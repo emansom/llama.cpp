@@ -11,6 +11,7 @@
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/deepseek-r1-format.h"
+#include "chat-formats/deepseek-v3-1-format.h"
 #include "chat-formats/glm-4-6-format.h"
 #include "chat-formats/granite-3-3-format.h"
 #include "chat-formats/granite-4-format.h"
@@ -1388,6 +1389,41 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// DeepSeek-V3.1: tool wire shape `<｜tool▁calls▁begin｜>(<｜tool▁call▁begin｜>
+// NAME<｜tool▁sep｜>{args_json}<｜tool▁call▁end｜>)+<｜tool▁calls▁end｜>`.
+// Reasoning via `REASONING</think>` (forced-open `<think>` via gen prompt
+// when thinking-on; closing-only emitted by model).
+static common_chat_params common_chat_params_init_deepseek_v3_1(const common_chat_template &    tmpl,
+                                                                const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    data.prompt           = common_chat_deepseek_v3_1_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_1;
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+    {
+        const auto base_grammar = common_chat_grammar_get("deepseek-v3-1");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        // Prepend a synthetic `<think>` opener (thinking-on) or
+        // `<think></think>` (thinking-off) so the grammar always sees a
+        // complete `<think>...</think>` block at the start of the input.
+        // This sidesteps streaming-prefix monotonicity issues that arise
+        // with explicit `with_thinking | without_thinking` PEG branches
+        // (failed branches still emit AST nodes for the visitor).
+        data.grammar_file_parser = false;
+        data.generation_prompt   = inputs.enable_thinking ? "<think>" : "<think></think>";
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // IBM Granite 3.3: reasoning + content (no tool calls in scope). Uses
 // `<|start_of_role|>` / `<|end_of_role|>` / `<|end_of_text|>` role markers
 // and the standard `<think>...</think>` reasoning shape.
@@ -2196,6 +2232,19 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|START_ACTION|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Cohere c4ai\n");
         return common_chat_params_init_cohere_c4ai(tmpl, params);
+    }
+
+    // DeepSeek-V3.1 detection: unique `<｜tool▁calls▁begin｜>` literal in
+    // the template plus DeepSeek role markers. Excluded:
+    // - DeepSeek-V3.2: DSML markup (`dsml_token` literal), detected earlier
+    // - DeepSeek-R1-Distill / llama-cpp-deepseek-r1: share `<｜tool▁calls▁
+    //   begin｜>` but emit `<｜tool▁outputs▁begin｜>` (plural) for tool
+    //   results --- V3.1 uses singular `<｜tool▁output▁begin｜>`.
+    if (src.find("<\xef\xbd\x9c" "tool" "\xe2\x96\x81" "calls" "\xe2\x96\x81" "begin" "\xef\xbd\x9c>") != std::string::npos &&
+        src.find("<\xef\xbd\x9c" "Assistant" "\xef\xbd\x9c>") != std::string::npos &&
+        src.find("<\xef\xbd\x9c" "tool" "\xe2\x96\x81" "outputs" "\xe2\x96\x81" "begin" "\xef\xbd\x9c>") == std::string::npos) {
+        LOG_DBG("Using specialized template: DeepSeek-V3.1\n");
+        return common_chat_params_init_deepseek_v3_1(tmpl, params);
     }
 
     // IBM Granite 3.3 detection: unique `Knowledge Cutoff Date` literal plus

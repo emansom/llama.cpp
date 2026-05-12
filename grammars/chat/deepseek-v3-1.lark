@@ -1,0 +1,44 @@
+%llguidance {}
+
+# DeepSeek-V3.1 chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn:
+#   (REASONING</think>)? CONTENT
+#   (<｜tool▁calls▁begin｜>
+#     (<｜tool▁call▁begin｜>NAME<｜tool▁sep｜>{json}<｜tool▁call▁end｜>)+
+#   <｜tool▁calls▁end｜>)?
+#
+# The grammar uses named tokens for the multi-byte UTF-8 markers (`｜` =
+# U+FF5C fullwidth vertical bar, `▁` = U+2581 lower-block) to keep literals
+# readable and let lark-to-peg compose them cleanly.
+
+start: assistant_body
+
+# The init function prepends `<think>` (thinking-on) or `<think></think>`
+# (thinking-off) as the generation prompt prefix, so the grammar always
+# sees a complete `<think>...</think>` block at the start of the input.
+# This avoids the streaming-prefix monotonicity issues that arise with
+# explicit `with_thinking | without_thinking` alternations (failed PEG
+# branches still emit AST nodes for the visitor).
+assistant_body: think_block content tool_calls_block?
+
+think_block: "<think>" reasoning "</think>"
+reasoning: /[^<]*/
+
+# Content stops at any `<` (V3.1 doesn't emit `<` characters in normal
+# content; all `<` precede tool markers). Simpler than negative-lookahead
+# multi-byte UTF-8 patterns and avoids PEG regex-engine corner cases.
+content: /[^<]*/
+
+TC_BEGIN: "<｜tool▁calls▁begin｜>"
+TC_END:   "<｜tool▁calls▁end｜>"
+T_BEGIN:  "<｜tool▁call▁begin｜>"
+T_END:    "<｜tool▁call▁end｜>"
+T_SEP:    "<｜tool▁sep｜>"
+
+tool_calls_block: TC_BEGIN tool_call+ TC_END
+tool_call: T_BEGIN func_name T_SEP tool_args T_END
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}

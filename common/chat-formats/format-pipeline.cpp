@@ -12,6 +12,7 @@
 #include "chat-formats/lfm2-format.h"
 #include "chat-formats/apriel-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
+#include "chat-formats/deepseek-v3-1-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/ministral-3-format.h"
 #include "chat-formats/qwen3-5-format.h"
@@ -166,6 +167,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_apriel_tracker,
                 common_chat_apriel_decoder,
                 common_chat_apriel_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_1:
+            return make_pipeline_default<
+                common_chat_deepseek_v3_1_tracker,
+                common_chat_deepseek_v3_1_decoder,
+                common_chat_deepseek_v3_1_transformer>(msg, is_partial_parse, reasoning_format);
 
         default:
             return common_chat_format_pipeline{};
