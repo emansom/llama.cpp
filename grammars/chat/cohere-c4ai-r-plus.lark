@@ -1,0 +1,40 @@
+%llguidance {}
+
+# CohereForAI c4ai Command-R-Plus chat grammar (Lark / llguidance)
+#
+# Distinct from c4ai r7b: r-plus uses `Action:` + ```json``` code block for
+# tool calls (no `<|START_ACTION|>` / `<|END_ACTION|>` markers, no
+# `<|START_THINKING|>` reasoning block).
+#
+# Wire format for the model's emitted assistant turn:
+#   (<|CHATBOT_TOKEN|>)?
+#     (Action:\n```json\n[{json_tool_call}, ...]\n```|<content>)
+#   (<|END_OF_TURN_TOKEN|>)?
+
+start: assistant_body
+
+# Optional wrapper tokens around the body. PEG `?` commits once the literal
+# is consumed.
+assistant_body: chatbot_open? body chatbot_close?
+chatbot_open:  "<|CHATBOT_TOKEN|>"
+chatbot_close: "<|END_OF_TURN_TOKEN|>"
+
+# `action_block` tried first so the leading `Action:` literal short-circuits
+# the fallback `content` rule. If no `Action:` follows, content matches
+# everything up to `<|END_OF_TURN_TOKEN|>`.
+body: action_block | content
+
+action_block: "Action:\n```json\n" tool_calls_array "\n```"
+
+tool_calls_array: "[" json_ws tool_call (tool_call_separator tool_call)* json_ws "]"
+tool_call_separator: "," json_ws
+tool_call: "{\"tool_name\": \"" func_name "\", \"parameters\": " tool_args "}"
+
+# Content stops at `<` (for wrapper tokens). r-plus content doesn't have
+# `<` in normal model output for these fixtures.
+content: /[^<]*/
+
+json_ws: /[ \t\n]*/
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}

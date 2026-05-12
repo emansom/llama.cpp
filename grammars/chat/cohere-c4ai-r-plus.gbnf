@@ -1,0 +1,17 @@
+# Cohere c4ai Command-R-Plus chat grammar (GBNF)
+
+root ::= assistant-body
+assistant-body ::= chatbot-open? body chatbot-close?
+chatbot-open ::= "<|CHATBOT_TOKEN|>"
+chatbot-close ::= "<|END_OF_TURN_TOKEN|>"
+
+body ::= action-block | content
+
+action-block ::= "Action:\n```json\n" tool-calls-array "\n```"
+tool-calls-array ::= "[" json-ws tool-call ( "," json-ws tool-call )* json-ws "]"
+json-ws ::= ( " " | "\t" | "\n" )*
+tool-call ::= "{\"tool_name\": \"" func-name "\", \"parameters\": " tool-args "}"
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+tool-args ::= "{" ( [^}] | "{" [^}]* "}" )* "}"
+
+content ::= [^<]*

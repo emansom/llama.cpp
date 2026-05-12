@@ -10,6 +10,7 @@
 #include "chat-formats/glm-4-7-flash-format.h"
 #include "chat-formats/gpt-oss-format.h"
 #include "chat-formats/cohere-c4ai-format.h"
+#include "chat-formats/cohere-c4ai-r-plus-format.h"
 #include "chat-formats/deepseek-r1-format.h"
 #include "chat-formats/deepseek-v3-1-format.h"
 #include "chat-formats/glm-4-6-format.h"
@@ -1489,6 +1490,35 @@ static common_chat_params common_chat_params_init_nemotron_nano_v2(const common_
     return data;
 }
 
+// Cohere Command-R-Plus: tool wire shape `Action:\n```json\n[{json}, ...]\n```
+// `, optionally wrapped in `<|CHATBOT_TOKEN|>...<|END_OF_TURN_TOKEN|>`. Tool
+// objects use `{"tool_name": "...", "parameters": {...}}` (no
+// `tool_call_id`). Reuses the Apriel JSON-array tool codec via auto-tagged
+// rule names (`tool_call` → "tool", `func_name` → "tool-name",
+// `tool_args` → "tool-args"); only the wire-shape literals differ.
+static common_chat_params common_chat_params_init_cohere_c4ai_r_plus(const common_chat_template &    tmpl,
+                                                                     const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+    data.prompt           = common_chat_cohere_c4ai_r_plus_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_APRIEL;  // shares JSON-array tool codec
+    data.preserved_tokens = {"<|CHATBOT_TOKEN|>", "<|END_OF_TURN_TOKEN|>"};
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+    {
+        const auto base_grammar = common_chat_grammar_get("cohere-c4ai-r-plus");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // IBM Granite 3.3: reasoning + content (no tool calls in scope). Uses
 // `<|start_of_role|>` / `<|end_of_role|>` / `<|end_of_text|>` role markers
 // and the standard `<think>...</think>` reasoning shape.
@@ -2297,6 +2327,16 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|START_ACTION|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Cohere c4ai\n");
         return common_chat_params_init_cohere_c4ai(tmpl, params);
+    }
+
+    // Cohere Command-R-Plus detection: same c4ai role-marker family as r7b
+    // (`<|CHATBOT_TOKEN|>`) but uses a `Write 'Action:'`-prefixed markdown
+    // code-block tool envelope rather than r7b's `<|START_ACTION|>` markers.
+    // r7b is handled above so this branch only fires for r-plus.
+    if (src.find("<|CHATBOT_TOKEN|>") != std::string::npos &&
+        src.find("Write \\'Action:\\'") != std::string::npos) {
+        LOG_DBG("Using specialized template: Cohere c4ai r-plus\n");
+        return common_chat_params_init_cohere_c4ai_r_plus(tmpl, params);
     }
 
     // MiniMax-M2 detection: unique `<minimax:tool_call>` marker + `]~b]ai`

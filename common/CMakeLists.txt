@@ -117,6 +117,8 @@ add_library(${TARGET}
     chat-formats/minimax-m2-format.cpp
     chat-formats/nemotron-nano-v2-format.h
     chat-formats/nemotron-nano-v2-format.cpp
+    chat-formats/cohere-c4ai-r-plus-format.h
+    chat-formats/cohere-c4ai-r-plus-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
