@@ -14,8 +14,12 @@ start: assistant_body
 
 assistant_body: reasoning_block content tool_calls_block?
 
-reasoning_block: reasoning "\n[BEGIN FINAL RESPONSE]\n"
-reasoning: /(.|\n)*?/
+# Reasoning content stops at `[BEGIN FINAL RESPONSE]`. The reasoning regex
+# is monotonic under streaming: each `[` is consumed only when it is NOT
+# the start of `[BEGIN FINAL RESPONSE]`. The trailing `\n` immediately
+# before `[BEGIN...]` is captured into reasoning; the codec strips it.
+reasoning_block: reasoning "[BEGIN FINAL RESPONSE]\n"
+reasoning: /([^\[]|\[(?!BEGIN FINAL RESPONSE\]))*/
 
 content: /([^<]|<(?!tool_calls>))*/
 

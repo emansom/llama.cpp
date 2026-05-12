@@ -95,7 +95,16 @@ std::vector<common_chat_decoded_event> common_chat_apriel_decoder::decode(
     std::vector<common_chat_decoded_event> events;
 
     if (tag_is(node, common_chat_peg_builder::REASONING)) {
-        events.push_back({K::REASONING_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
+        // The Apriel-1.6 grammar's reasoning regex captures everything up
+        // to the `[BEGIN FINAL RESPONSE]` literal (including any trailing
+        // `\n` immediately before it). The Jinja template expects the
+        // reasoning content to NOT include that trailing newline, so strip
+        // a single trailing `\n` if present.
+        std::string text(node.text);
+        if (!node.is_partial && !text.empty() && text.back() == '\n') {
+            text.pop_back();
+        }
+        events.push_back({K::REASONING_TEXT, std::move(text), {}, {}, false, node.is_partial});
         return events;
     }
     if (tag_is(node, common_chat_peg_builder::CONTENT)) {
