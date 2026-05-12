@@ -1,0 +1,43 @@
+%llguidance {}
+
+# MiniMax-M2 chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn (after the gen prompt's
+# synthetic `<think>` opener is prepended):
+#   <think><reasoning></think>\n*<content>(
+#     <minimax:tool_call>\n<invoke name="NAME">\n
+#       (<parameter name="K">VALUE</parameter>\n*)*
+#     </invoke>\n</minimax:tool_call>\n*
+#   )*
+#
+# The grammar requires the `<think>` opener (supplied by the gen prompt)
+# so we avoid `with_thinking | without_thinking` PEG alternation traps
+# (see comments on DeepSeek-V3.1 for the rationale).
+
+start: assistant_body
+
+assistant_body: think_block content tool_call_block?
+
+# Reasoning matches non-`<` bytes; the `</think>` literal must follow.
+# Codec strips leading/trailing `\n` from the captured reasoning text.
+think_block: "<think>" reasoning "</think>" think_close_ws
+reasoning: /[^<]*/
+think_close_ws: /\n*/
+
+content: /([^<]|<(?!minimax:tool_call>))*/
+
+# Same pattern as Qwen3.5 (which has identical per-arg XML wire-shape and
+# passes its streaming-prefix monotonicity tests): explicit `tool_call_sep`
+# literal between tool calls, and parameter consumes its trailing `\n` as
+# part of the rule itself (no separate `parameter_sep`).
+tool_call_block: tool_call (tool_call_sep tool_call)*
+tool_call_sep: "\n"
+tool_call: "<minimax:tool_call>\n<invoke name=\"" func_name "\">\n" parameter* "</invoke>\n</minimax:tool_call>"
+
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+parameter: "<parameter name=\"" arg_name "\">" arg_value "</parameter>\n"
+arg_name: /[^"]+/
+# arg_value stops at any `<` (test fixtures don't contain `<` in values).
+arg_value: /[^<]*/

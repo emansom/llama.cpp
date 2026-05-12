@@ -173,6 +173,7 @@ enum common_chat_format {
     COMMON_CHAT_FORMAT_PEG_SIMPLE_REASONING, // Content + <think>...</think> reasoning, no tool calls
     COMMON_CHAT_FORMAT_PEG_APRIEL,           // Apriel: <content>(<tool_calls>[{...}]</tool_calls>)?
     COMMON_CHAT_FORMAT_PEG_DEEPSEEK_V3_1,     // DeepSeek-V3.1: <｜tool▁calls▁begin｜>...
+    COMMON_CHAT_FORMAT_PEG_MINIMAX_M2,        // MiniMax-M2: <minimax:tool_call><invoke name=X><parameter name=K>V</parameter>...
 
     COMMON_CHAT_FORMAT_COUNT,  // Not a format, just the # formats
 };

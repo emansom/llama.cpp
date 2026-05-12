@@ -1,0 +1,19 @@
+# MiniMax-M2 chat grammar (GBNF)
+
+root ::= assistant-body
+
+assistant-body ::= think-block content tool-call-block?
+
+think-block ::= "<think>" reasoning "</think>" ( "\n" )*
+reasoning ::= [^<]*
+
+content ::= ( [^<] | "<" [^m] )*
+
+tool-call-block ::= tool-call ( ( "\n" )* tool-call )*
+tool-call ::= "<minimax:tool_call>\n<invoke name=\"" func-name "\">\n" parameter* "</invoke>\n</minimax:tool_call>"
+
+func-name ::= [a-zA-Z_] [a-zA-Z0-9_]*
+
+parameter ::= "<parameter name=\"" arg-name "\">" arg-value "</parameter>" ( "\n" )*
+arg-name ::= [^"]+
+arg-value ::= ( [^<] | "<" [^/] | "</" [^p] )*

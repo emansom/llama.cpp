@@ -14,6 +14,7 @@
 #include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/deepseek-v3-1-format.h"
 #include "chat-formats/granite-4-format.h"
+#include "chat-formats/minimax-m2-format.h"
 #include "chat-formats/ministral-3-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/seed-oss-format.h"
@@ -173,6 +174,12 @@ common_chat_format_pipeline common_chat_make_format_pipeline(
                 common_chat_deepseek_v3_1_tracker,
                 common_chat_deepseek_v3_1_decoder,
                 common_chat_deepseek_v3_1_transformer>(msg, is_partial_parse, reasoning_format);
+
+        case COMMON_CHAT_FORMAT_PEG_MINIMAX_M2:
+            return make_pipeline_default<
+                common_chat_minimax_m2_tracker,
+                common_chat_minimax_m2_decoder,
+                common_chat_minimax_m2_transformer>(msg, is_partial_parse, reasoning_format);
 
         default:
             return common_chat_format_pipeline{};
