@@ -1,0 +1,23 @@
+%llguidance {}
+
+# IBM Granite 3.3 chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn:
+#   (<think>{reasoning}</think>)?<content>
+#
+# No tool calls in scope (test fixtures only exercise reasoning + content).
+# Generation prompt is `<|start_of_role|>assistant<|end_of_role|>` --- the
+# parser sees the model output starting after that prompt.
+
+start: assistant_body
+
+# Explicit with/without thinking branches avoid PEG backtracking on
+# `think_block?` (see Cohere c4ai for the same pattern).
+assistant_body: with_thinking | without_thinking
+with_thinking: think_block content
+without_thinking: content
+
+think_block: "<think>" reasoning "</think>"
+reasoning: /([^<]|<(?!\/think>))*/
+
+content: /(.|\n)*/

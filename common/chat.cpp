@@ -12,6 +12,7 @@
 #include "chat-formats/cohere-c4ai-format.h"
 #include "chat-formats/deepseek-r1-format.h"
 #include "chat-formats/glm-4-6-format.h"
+#include "chat-formats/granite-3-3-format.h"
 #include "chat-formats/granite-4-format.h"
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/nemotron-format.h"
@@ -1387,6 +1388,29 @@ static common_chat_params common_chat_params_init_granite_4(const common_chat_te
     return data;
 }
 
+// IBM Granite 3.3: reasoning + content (no tool calls in scope). Uses
+// `<|start_of_role|>` / `<|end_of_role|>` / `<|end_of_text|>` role markers
+// and the standard `<think>...</think>` reasoning shape.
+static common_chat_params common_chat_params_init_granite_3_3(const common_chat_template &    tmpl,
+                                                              const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    data.prompt           = common_chat_granite_3_3_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_SIMPLE_REASONING;
+    data.preserved_tokens = {"<think>", "</think>"};
+    data.supports_thinking  = true;
+    data.thinking_start_tag = "<think>";
+    data.thinking_end_tag   = "</think>";
+    {
+        const auto base_grammar = common_chat_grammar_get("granite-3-3");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // DeepSeek-R1 family: reasoning + content only (no tool calls in scope).
 // Used by deepseek-ai-DeepSeek-R1-Distill-Llama / -Qwen and llama-cpp-deepseek-r1.
 // Generation prompt: `<｜Assistant｜><think>\n` --- prepended to model output
@@ -2172,6 +2196,16 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("<|START_ACTION|>") != std::string::npos) {
         LOG_DBG("Using specialized template: Cohere c4ai\n");
         return common_chat_params_init_cohere_c4ai(tmpl, params);
+    }
+
+    // IBM Granite 3.3 detection: unique `Knowledge Cutoff Date` literal plus
+    // `<|start_of_role|>` markers. Distinguished from Granite 4.0 (which has
+    // `tools_system_message_prefix` / `g4_default_system_message`).
+    if (src.find("Knowledge Cutoff Date") != std::string::npos &&
+        src.find("<|start_of_role|>") != std::string::npos &&
+        src.find("g4_default_system_message") == std::string::npos) {
+        LOG_DBG("Using specialized template: Granite 3.3\n");
+        return common_chat_params_init_granite_3_3(tmpl, params);
     }
 
     // DeepSeek-R1 family detection. The R1-Distill and llama-cpp-deepseek-r1

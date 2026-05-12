@@ -1,0 +1,11 @@
+# IBM Granite 3.3 chat grammar (GBNF)
+
+root ::= assistant-body
+assistant-body ::= with-thinking | without-thinking
+with-thinking ::= think-block content
+without-thinking ::= content
+
+think-block ::= "<think>" reasoning "</think>"
+reasoning ::= ( [^<] | "<" [^/] | "</" [^t] )*
+
+content ::= ( [^]* )?

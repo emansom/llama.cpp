@@ -109,6 +109,8 @@ add_library(${TARGET}
     chat-formats/simple-reasoning-format.cpp
     chat-formats/apriel-format.h
     chat-formats/apriel-format.cpp
+    chat-formats/granite-3-3-format.h
+    chat-formats/granite-3-3-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h
