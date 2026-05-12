@@ -18,6 +18,7 @@
 #include "chat-formats/hermes-format.h"
 #include "chat-formats/minimax-m2-format.h"
 #include "chat-formats/nemotron-format.h"
+#include "chat-formats/nemotron-nano-v2-format.h"
 #include "chat-formats/qwen3-5-format.h"
 #include "chat-formats/qwen3-coder-format.h"
 #include "chat-formats/qwq-format.h"
@@ -1461,6 +1462,33 @@ static common_chat_params common_chat_params_init_minimax_m2(const common_chat_t
     return data;
 }
 
+// NVIDIA Nemotron-Nano-v2: tool wire shape `<TOOLCALL>[{json}, ...]
+// </TOOLCALL><SPECIAL_12>`. Reuses the Apriel output codec (both formats
+// use the same JSON-array tool envelope); only the grammar and writer
+// differ.
+static common_chat_params common_chat_params_init_nemotron_nano_v2(const common_chat_template &    tmpl,
+                                                                   const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    (void) tmpl;
+    data.prompt           = common_chat_nemotron_nano_v2_render(inputs);
+    data.format           = COMMON_CHAT_FORMAT_PEG_APRIEL;  // shares JSON-array tool codec
+    data.preserved_tokens = {"<TOOLCALL>", "</TOOLCALL>", "<SPECIAL_12>"};
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+    {
+        const auto base_grammar = common_chat_grammar_get("nemotron-nano-v2");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // IBM Granite 3.3: reasoning + content (no tool calls in scope). Uses
 // `<|start_of_role|>` / `<|end_of_role|>` / `<|end_of_text|>` role markers
 // and the standard `<think>...</think>` reasoning shape.
@@ -2277,6 +2305,14 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         src.find("]~b]ai") != std::string::npos) {
         LOG_DBG("Using specialized template: MiniMax-M2\n");
         return common_chat_params_init_minimax_m2(tmpl, params);
+    }
+
+    // NVIDIA Nemotron-Nano-v2 detection: unique `<TOOLCALL>` + `<SPECIAL_12>`
+    // role-marker syntax.
+    if (src.find("<TOOLCALL>") != std::string::npos &&
+        src.find("<SPECIAL_12>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Nemotron-Nano-v2\n");
+        return common_chat_params_init_nemotron_nano_v2(tmpl, params);
     }
 
     // DeepSeek-V3.1 detection: unique `<｜tool▁calls▁begin｜>` literal in

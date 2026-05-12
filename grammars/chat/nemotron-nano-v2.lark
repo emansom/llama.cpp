@@ -1,0 +1,28 @@
+%llguidance {}
+
+# NVIDIA Nemotron-Nano-v2 chat grammar (Lark / llguidance)
+#
+# Wire format for the model's emitted assistant turn:
+#   <content>(<TOOLCALL>[json_array]</TOOLCALL>)?(<SPECIAL_12>)?
+#
+# `<TOOLCALL>[...]</TOOLCALL>` is a JSON array of
+# `{"name": "...", "arguments": {...}}` objects. `<SPECIAL_12>` is the
+# end-of-turn marker the model emits after the assistant content.
+
+start: assistant_body
+
+assistant_body: content tool_calls_block? eot?
+
+content: /([^<]|<(?!TOOLCALL>))*/
+
+# Structured tool-call rule for partial-parse incremental capture.
+tool_calls_block: "<TOOLCALL>[" json_ws tool_call (tool_call_separator tool_call)* json_ws "]</TOOLCALL>"
+tool_call_separator: "," json_ws
+tool_call: "{\"name\": \"" func_name "\", \"arguments\": " tool_args "}"
+
+json_ws: /[ \t\n]*/
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+tool_args: {{TOOL_SCHEMA}}
+
+eot: "<SPECIAL_12>"
