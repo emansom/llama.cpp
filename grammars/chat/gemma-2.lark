@@ -1,0 +1,14 @@
+%llguidance {}
+
+# Google Gemma 2 chat grammar (Lark / llguidance)
+#
+# Gemma 2 has no tool calling and no reasoning support; the assistant turn
+# is just free-form content. Role markers `<start_of_turn>...<end_of_turn>`
+# appear only in the prompt-rendering side, not in the model's emitted
+# assistant body.
+
+start: assistant_body
+
+assistant_body: content
+
+content: /(.|\n)*/

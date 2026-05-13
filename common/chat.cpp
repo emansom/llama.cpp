@@ -5,6 +5,7 @@
 #include "chat-formats/deepseek-v3-2-format.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/functionary-v3-2-format.h"
+#include "chat-formats/gemma-2-format.h"
 #include "chat-formats/gemma4-format.h"
 #include "chat-formats/gigachat-v3-format.h"
 #include "chat-formats/glm-4-7-flash-format.h"
@@ -1519,6 +1520,27 @@ static common_chat_params common_chat_params_init_cohere_c4ai_r_plus(const commo
     return data;
 }
 
+// Google Gemma 2: content-only (no tools, no reasoning). Uses
+// `<start_of_turn>{role}\n{content}<end_of_turn>\n` role markers and
+// renames the `assistant` role to `model`. Reuses the simple-reasoning
+// codec since the assistant body is a single content rule.
+static common_chat_params common_chat_params_init_gemma_2(const common_chat_template &    tmpl,
+                                                          const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    data.prompt           = common_chat_gemma_2_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_SIMPLE_REASONING;
+    data.preserved_tokens = {"<start_of_turn>", "<end_of_turn>"};
+    {
+        const auto base_grammar = common_chat_grammar_get("gemma-2");
+        data.grammar             = base_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // IBM Granite 3.3: reasoning + content (no tool calls in scope). Uses
 // `<|start_of_role|>` / `<|end_of_role|>` / `<|end_of_text|>` role markers
 // and the standard `<think>...</think>` reasoning shape.
@@ -2482,6 +2504,15 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
             workaround::convert_tool_responses_gemma4(params.messages);
         }
         return common_chat_params_init_gemma4(tmpl, params);
+    }
+
+    // Gemma 2 detection: `<start_of_turn>` / `<end_of_turn>` role markers
+    // with no tool calling. Gemma 4 uses `<|...|>` markup and is filtered
+    // above, so anything reaching here with `<start_of_turn>` is Gemma 2.
+    if (src.find("<start_of_turn>") != std::string::npos &&
+        src.find("<end_of_turn>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Gemma 2\n");
+        return common_chat_params_init_gemma_2(tmpl, params);
     }
 
     return std::nullopt;

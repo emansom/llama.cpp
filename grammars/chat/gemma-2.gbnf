@@ -1,0 +1,5 @@
+# Google Gemma 2 chat grammar (GBNF)
+
+root ::= assistant-body
+assistant-body ::= content
+content ::= [^]*
