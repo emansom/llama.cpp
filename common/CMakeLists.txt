@@ -121,6 +121,8 @@ add_library(${TARGET}
     chat-formats/cohere-c4ai-r-plus-format.cpp
     chat-formats/gemma-2-format.h
     chat-formats/gemma-2-format.cpp
+    chat-formats/functionary-v3-1-format.h
+    chat-formats/functionary-v3-1-format.cpp
     chat-formats/json-tagged-format.h
     chat-formats/json-tagged-format.cpp
     chat-formats/kimi-k2-format.h

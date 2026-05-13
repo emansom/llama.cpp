@@ -4,6 +4,7 @@
 #include "chat-auto-parser.h"
 #include "chat-formats/deepseek-v3-2-format.h"
 #include "chat-formats/format-pipeline.h"
+#include "chat-formats/functionary-v3-1-format.h"
 #include "chat-formats/functionary-v3-2-format.h"
 #include "chat-formats/gemma-2-format.h"
 #include "chat-formats/gemma4-format.h"
@@ -1520,6 +1521,32 @@ static common_chat_params common_chat_params_init_cohere_c4ai_r_plus(const commo
     return data;
 }
 
+// Functionary medium v3.1: Llama-3 role markers, `<function=NAME>{json}
+// </function>` tool wire shape, no reasoning. Reuses the Apriel JSON-tag
+// tool codec via auto-tagged rule names (`tool_call`/`func_name`/
+// `tool_args`).
+static common_chat_params common_chat_params_init_functionary_v3_1(const common_chat_template &    tmpl,
+                                                                   const autoparser::generation_params & inputs) {
+    common_chat_params data;
+    data.prompt           = common_chat_functionary_v3_1_render(inputs, tmpl.bos_token());
+    data.format           = COMMON_CHAT_FORMAT_PEG_APRIEL;
+    data.preserved_tokens = {"<function=", "</function>", "<|eot_id|>", "<|eom_id|>", "<|python_tag|>"};
+
+    auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
+    {
+        const auto base_grammar = common_chat_grammar_get("functionary-v3-1");
+        const auto sampling_grammar = (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE)
+            ? inject_tool_schema(base_grammar, inputs.tools)
+            : base_grammar;
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(base_grammar).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.reasoning_format    = inputs.reasoning_format;
+    }
+    return data;
+}
+
 // Google Gemma 2: content-only (no tools, no reasoning). Uses
 // `<start_of_turn>{role}\n{content}<end_of_turn>\n` role markers and
 // renames the `assistant` role to `model`. Reuses the simple-reasoning
@@ -2286,6 +2313,16 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
     if (src.find("<|channel|>") != std::string::npos) {
         LOG_DBG("Using specialized template: GPT-OSS\n");
         return common_chat_params_init_gpt_oss(tmpl, params);
+    }
+
+    // Functionary v3.1 (Llama-3 base) detection: distinctive
+    // `<|python_tag|>` + `<function=` literal combo with `<|eom_id|>`
+    // terminator. v3.2 uses `>>>recipient\n` instead and is handled below.
+    if (src.find("<|python_tag|>") != std::string::npos &&
+        src.find("<function=") != std::string::npos &&
+        src.find("<|eom_id|>") != std::string::npos) {
+        LOG_DBG("Using specialized template: Functionary v3.1\n");
+        return common_chat_params_init_functionary_v3_1(tmpl, params);
     }
 
     // Functionary v3.2 - uses recipient-based format with >>>recipient\n{content}
