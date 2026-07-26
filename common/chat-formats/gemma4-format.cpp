@@ -422,13 +422,16 @@ static const std::unordered_map<common_chat_format_state, gemma4_entry_root> gem
     // Mid-content: either a plain content continuation, or the empty-thought
     // prefill, which opened AND closed a thought so the model resumes in content.
     //
-    // Its OWN family, not `turn_start`'s. Sharing them meant a turn whose thought
-    // phase is demonstrably over could still open one -- a second thought after
-    // the prefill, or a thought spliced into the middle of a sentence the caller
-    // had already begun. The `resume_content*` rules are the `turn_start*` ones
-    // without the leading `channel_block?`.
+    // Its own family for the three DEMAND variants, which drop `turn_start`'s
+    // leading `channel_block?`: a thinking-off turn that owes a call, a schema or
+    // a caller grammar must not open a channel before delivering it.
+    //
+    // The undemanding variant stays `turn_start`, thought opener included, and
+    // the asymmetry is deliberate -- see the note in gemma4.lark. Blocking it
+    // there protects nothing (`turn_tail` is unbounded content anyway) and was
+    // measured to corner the model into emitting the word "thought" forever.
     { common_chat_format_state::IN_CONTENT,
-      { "resume_content", "resume_content_tool_call", "resume_content_response_format",
+      { "turn_start", "resume_content_tool_call", "resume_content_response_format",
         "resume_content_user_grammar" } },
     // Mid-thought: the delta begins inside `reasoning`, with the opener already
     // in the prompt and the `<channel|>` closer still to come.

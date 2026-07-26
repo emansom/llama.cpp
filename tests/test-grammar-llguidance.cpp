@@ -1987,23 +1987,6 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
         // passed the thought, so `<|channel>` must be gone from the very first
         // mask -- these four entries are the turn_start ones minus that opener.
         {
-            "resume_content", "mid-content: no second thought, whatever else is legal",
-            "Hello.<turn|>",
-            {
-                { "", { "<turn|>", "<|tool_call>" }, { "<|channel>", "<channel|>", "<|tool_response>" }, 1 },
-                { "Hello.", { "<turn|>", "<|tool_call>" }, { "<|channel>", "<channel|>" }, 1 },
-            },
-            /* tools = */ true,
-        },
-        {
-            "resume_content", "mid-content, no tools: only prose and the closer",
-            "Hello.<turn|>",
-            {
-                { "", { "<turn|>" }, { "<|channel>", "<|tool_call>", "<channel|>" }, 1 },
-            },
-            /* tools = */ false,
-        },
-        {
             "resume_content_tool_call", "thinking off + tool_choice=required: the call is FORCED",
             CALL + "f{}" + CALL_END + HANDOVER,
             {
@@ -2304,9 +2287,11 @@ static void test_gemma4_entry_selection() {
         // the empty-thought prefill, which opens AND closes a thought in the
         // prompt -- so the model is at IN_CONTENT, past the thought phase, and
         // gets entries that cannot open another.
+        // No demand: `turn_start`, thought opener and all. Dropping it here
+        // protects nothing and cornered the model -- see gemma4.lark.
         { "thinking off (prefill), no demand",
           { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
-          "resume_content", /* thinking = */ false },
+          "turn_start", /* thinking = */ false },
         { "thinking off (prefill), tool_choice=required",
           { user }, COMMON_CHAT_CONTINUATION_NONE, true, { get_time }, COMMON_CHAT_TOOL_CHOICE_REQUIRED, "", "",
           "resume_content_tool_call", /* thinking = */ false },
