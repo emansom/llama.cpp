@@ -84,6 +84,13 @@ extern const common_chat_format_state_rules gemma4_state_rules;
 struct common_chat_gemma4_rendered {
     std::string              prompt;       // the bytes the model receives
     common_chat_format_state entry_state;  // the state those bytes leave it in
+    // What the assistant turn ALREADY contains at entry. On a continuation the
+    // caller prefilled part of the message and expects the completed whole back,
+    // so extraction must start from these rather than from empty. This is the
+    // other half of the input state: not just where the model is, but what it
+    // has already said in this turn.
+    std::string              entry_content;
+    std::string              entry_reasoning;
 };
 
 common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generation_params & inputs,

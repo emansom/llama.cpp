@@ -874,7 +874,13 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
         entry = inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT
                     ? common_chat_format_state::IN_CONTENT
                     : common_chat_format_state::IN_REASONING;
+
+        const auto & pre = inputs.continue_msg;
+        return { out.str(), entry,
+                 inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT
+                     ? pre.render_content() : std::string{},
+                 pre.reasoning_content };
     }
 
-    return { out.str(), entry };
+    return { out.str(), entry, {}, {} };
 }

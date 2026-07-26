@@ -312,6 +312,8 @@ struct common_chat_params {
     // The FSM state the rendered prompt leaves the model in. The format reports
     // it; extraction is seeded from it rather than re-parsing a text prefix.
     common_chat_format_state            entry_state          = common_chat_format_state::INITIAL;
+    std::string                         entry_content;    // already-emitted content at entry
+    std::string                         entry_reasoning;  // already-emitted reasoning at entry
     // Carried through from common_chat_templates_inputs.reasoning_format so a
     // per-format pipeline can branch on whether the caller wants reasoning
     // extracted (AUTO/DEEPSEEK) or folded into content (NONE).
@@ -334,11 +336,15 @@ struct common_chat_parser_params {
     bool                    grammar_file_parser  = false;  // mirrors common_chat_params::grammar_file_parser
     std::string             override_grammar;              // Lark or GBNF override; used instead of the serialized parser
     common_chat_format_state entry_state = common_chat_format_state::INITIAL;  // seeds the tracker
+    std::string              entry_content;    // seeds the output message
+    std::string              entry_reasoning;  // seeds the output message
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
         format              = chat_params.format;
         grammar_file_parser = chat_params.grammar_file_parser;
         entry_state         = chat_params.entry_state;
+        entry_content       = chat_params.entry_content;
+        entry_reasoning     = chat_params.entry_reasoning;
         reasoning_format    = chat_params.reasoning_format;
         // Grammar-file parsers consume raw model output and must not be handed
         // the generation_prompt prefix.

@@ -1147,6 +1147,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     const auto rendered    = common_chat_gemma4_render(inputs, tmpl.bos_token());
     data.prompt            = rendered.prompt;
     data.entry_state       = rendered.entry_state;
+    data.entry_content     = rendered.entry_content;
+    data.entry_reasoning   = rendered.entry_reasoning;
     data.generation_prompt.clear();  // not part of this format's contract
 
     data.message_delimiters = {
@@ -1768,6 +1770,12 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     // files were ported but nothing called the factory, so the FSM this fork is
     // built around was dead code and extraction silently ran on the mapper.
     auto extract_message = [&](common_chat_msg & msg) {
+        // Seed the output message with what the turn already contains, so a
+        // continuation completes the caller's partial message instead of
+        // returning only the newly generated tail.
+        msg.content           = params.entry_content;
+        msg.reasoning_content = params.entry_reasoning;
+
         auto pipeline = common_chat_make_format_pipeline(params.format, msg, is_partial, params.reasoning_format);
         if (pipeline.valid()) {
             pipeline.seed_entry(params.entry_state);
