@@ -159,7 +159,13 @@ content: /(.|\n)*/
 tool_calls: tool_call+
 # Open, directive, colon, payload, close -- the shape shared by the whole
 # tool family. `call` is a directive, not part of the tag.
-tool_call: tool_call_open_tag tool_call_directive ":" func_name gemma4_dict tool_call_close_tag
+#
+# {{TOOL_SCHEMA}} is replaced per request with one alternative per declared tool,
+# each pairing that tool's NAME LITERAL with that tool's own argument shape, so a
+# call cannot name one tool and carry another's arguments. With no tools declared
+# it falls back to `tool_call_directive ":" func_name gemma4_dict`, the
+# unconstrained form.
+tool_call: tool_call_open_tag {{TOOL_SCHEMA}} tool_call_close_tag
 tool_call_directive: "call"
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/

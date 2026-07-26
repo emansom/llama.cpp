@@ -1176,13 +1176,17 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     // header comment, so replacing only the first leaves the real rule untouched
     // and the grammar still fails to compile -- which, failing open, looks like a
     // pass. That is exactly what happened while writing this test.
-    const std::string placeholder = "{{RESPONSE_SCHEMA}}";
-    const std::string schema      = "%json {\"type\": \"object\"}";
-    assert(base.find(placeholder) != std::string::npos);
-    for (size_t at = base.find(placeholder); at != std::string::npos;
-         at = base.find(placeholder, at + schema.size())) {
-        base.replace(at, placeholder.size(), schema);
-    }
+    auto substitute = [&base](const std::string & placeholder, const std::string & with) {
+        assert(base.find(placeholder) != std::string::npos);
+        for (size_t at = base.find(placeholder); at != std::string::npos;
+             at = base.find(placeholder, at + with.size())) {
+            base.replace(at, placeholder.size(), with);
+        }
+    };
+    substitute("{{RESPONSE_SCHEMA}}", "%json {\"type\": \"object\"}");
+    // The no-tools form, which is what a request without `tools` produces. The
+    // per-tool alternation is exercised separately below.
+    substitute("{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict");
 
     // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
     // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the

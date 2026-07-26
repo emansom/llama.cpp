@@ -1001,6 +1001,133 @@ static bool is_lark_grammar(const std::string & grammar) {
 // correlate them. The fix is a per-tool alternation pairing each name literal
 // with its own schema; see docs/fork/ARCHITECTURE.md. Do not treat the current
 // behaviour as intended.
+// --- Gemma 4 tool-argument constraint ----------------------------------------
+//
+// Gemma 4's argument syntax is NOT JSON: bare keys, `<|"|>`-delimited strings,
+// `{city:<|"|>London<|"|>}`. So `%json` emits the wrong language entirely and
+// cannot be dropped in, which is what upstream's
+//   TODO @aldehir: need to extend json-schema-to-grammar to produce more than
+//   JSON rules
+// is about, and why ten other model handlers constrain their tool arguments and
+// this one did not. Left unconstrained the model may emit any argument at all;
+// measured adversarially, 1 call in 25 conformed.
+//
+// Anything the emitter cannot express falls back to the unconstrained dict for
+// THAT tool only. A fallback is not silent: it is per-tool, so one exotic schema
+// cannot quietly widen the others.
+static std::string gemma4_value_rule(const json & schema, int depth);
+
+static std::string gemma4_string_literal(const std::string & s) {
+    // A Lark string literal. Escape only what the syntax requires.
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') { out += '\\'; }
+        out += c;
+    }
+    return out + "\"";
+}
+
+// A quoted Gemma 4 string: <|"|> ... <|"|>. Both delimiters are the same token,
+// and the format defines no escape for it -- see ARCHITECTURE.md.
+static std::string gemma4_quoted(const std::string & body) {
+    return "(str_delim_tag " + body + " str_delim_tag)";
+}
+
+static std::string gemma4_value_rule(const json & schema, int depth) {
+    // Bound the recursion; a self-referential schema would otherwise not
+    // terminate. Beyond it, accept the generic value.
+    if (depth > 8 || !schema.is_object()) { return "gemma4_value"; }
+
+    // An enum is the tightest thing we can emit: a literal alternation.
+    if (schema.contains("enum") && schema.at("enum").is_array() && !schema.at("enum").empty()) {
+        std::vector<std::string> alts;
+        for (const auto & e : schema.at("enum")) {
+            if (e.is_string()) {
+                alts.push_back(gemma4_quoted(gemma4_string_literal(e.get<std::string>())));
+            } else if (e.is_number() || e.is_boolean()) {
+                alts.push_back(gemma4_string_literal(e.dump()));
+            } else {
+                return "gemma4_value";
+            }
+        }
+        return "(" + string_join(alts, " | ") + ")";
+    }
+
+    const std::string type = schema.value("type", std::string{});
+
+    if (type == "string")  { return gemma4_quoted("gemma4_str_content"); }
+    if (type == "integer" || type == "number") { return "GEMMA4_NUMBER"; }
+    if (type == "boolean") { return "GEMMA4_BOOL"; }
+    if (type == "null")    { return "\"null\""; }
+
+    if (type == "array") {
+        const json items = schema.contains("items") ? schema.at("items") : json::object();
+        const std::string item = gemma4_value_rule(items, depth + 1);
+        return "(\"[\" (" + item + " (\",\" " + item + ")*)? \"]\")";
+    }
+
+    if (type == "object") {
+        if (!schema.contains("properties") || !schema.at("properties").is_object()) {
+            return "gemma4_dict";
+        }
+        std::vector<std::string> required;
+        for (const auto & r : schema.value("required", json::array())) {
+            if (r.is_string()) { required.push_back(r.get<std::string>()); }
+        }
+        // Emit properties in DECLARED order. Required ones are mandatory, the
+        // rest optional, each preceded by its separating comma so the comma
+        // disappears with the property it belongs to. This is why the order is
+        // fixed rather than a permutation: a permutation of N optionals is N!
+        // alternatives, which is not a grammar anyone wants to compile.
+        std::vector<std::string> parts;
+        bool first = true;
+        for (const auto & [key, prop] : schema.at("properties").items()) {
+            const bool is_required = std::find(required.begin(), required.end(), key) != required.end();
+            const std::string kv   = gemma4_string_literal(key) + " \":\" " + gemma4_value_rule(prop, depth + 1);
+            if (is_required) {
+                parts.push_back(first ? kv : "\",\" " + kv);
+                first = false;
+            } else {
+                parts.push_back(first ? "(" + kv + ")?" : "(\",\" " + kv + ")?");
+            }
+        }
+        if (parts.empty()) { return "(\"{\" \"}\")"; }
+        return "(\"{\" " + string_join(parts, " ") + " \"}\")";
+    }
+
+    return "gemma4_value";
+}
+
+// One alternative per declared tool, pairing the tool's NAME LITERAL with that
+// tool's own argument shape.
+//
+// The correlation is the point. `func_name` was a free identifier and the schema
+// a `oneOf` across every tool, so a call could name tool A and carry tool B's
+// arguments and still be well-formed. Pairing them makes that unrepresentable.
+//
+// It also retires the FUNC_NAME charset limit: names come from literals, so a
+// dotted or dashed MCP name like `filesystem.read_file` needs nothing special.
+static std::string build_gemma4_tool_schema(const json & tools) {
+    if (!tools.is_array() || tools.empty()) {
+        return "tool_call_directive \":\" func_name gemma4_dict";
+    }
+    std::vector<std::string> alts;
+    foreach_function(tools, [&](const json & tool) {
+        const auto & function = tool.at("function");
+        const auto   name     = function.value("name", std::string{});
+        if (name.empty()) { return; }
+        const json params = function.contains("parameters") && function.at("parameters").is_object()
+            ? function.at("parameters")
+            : json::object();
+        alts.push_back("(tool_call_directive \":\" " + gemma4_string_literal(name) + " " +
+                       gemma4_value_rule(params, 0) + ")");
+    });
+    if (alts.empty()) {
+        return "tool_call_directive \":\" func_name gemma4_dict";
+    }
+    return "(" + string_join(alts, " | ") + ")";
+}
+
 static std::string build_lark_tool_schema(const json & tools) {
     if (!tools.is_array() || tools.empty()) {
         return "%json {}";
@@ -1080,8 +1207,11 @@ static std::string inject_tool_schema(const std::string & grammar_template, cons
     if (grammar_template.find(placeholder) == std::string::npos) {
         return grammar_template;
     }
+    // Gemma 4's argument syntax is not JSON, so its Lark grammar gets the
+    // Gemma-dict emitter rather than `%json`. build_lark_tool_schema stays for
+    // grammars whose arguments really are JSON.
     std::string schema = is_lark_grammar(grammar_template)
-        ? build_lark_tool_schema(tools)
+        ? build_gemma4_tool_schema(tools)
         : build_gbnf_tool_schema(tools);
     return replace_all(grammar_template, placeholder, schema);
 }
@@ -1124,7 +1254,12 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
-    base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
+    // Extraction gets the UNCONSTRAINED tool-call shape, never the request's
+    // schema. The schema was already enforced at sampling time; re-imposing it
+    // here would reject output the sampler had legitimately produced, and would
+    // make parsing depend on which tools a request happened to declare.
+    base = replace_all(base, "{{TOOL_SCHEMA}}",
+                       lark ? "tool_call_directive \":\" func_name gemma4_dict" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
     return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
@@ -1275,10 +1410,12 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
             common_chat_grammar_set_entry(parser_base, gen_root),
             has_response_format ? inputs.json_schema : json::object());
 
-        // NOTE: inject_tool_schema() is deliberately not called yet -- gemma4.lark
-        // carries no {{TOOL_SCHEMA}} placeholder, so tool arguments are currently
-        // constrained only to a generic dict, exactly as upstream leaves them.
-        // That is the gap this fork exists to close; see FORK.md.
+        // The declared tools' schemas, as productions inside the tool-call scope.
+        // Once the model has opened a call it can only name a declared tool, and
+        // having named one it can only emit that tool's arguments in that tool's
+        // shape. With no tools declared this is the unconstrained form, so a
+        // request without tools is unaffected.
+        sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
 
         data.grammar             = sampling_grammar;
         data.parser              = chat_grammar_to_peg(parser_base, gen_root).save();
