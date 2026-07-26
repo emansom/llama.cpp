@@ -1146,8 +1146,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // invalidated the next one's end-of-turn test, and a double-render diff
     // could not isolate the tail under continuation.
     const auto rendered    = common_chat_gemma4_render(inputs, tmpl.bos_token());
-    data.prompt            = rendered.prompt;
-    data.entry_state       = rendered.entry_state;
+    data.chat_prompt       = { rendered.prompt, rendered.entry_state };
+    data.prompt            = data.chat_prompt.text;
 
 
     // Hand extraction the prompt and a parser rooted at the `conversation` rule.
@@ -1157,8 +1157,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // message on the way through, rather than being summarised here.
     {
         const auto conv_grammar = common_chat_grammar_require("gemma4");
-        data.rendered_prompt     = data.prompt;
-        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation");
+        data.prompt_validator    = common_chat_prompt_validator(
+            chat_grammar_to_peg(conv_grammar, "conversation"));
     }
 
     data.message_delimiters = {
@@ -1209,8 +1209,19 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // constrained only to a generic dict, exactly as upstream leaves them.
         // That is the gap this fork exists to close; see FORK.md.
 
+        // The generation parse starts where the prompt left the model, so its root
+        // follows entry_state. Resuming inside an unclosed thought means the delta
+        // opens mid-`reasoning` with no `<|channel>thought` ahead of it; `start`
+        // requires that opener, so it would read the rest of the thought and the
+        // `<channel|>` closing it as content.
+        //
+        // entry_state was computed by the renderer and plumbed through two structs
+        // but read by nothing -- the same dead-plumbing shape that let the FSM
+        // itself run as unused code.
+        const std::string gen_root = common_chat_gemma4_entry_root(rendered.entry_state);
+
         data.grammar             = sampling_grammar;
-        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.parser              = chat_grammar_to_peg(parser_base, gen_root).save();
         data.grammar_file_parser = true;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};
@@ -1559,6 +1570,7 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
     params.tool_choice           = inputs.tool_choice;
     params.reasoning_format      = inputs.reasoning_format;
     params.enable_thinking       = inputs.enable_thinking;
+    params.preserve_thinking     = inputs.preserve_thinking;
     params.grammar               = inputs.grammar;
     params.now                   = inputs.now;
     params.add_generation_prompt = inputs.add_generation_prompt;
@@ -1637,8 +1649,8 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
         // Same rule as the main path: the plugin reports both values, nothing
         // here derives one from the other.
         const auto rendered            = common_chat_gemma4_render(params_copy, tmpl.bos_token());
-        data.prompt                    = rendered.prompt;
-        data.entry_state               = rendered.entry_state;
+        data.chat_prompt               = { rendered.prompt, rendered.entry_state };
+        data.prompt                    = data.chat_prompt.text;
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
@@ -1791,24 +1803,10 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // This is what removes the last derived artefact. Nothing summarises
             // the entry state or the prefilled content for the FSM any more --
             // it walks the conversation and knows.
-            if (!params.rendered_prompt.empty() && !params.conversation_parser.empty()) {
-                // NOT lenient: this is the validator. A rendered prompt that does
-                // not parse against `conversation` is malformed input, and the
-                // whole point is to reject it here rather than send it.
-                common_peg_parse_flags cflags = COMMON_PEG_PARSE_FLAG_NONE;
-                if (params.debug) {
-                    cflags |= COMMON_PEG_PARSE_FLAG_DEBUG;
-                }
-                common_peg_parse_context pctx(params.rendered_prompt, cflags);
-                auto presult = params.conversation_parser.parse(pctx);
-                if (presult.fail()) {
-                    throw std::runtime_error(
-                        "rendered prompt failed `conversation` validation at offset " +
-                        std::to_string(presult.end) + ": " +
-                        params.rendered_prompt.substr(presult.end, 80));
-                }
-                pipeline.run(pctx.ast, presult);
-            }
+            // Input has its own type and its own parser; how a prompt is
+            // validated and walked belongs there, not inline in the middle of
+            // parsing model OUTPUT. See chat-formats/prompt.h.
+            params.prompt_validator.walk(params.chat_prompt, pipeline, msg, params.debug);
             pipeline.run(ctx.ast, result);
             return;
         }

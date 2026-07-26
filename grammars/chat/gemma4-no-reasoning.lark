@@ -18,6 +18,23 @@
 start: think_block? content (tool_calls | response_format | )
 think_block: "<|channel>thought" analysis_content "<channel|>"
 analysis_content: /(.|\n)*?/
+
+# Generation entry for entry_state IN_REASONING: the prompt ended inside an
+# unclosed thought, so the delta opens in the MIDDLE of the thought body, the
+# `<|channel>thought` opener having already been sent. Same role as
+# `resume_reasoning` in gemma4.lark, and it MUST keep that name --
+# common_chat_gemma4_entry_root maps the state to this rule name for both
+# variants.
+#
+# NOTE: this file duplicates gemma4.lark and has drifted from it -- it still has
+# the swallow-everything `turn_body_text`, the global `%ignore`, and the per-tag
+# content lookaheads that gemma4.lark replaced. The two variants differ in ONE
+# thing: whether a thought surfaces as reasoning or as content with its markers
+# kept. That is a transformer decision, not a grammar one -- the transformer
+# already receives reasoning_format and other formats branch on it there. Folding
+# these into a single grammar is the right fix; it needs the streaming-partial
+# marker semantics settled first, so it is not done here.
+resume_reasoning: analysis_content "<channel|>" content (tool_calls | response_format | )
 content: /([^<`]|<[^|]|<\|[^tc]|<\|t[^o]|<\|to[^o]|<\|too[^l]|<\|tool[^_]|<\|tool_[^c]|`[^`]|``[^`])*/
 
 tool_calls: tool_call+

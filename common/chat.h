@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include "chat-formats/format-tracker.h"
+#include "chat-formats/prompt.h"
 #include "peg-parser.h"
 
 #include "nlohmann/json_fwd.hpp"
@@ -284,6 +285,13 @@ struct common_chat_templates_inputs {
     bool                                  parallel_tool_calls = false;
     common_reasoning_format               reasoning_format    = COMMON_REASONING_FORMAT_NONE; // TODO: refactor this to "bool enable_thinking"
     bool                                  enable_thinking     = true;
+    // Keep reasoning on assistant turns that carry tool calls, so a multi-hop
+    // tool chain does not lose the thoughts connecting its steps. Google:
+    // "thoughts must NOT be removed between the function calls."
+    // Defaults off, matching the writer spec, where an unset template variable
+    // is falsy. Reasoning on the LAST assistant turn is preserved regardless --
+    // see the gate in common_chat_gemma4_render.
+    bool                                  preserve_thinking   = false;
     std::chrono::system_clock::time_point now                 = std::chrono::system_clock::now();
     std::map<std::string, std::string>    chat_template_kwargs;
     bool                                  add_bos = false;
@@ -309,15 +317,11 @@ struct common_chat_params {
     // common_chat_peg_parse. Grammar-file-driven parsers consume the model's raw
     // output directly and do not need the prefix.
     bool                                grammar_file_parser  = false;
-    // The FSM state the rendered prompt leaves the model in. The format reports
-    // it; extraction is seeded from it rather than re-parsing a text prefix.
-    common_chat_format_state            entry_state          = common_chat_format_state::INITIAL;
-    // The rendered prompt and a parser rooted at the format's `conversation`
-    // rule, so extraction can walk the prompt before the generation.
-    std::string                         rendered_prompt;
-    common_peg_arena                    conversation_parser  = {};
-    std::string                         entry_content;    // already-emitted content at entry
-    std::string                         entry_reasoning;  // already-emitted reasoning at entry
+    // Model input as its own type, plus the parser that checks it. `prompt`
+    // above is the same bytes, kept because it is what callers send; this is the
+    // object the format produced and the validator consumes. See prompt.h.
+    common_chat_prompt                  chat_prompt;
+    common_chat_prompt_validator        prompt_validator;
     // Carried through from common_chat_templates_inputs.reasoning_format so a
     // per-format pipeline can branch on whether the caller wants reasoning
     // extracted (AUTO/DEEPSEEK) or folded into content (NONE).
@@ -339,20 +343,18 @@ struct common_chat_parser_params {
     common_peg_arena        parser               = {};
     bool                    grammar_file_parser  = false;  // mirrors common_chat_params::grammar_file_parser
     std::string             override_grammar;              // Lark or GBNF override; used instead of the serialized parser
-    common_chat_format_state entry_state = common_chat_format_state::INITIAL;  // seeds the tracker
-    // The rendered prompt and a parser rooted at the format's `conversation`
-    // rule. Extraction walks the prompt FIRST with the same pipeline, so the
-    // tracker arrives at generation already holding where it is and what the
-    // open turn contains -- established by walking, not summarised.
-    std::string              rendered_prompt;
-    common_peg_arena         conversation_parser = {};
+    // Model input and its parser. Extraction walks the prompt FIRST with the
+    // same pipeline, so the tracker arrives at generation already holding where
+    // it is and what the open turn contains -- established by walking, not
+    // summarised. See prompt.h.
+    common_chat_prompt           chat_prompt;
+    common_chat_prompt_validator prompt_validator;
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
         format              = chat_params.format;
         grammar_file_parser = chat_params.grammar_file_parser;
-        entry_state         = chat_params.entry_state;
-        rendered_prompt     = chat_params.rendered_prompt;
-        conversation_parser = chat_params.conversation_parser;
+        chat_prompt         = chat_params.chat_prompt;
+        prompt_validator    = chat_params.prompt_validator;
         reasoning_format    = chat_params.reasoning_format;
         // Grammar-file parsers consume raw model output and must not be handed
         // the generation_prompt prefix.

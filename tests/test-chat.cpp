@@ -2214,27 +2214,17 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_with_tool_calls("amount", R"({"orig": 1.5e10})"))
             .run();
 
-        // Edge cases
-        tst.test(
-                "<|channel>thought\n<channel|>Hello, world!\nWhat's up?<channel|>")
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .expect(message_assist)
-            .run();
-
+        // A trailing empty thought: the grammar's `(channel_block content)*`
+        // with an empty final content. Valid output, so it is parsed.
+        //
+        // The three cases that used to sit here -- a dangling `<channel|>`, a
+        // doubled `<channel|>`, and a leading kindless `<|channel>` -- were
+        // removed with the productions that tolerated them. llguidance enforces
+        // this same grammar while sampling, so the model cannot emit any of
+        // them; a parser that accepted them would be describing a language the
+        // format does not have.
         tst.test(
                 "<|channel>thought\n<channel|>Hello, world!\nWhat's up?<|channel>thought\n<channel|>")
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .expect(message_assist)
-            .run();
-
-        tst.test(
-                "<|channel>thought\n<channel|>Hello, world!\nWhat's up?<|channel>thought\n<channel|><channel|>")
-            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
-            .expect(message_assist)
-            .run();
-
-        tst.test(
-                "<|channel><|channel>thought\n<channel|>Hello, world!\nWhat's up?")
             .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
             .expect(message_assist)
             .run();
@@ -2281,8 +2271,14 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
                 auto params = common_chat_templates_apply(tmpls.get(), inputs);
 
-                if (!string_ends_with(params.prompt, "<turn|>\n<|turn>model\n")) {
-                    throw std::runtime_error("Missing generation prompt for Gemma 4");
+                // Tool responses render inside the model turn, so that turn is
+                // still open and generation resumes in it with an unclosed
+                // thought re-opener -- NOT a fresh "<|turn>model", which would
+                // split one model turn in two. enable_thinking defaults true.
+                if (!string_ends_with(params.prompt, "<|channel>thought\n")) {
+                    throw std::runtime_error(
+                        "Gemma 4: expected a thought re-opener after a tool response, got: ..." +
+                        params.prompt.substr(params.prompt.size() > 60 ? params.prompt.size() - 60 : 0));
                 }
             }
 
@@ -2397,9 +2393,19 @@ static void test_template_generation_prompt() {
         return opts;
     };
 
+    // There is no "generation prompt" to assert any more. That field existed so a
+    // caller could recover where generation begins and re-prepend it to the model's
+    // output as a text prefix; the format plugin now reports the state the prompt
+    // leaves the model in, and the parser picks its entry rule from that.
+    //
+    // So the two things worth checking are what the prompt ENDS with, and which
+    // state that tail implies. Asserting the tail alone would not catch a wrong
+    // entry state, and a wrong entry state silently parses the model's reply with
+    // the wrong root.
     auto check = [&](const common_chat_templates_ptr & tmpls,
                      const test_case_options & opts,
-                     const std::string & expected_generation_prompt) {
+                     const std::string & expected_tail,
+                     common_chat_format_state expected_entry) {
         common_chat_templates_inputs inputs;
         inputs.messages               = opts.messages;
         inputs.add_generation_prompt  = opts.add_generation_prompt;
@@ -2409,23 +2415,36 @@ static void test_template_generation_prompt() {
 
         assert_contains(params.prompt, system_msg.content);
         assert_contains(params.prompt, message_user.content);
-        assert_equals(expected_generation_prompt, params.generation_prompt);
-        assert_ends_with(params.prompt, expected_generation_prompt);
+        assert_ends_with(params.prompt, expected_tail);
+        assert_equals(static_cast<int>(expected_entry), static_cast<int>(params.chat_prompt.entry_state));
     };
 
 
 
 
     {
+        using S = common_chat_format_state;
         auto tmpls = gemma4_templates();
-        check(tmpls, basic(),                  "<|turn>model\n");
-        check(tmpls, continuation_content(),   "<|turn>model\n<|channel>thought\nI'm thinking<channel|>Hello, ");
-        check(tmpls, continuation_reasoning(), "<|turn>model\n<|channel>thought\nI'm");
 
-        // Special case when last message is a tool response
+        // A fresh turn opener: the model has not spoken, and may open with a thought.
+        check(tmpls, basic(), "<|turn>model\n", S::IN_GENERATION_PROMPT);
+
+        // Prefilled content: the thought is COMPLETE (closed with "\n<channel|>", as
+        // the writer spec emits it) and the model resumes in content.
+        check(tmpls, continuation_content(),
+              "<|turn>model\n<|channel>thought\nI'm thinking\n<channel|>Hello, ", S::IN_CONTENT);
+
+        // Prefilled reasoning: the thought is left UNCLOSED, so the model resumes
+        // inside it and the parser enters at `resume_reasoning`.
+        check(tmpls, continuation_reasoning(),
+              "<|turn>model\n<|channel>thought\nI'm", S::IN_REASONING);
+
+        // Last message is a tool response: the model turn is still open, so there is
+        // no new "<|turn>model" -- generation resumes in the same turn, inside the
+        // prefilled thought.
         test_case_options after_tool_call = continuation_reasoning();
         after_tool_call.messages          = { system_msg, message_user, tool_call_msg, tool_msg, message_assist_prefill_reasoning };
-        check(tmpls, after_tool_call, "<|channel>thought\nI'm");
+        check(tmpls, after_tool_call, "<|channel>thought\nI'm", S::IN_REASONING);
     }
 
 

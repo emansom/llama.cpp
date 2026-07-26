@@ -20,10 +20,88 @@
 #
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
-start: think_or_stray? content (think_block content)* (tool_calls | response_format | trailing_channel_marker | )
+# --- Tag vocabulary -------------------------------------------------------------
+#
+# Every marker in this format is a tag: <|NAME> opens, <NAME|> closes,
+# <|NAME|> is self-delimiting. Naming them here, once, is what stops the rest of
+# the grammar from being a soup of literals in which "<|channel>thought" looks
+# like one atom rather than a tag plus the channel's kind.
+#
+# Structure that follows from it:
+#   <|channel>KIND ... <channel|>          a channel, with a kind
+#   <|tool_call>DIRECTIVE:PAYLOAD<tool_call|>
+#   <|tool>DIRECTIVE:PAYLOAD<tool|>
+#   <|tool_response>DIRECTIVE:PAYLOAD<tool_response|>
+#
+# The three tool-family tags share one shape -- open, directive, colon, payload,
+# close -- which the old literals hid completely.
+
+# The DELIMITERS are the vocabulary. `<|` and `|>` carry the meaning -- opening
+# and closing -- independently of which tag they wrap, exactly as `<` and `/>`
+# do in XML. A tag is therefore delimiter + name + delimiter, not one fused
+# string, and the name is a token the grammar can reason about.
+#
+#   open  <|NAME>   =  TAG_L NAME TAG_GT
+#   close <NAME|>   =  TAG_LT NAME TAG_R
+#   self  <|NAME|>  =  TAG_L NAME TAG_R
+#
+# Fusing them ("<|channel>") hid that `<|channel>thought` is a tag plus a
+# channel kind, and made every tag an unrelated magic string that content had
+# to be taught about one at a time.
+TAG_L:  "<|"
+TAG_R:  "|>"
+TAG_LT: "<"
+TAG_GT: ">"
+
+turn_open_tag:            TAG_L "turn" TAG_GT
+turn_close_tag:           TAG_LT "turn" TAG_R
+channel_open_tag:         TAG_L "channel" TAG_GT
+channel_close_tag:        TAG_LT "channel" TAG_R
+tool_call_open_tag:       TAG_L "tool_call" TAG_GT
+tool_call_close_tag:      TAG_LT "tool_call" TAG_R
+tool_response_open_tag:   TAG_L "tool_response" TAG_GT
+tool_response_close_tag:  TAG_LT "tool_response" TAG_R
+
+# Self-delimiting: the name is `"`, so the string delimiter is not a bespoke
+# marker but the third tag form. Being symmetric is why the format cannot
+# escape it -- see ARCHITECTURE.md.
+str_delim_tag: TAG_L "\"" TAG_R
+
+# This grammar describes VALID Gemma 4 output and nothing else. It is the same
+# grammar llguidance enforces during sampling, so a malformed construct is not
+# something the model can emit -- and a production that tolerates one would be
+# describing a language the format does not have. A stray `<|channel>` with no
+# kind, or a `<channel|>` closing nothing, are parse errors here by design.
+start: channel_block? turn_tail
+
+# Everything a model turn can contain after its opening thought. Shared by both
+# generation entries so they cannot drift: `start` and `resume_reasoning` differ
+# ONLY in where the model picks up, never in what it may say next.
+turn_tail: content (channel_block content)* (tool_calls | response_format | )
+
+# The second generation entry, selected when the rendered prompt ended INSIDE an
+# unclosed thought (entry_state IN_REASONING) because the caller prefilled
+# reasoning_content.
+#
+# The delta then begins in the MIDDLE of `reasoning`, with no `<|channel>thought`
+# opener -- that opener is already in the prompt. Parsed with `start` the delta
+# has no leading channel block, so the continuation of the thought and the
+# `<channel|>` that closes it are read as ordinary content and the reasoning is
+# lost.
+#
+# `reasoning` is reused verbatim, so the same REASONING tag fires and the
+# continuation lands in the same field as the part already in the prompt.
+resume_reasoning: reasoning channel_close_tag turn_tail
 
 # --- Assistant turn continuation (sampler entry) -------------------------------
-think_or_stray: think_block | stray_open
+#
+# A channel is the tag plus its KIND. `thought` is the only kind the model emits
+# today, but it is a production rather than part of the opener, so a different
+# kind is a grammar question and not a new literal to remember.
+channel_block: channel_open channel_body channel_close_tag
+channel_open: channel_open_tag channel_kind
+channel_kind: "thought"
+channel_body: reasoning
 # Content is any run of text containing NO TAG.
 #
 # `<|` always begins a tag (open `<|NAME>` or self-delimiting `<|NAME|>`), and
@@ -41,18 +119,13 @@ think_or_stray: think_block | stray_open
 # The backtick clauses are unrelated: they keep ``` from being swallowed so the
 # response_format block can match.
 content: /([^<`]|<(?!\|)(?![a-zA-Z_][a-zA-Z0-9_]*\|>)|`(?!``)|``(?!`))*/
-think_block: "<|channel>thought" reasoning "<channel|>"
 reasoning: /(.|\n)*?/
-# Some Gemma 4 fixtures emit a stray '<|channel>' (without 'thought') at the
-# start of the body. Match and discard it.
-stray_open: "<|channel>"
-# Some Gemma 4 fixtures emit trailing '<channel|>' after the body. Match
-# and discard it so the strict closing-tokens-required policy still
-# applies but the stray bytes don't surface as content.
-trailing_channel_marker: "<channel|>"
 
 tool_calls: tool_call+
-tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"
+# Open, directive, colon, payload, close -- the shape shared by the whole
+# tool family. `call` is a directive, not part of the tag.
+tool_call: tool_call_open_tag tool_call_directive ":" func_name gemma4_dict tool_call_close_tag
+tool_call_directive: "call"
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 
@@ -60,7 +133,10 @@ gemma4_dict: "{" (gemma4_kv ("," gemma4_kv)*)? "}"
 gemma4_kv: gemma4_dict_key ":" gemma4_value
 gemma4_dict_key: /[^:{}]+/
 gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA4_BOOL | "null"
-gemma4_string: "<|\"|>" GEMMA4_STR_CONTENT "<|\"|>"
+# The string delimiter is the self-delimiting tag form <|NAME|>, with `"` as the
+# name -- not a bespoke marker. Note it is symmetric, which is why the format has
+# no way to escape it: see ARCHITECTURE.md.
+gemma4_string: str_delim_tag GEMMA4_STR_CONTENT str_delim_tag
 GEMMA4_STR_CONTENT: /([^<]|<[^|]|<\|[^"]|<\|"[^|])*/
 gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
 
@@ -82,53 +158,41 @@ response_content: {{RESPONSE_SCHEMA}}
 # `tool_calls` from the generation entry above: one description of the model's
 # wire shape, used for both directions.
 
-conversation: closed_turn* open_model_turn?
+# This rule describes COMPLETE conversations only. A rendered prompt is a PREFIX
+# of one -- it stops exactly where generation is about to begin -- so the walk
+# parses it in STREAMING mode and a trailing incomplete turn comes back as
+# NEED_MORE_INPUT with its partial nodes intact. That is the parse telling us
+# where the model is, which is the whole point.
+#
+# There is deliberately NO production for a half-finished turn or a thought
+# without its `<channel|>`. llguidance enforces this same grammar while sampling,
+# so the model cannot emit either; writing them down would describe a language
+# the format does not have, and would let the sampler stop mid-thought during
+# generation -- the exact failure "closing tokens are required" exists to
+# prevent. A prompt that ends mid-thought is not the model emitting an unclosed
+# thought, it is the caller having prefilled part of one; that is a property of
+# where the input stops, and partial parsing is how a parser expresses it.
+conversation: closed_turn*
 
 closed_turn: system_turn | user_turn | closed_model_turn
 
-system_turn: "<|turn>system\n" opaque_body "<turn|>\n"
-user_turn:   "<|turn>user\n"   opaque_body "<turn|>\n"
+turn_close: turn_close_tag "\n"
+
+system_turn: turn_open_tag "system" "\n" opaque_body turn_close
+user_turn:   turn_open_tag "user"   "\n" opaque_body turn_close
 
 # A model turn that completed. It may end at <turn|> or, when it left tool calls
 # outstanding, at a bare <|tool_response> -- both are required literals, not an
 # optional closer (see POLICIES.md#closing-tokens-are-required).
-closed_model_turn: "<|turn>model\n" model_body model_turn_close
-model_turn_close: "<turn|>\n" | tool_response_block+
-
-# The final, UNCLOSED model turn: where generation resumes. Walking it is what
-# carries already-emitted content and reasoning into the output message.
-#
-# It has TWO shapes, because generation can resume in either of two places:
-#
-#   - inside the thought      -- the caller prefilled reasoning_content and the
-#                                model is still thinking, so there is no
-#                                <channel|> yet
-#   - after the thought       -- the thought completed and the caller prefilled
-#                                content, so the body is an ordinary model_body
-#
-# `open_thought` is NOT a loosened closer. <channel|> stays a required literal
-# everywhere it can appear; this is a distinct wire shape in which it has not
-# been emitted yet, expressed as its own alternative -- the exception spelled out
-# in POLICIES.md#closing-tokens-are-required. Making think_block's closer
-# optional instead would let the sampler skip it during generation, which is the
-# failure that policy exists to prevent.
-open_model_turn: "<|turn>model\n" open_model_body
-open_model_body: open_thought | model_body
-
-# A thought still in progress: opener required, body captured as reasoning, no
-# closer because the model has not finished thinking.
-#
-# Reuses `reasoning` rather than naming a new rule: lark-to-peg tags a rule as
-# REASONING by matching the name exactly ("reasoning" / "thought"), so
-# `open_reasoning` would parse and then emit no reasoning event at all. Its
-# non-greedy body has no following sibling here, so it runs to end of input --
-# which is right, because an unfinished thought is the last thing in the prompt.
-open_thought: "<|channel>thought\n" reasoning
+closed_model_turn: turn_open_tag "model" "\n" model_body model_turn_close
+model_turn_close: turn_close | tool_response_block+
 
 # Same shape as the generation entry, so the same decoder tags fire.
-model_body: think_or_stray? content (think_block content)* tool_calls?
+model_body: channel_block? content (channel_block content)* tool_calls?
 
-tool_response_block: "<|tool_response>response:" func_name gemma4_dict "<tool_response|>"
+# Same open/directive/colon/payload/close shape as tool_call.
+tool_response_block: tool_response_open_tag tool_response_directive ":" func_name gemma4_dict tool_response_close_tag
+tool_response_directive: "response"
 
 # System and user bodies are not extracted -- nothing downstream reads them --
 # so they stay opaque rather than inventing structure the decoder would ignore.

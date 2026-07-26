@@ -231,7 +231,7 @@ int llama_completion(int argc, char ** argv) {
                 LOG_WRN("*** User-specified prompt will pre-start conversation, did you mean to set --system-prompt (-sys) instead?\n");
             }
 
-            LOG_INF("%s: chat template example:\n%s\n", __func__, common_chat_format_example(chat_templates.get(), true, params.default_template_kwargs).c_str());
+            LOG_INF("%s: chat template example:\n%s\n", __func__, common_chat_format_example(chat_templates.get(), params.default_template_kwargs).c_str());
         } else {
             LOG_INF("%s: in-suffix/prefix is specified, chat template will be disabled\n", __func__);
         }
@@ -266,7 +266,10 @@ int llama_completion(int argc, char ** argv) {
         }
     }
 
-    const bool add_bos = llama_vocab_get_add_bos(vocab) && !true;
+    // The format renderer emits BOS itself (it is handed the vocab's bos_token),
+    // so adding another here would double it. Upstream gated this on !use_jinja;
+    // with the template engine gone there is no ungated path left.
+    const bool add_bos = false;
     if (!llama_model_has_encoder(model)) {
         GGML_ASSERT(!llama_vocab_get_add_eos(vocab));
     }
@@ -280,7 +283,7 @@ int llama_completion(int argc, char ** argv) {
         common_chat_msg new_msg;
         new_msg.role = role;
         new_msg.content = content;
-        auto formatted = common_chat_format_single(chat_templates.get(), chat_msgs, new_msg, role == "user", g_params->true);
+        auto formatted = common_chat_format_single(chat_templates.get(), chat_msgs, new_msg, role == "user");
         chat_msgs.push_back(new_msg);
         LOG_DBG("formatted: '%s'\n", formatted.c_str());
         return formatted;

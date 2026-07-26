@@ -652,30 +652,25 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
         std::string normalized_name = rdef.name;
         for (char & c : normalized_name) { if (c == '_') c = '-'; }
 
-        // Apply semantic tags based on conventional rule names.
+        // Apply semantic tags based on rule names, matched EXACTLY against the
+        // names listed below.
         //
-        // Matched on the name's ROLE SUFFIX as well as the whole name, so a rule
-        // called `open-reasoning`, `channel-content` or `model-tool-args` carries
-        // the same tag as the bare role.
+        // A tag says "the text this rule captures IS content / IS reasoning", so
+        // it belongs only on a rule whose whole match is that payload. Inferring
+        // it from a name pattern instead -- treating any `*-thought` or
+        // `*-content` rule as the payload -- guesses at a rule's meaning from its
+        // spelling, and guesses wrong on wrappers: a rule like `open_thought`,
+        // whose match includes the `<|channel>thought` opener, then emits those
+        // literal bytes as reasoning AND emits the inner `reasoning` rule again,
+        // duplicating every payload it contains.
         //
-        // Exact-match-only made the tag a property of one exact spelling:
-        // renaming a rule, or splitting one into a wrapper plus a body, silently
-        // dropped it. Since the decoder emits ONLY for tagged nodes, the result
-        // was a tree that parsed perfectly and produced no events whatsoever --
-        // a failure with no error message at any layer. Restructuring the Gemma 4
-        // grammar hit exactly this.
-        //
-        // Suffix, not substring: `-content` at the end names the role, whereas a
-        // name that merely contains "content" may be something else entirely.
+        // A grammar that needs a differently-named payload rule adds it to a list
+        // here. Wrappers stay untagged and reference the payload rule, which is
+        // how the Gemma 4 grammar is written: `channel_body: reasoning`.
         const std::string & n = normalized_name;
         auto role_is = [&n](std::initializer_list<const char *> names) {
             for (const char * nm : names) {
                 if (n == nm) {
-                    return true;
-                }
-                const std::string suffix = std::string("-") + nm;
-                if (n.size() > suffix.size() &&
-                    n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
                     return true;
                 }
             }

@@ -1085,6 +1085,18 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
+    // Same treatment for "preserve_thinking": with no template engine left, the
+    // renderer reads these as typed inputs, so the kwarg is decoded here rather
+    // than passed through as a string.
+    auto preserve_thinking_kwarg = json_value(inputs.chat_template_kwargs, "preserve_thinking", std::string(""));
+    if (preserve_thinking_kwarg == "true") {
+        inputs.preserve_thinking = true;
+    } else if (preserve_thinking_kwarg == "false") {
+        inputs.preserve_thinking = false;
+    } else if (!preserve_thinking_kwarg.empty() && preserve_thinking_kwarg[0] == '"') {
+        throw std::invalid_argument("invalid type for \"preserve_thinking\" (expected boolean, got string)");
+    }
+
     // Parse also the OAI "reasoning_effort": "none" specific value
     if (body.contains("reasoning_effort")) {
         auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));

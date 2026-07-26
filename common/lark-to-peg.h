@@ -38,5 +38,11 @@
 //
 // Naming a production the grammar does not define throws, rather than silently
 // falling back to the default entry and parsing the wrong thing.
+//
+// NOTE: the root is NOT anchored at end of input, because both callers parse a
+// PREFIX -- generation streams in token by token, and a rendered prompt stops
+// where generation begins. Callers that must account for every byte check
+// `result.end` against the input size instead; see the prompt validator in
+// common_chat_peg_parse.
 common_peg_arena common_lark_to_peg(const std::string & lark_grammar,
                                     const std::string & root_rule = "start");

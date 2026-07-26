@@ -70,6 +70,8 @@ add_library(${TARGET}
     chat-formats/format-pipeline.cpp
     chat-formats/format-state-registry.h
     chat-formats/format-state-registry.cpp
+    chat-formats/prompt.h
+    chat-formats/prompt.cpp
     chat-formats/gemma4-format.h
     chat-formats/gemma4-format.cpp
     chat.cpp
