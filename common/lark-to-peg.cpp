@@ -2,6 +2,7 @@
 
 #include "peg-parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <string>
@@ -602,12 +603,29 @@ std::string collect_rules(LarkLexer & lex, std::vector<RuleDef> & rule_defs) {
 // Public API
 // ──────────────────────────────────────────────────────────────────────────────
 
-common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
+common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std::string & root_rule) {
     LarkLexer lex(lark_grammar);
     lex.tokenize();
 
     std::vector<RuleDef> rule_defs;
-    std::string          start_rule = collect_rules(lex, rule_defs);
+    // collect_rules() returns the grammar's own default entry (its first
+    // non-terminal). A caller may want a different production -- "conversation"
+    // to walk a rendered prompt, "start" for assistant-turn generation -- and
+    // both live in the same grammar, so the two views cannot disagree.
+    const std::string default_rule = collect_rules(lex, rule_defs);
+    std::string       start_rule   = default_rule;
+    if (!root_rule.empty() && root_rule != default_rule) {
+        const bool exists = std::any_of(rule_defs.begin(), rule_defs.end(),
+                                        [&](const RuleDef & r) { return r.name == root_rule && !r.is_terminal; });
+        if (exists) {
+            start_rule = root_rule;
+        } else if (root_rule != "start") {
+            // Asking for a production the grammar does not define is a wiring
+            // bug; falling back to the default entry would parse the wrong thing
+            // and look like it worked.
+            throw std::runtime_error("lark grammar has no rule named '" + root_rule + "'");
+        }
+    }
 
     common_peg_parser_builder builder;
 

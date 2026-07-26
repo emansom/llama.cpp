@@ -28,4 +28,15 @@
  *
  * Throws std::runtime_error on parse errors.
  */
-common_peg_arena common_lark_to_peg(const std::string & lark_grammar);
+// Transpile a Lark grammar to a PEG arena.
+//
+// root_rule selects the entry production. "start" is the assistant-turn
+// continuation used for generation; "conversation" is the full wire shape, used
+// to VALIDATE a rendered prompt and walk the FSM up to the point generation
+// begins. Both live in the same grammar, so the input and output views of the
+// format cannot drift apart.
+//
+// Naming a production the grammar does not define throws, rather than silently
+// falling back to the default entry and parsing the wrong thing.
+common_peg_arena common_lark_to_peg(const std::string & lark_grammar,
+                                    const std::string & root_rule = "start");

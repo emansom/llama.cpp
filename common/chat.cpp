@@ -1119,14 +1119,15 @@ static std::string inject_response_schema(const std::string & grammar_template, 
 // schema constraint was already enforced at sampling time by llguidance/GBNF,
 // and re-imposing it during extraction would reject output the sampler had
 // legitimately produced.
-static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template) {
+static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template,
+                                           const std::string & root_rule = "start") {
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
     base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
-    return lark ? common_lark_to_peg(base) : common_gbnf_to_peg(base);
+    return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
 }
 
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
@@ -1149,6 +1150,26 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     data.entry_state       = rendered.entry_state;
     data.entry_content     = rendered.entry_content;
     data.entry_reasoning   = rendered.entry_reasoning;
+
+    // Walk the rendered prompt through the format's `conversation` rule. This is
+    // one traversal doing two jobs that were never really separate: it VALIDATES
+    // the input (a conversation the model was not designed to receive fails
+    // here), and it leaves the tracker holding where the prompt ends -- so the
+    // state is established by walking, not summarised by the renderer.
+    {
+        const auto conv_grammar = common_chat_grammar_require("gemma4");
+        try {
+            const auto conv_arena = chat_grammar_to_peg(conv_grammar, "conversation");
+            common_chat_msg          probe;
+            common_chat_parser_params conv_params;
+            conv_params.format              = COMMON_CHAT_FORMAT_PEG_GEMMA4;
+            conv_params.grammar_file_parser = true;
+            conv_params.parser              = conv_arena;
+            (void) common_chat_peg_parse(conv_arena, data.prompt, /* is_partial = */ true, conv_params);
+        } catch (const std::exception & e) {
+            throw std::runtime_error(std::string("rendered prompt failed conversation validation: ") + e.what());
+        }
+    }
     data.generation_prompt.clear();  // not part of this format's contract
 
     data.message_delimiters = {
