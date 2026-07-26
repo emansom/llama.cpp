@@ -1321,6 +1321,30 @@ int main(int argc, const char ** argv) {
 
     vocab = llama_model_get_vocab(model);
 
+    // LLG_DUMP_USER_DEFINED=1 lists every token the vocabulary declares
+    // USER_DEFINED, with its text. common/llguidance.cpp hands those to
+    // llguidance as special (unforgeable by a regex, addressable by name in a
+    // grammar), which is only safe if none of them is ordinary text a model would
+    // use in prose -- otherwise the sampler would quietly lose the ability to say
+    // it. There is no API to enumerate attributes, so this walks the vocabulary.
+    if (getenv("LLG_DUMP_USER_DEFINED")) {
+        const int n = llama_vocab_n_tokens(vocab);
+        int       count = 0;
+        for (llama_token t = 0; t < n; t++) {
+            if ((llama_vocab_get_attr(vocab, t) & LLAMA_TOKEN_ATTR_USER_DEFINED) == 0) {
+                continue;
+            }
+            char   buf[512];
+            int32_t len = llama_detokenize(vocab, &t, 1, buf, sizeof(buf), false, true);
+            fprintf(stdout, "%d\t%.*s\n", t, len > 0 ? len : 0, buf);
+            count++;
+        }
+        fprintf(stderr, "USER_DEFINED tokens: %d of %d\n", count, n);
+        llama_free(ctx);
+        llama_model_free(model);
+        return 0;
+    }
+
     if (const char * only = getenv("LLG_GRAMMAR_FILE")) {
         int rc = compile_only(only);
         llama_free(ctx);
