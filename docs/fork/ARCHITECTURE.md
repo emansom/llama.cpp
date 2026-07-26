@@ -187,38 +187,46 @@ that also drives input validation needs conversation-scope states —
 `AWAITING_TOOL_RESPONSE`, `IN_GENERATION_PROMPT` — plus per-call identity so
 parallel tool calls don't all collapse into one `IN_TOOL_CALL`.
 
-### The generation prompt should seed the FSM, not be re-parsed as text
+### There is no generation prompt — only an input state and an output state
 
-`generation_prompt` is the assistant-turn opener: the bytes appended after the
-rendered conversation to cue generation. For Gemma 4 that is `<|turn>model\n`,
-plus the empty-thought prefill `<|channel>thought\n<channel|>` when thinking is
-off, plus any prefilled `reasoning_content` on a continuation. It is **not** GGUF
-metadata and **not** the system prompt, and it is recomputed **per request** —
-it depends on whether the previous turn closed with `<turn|>\n`, whether a tool
-call is dangling, and whether thinking is enabled.
-
-Upstream feeds it to the parser as a **text prefix** (`common/chat.cpp`):
+The format owns the whole conversation: input, output, decisions, parse tree.
+Two states, both locally scoped to the format, and nothing else:
 
 ```cpp
-const std::string effective_input = params.generation_prompt.empty()
-    ? input : params.generation_prompt + input;
+struct <format>_input {
+    std::string              prompt;       // the bytes the model receives
+    common_chat_format_state entry_state;  // the state those bytes leave it in
+};
 ```
 
-so the grammar's `start` rule can match the opener. That is a text-level stand-in
-for state initialization, and it costs twice: the parser re-scans bytes the model
-never emitted, and the grammar must keep the opener **optional**
-(`p.optional(p.literal("<|turn>model\n"))`) to cope with both cases — strictly
-weaker than knowing which case holds, and a violation in spirit of
-`POLICIES.md#closing-tokens-are-required` applied to openers.
+Generation is then parsed by the tracker **starting from `entry_state`**. That
+is the entire contract.
 
-**The right shape:** the renderer emits the prompt *and* reports the state it
-leaves the model in — `IN_GENERATION_PROMPT`, transitioning to `IN_REASONING`
-when a thought was prefilled and `IN_CONTENT` otherwise. Extraction then starts
-from that state with no text prefix, and the opener becomes a required literal.
+`generation_prompt` is not part of it, and should not be. It exists in upstream
+only because callers had to recover *where generation begins* in order to make
+the grammar's `start` rule match — `common_chat_peg_parse` re-prepends it to the
+model's output as a text prefix. Seed the FSM instead and the need evaporates:
+the parser stops re-scanning bytes the model never emitted, and the turn opener
+becomes a required literal rather than an optional one.
 
-`grammar_file_parser = true` already blanks `generation_prompt` in the parser
-params, so grammar-file formats do not receive the prefix today. Nothing yet
-replaces it with a state seed; that is the remaining half of the change.
+**Everything that tried to reconstruct it from outside the format has failed, in
+a different way each time.** Three sequential blocks in the init function each
+rewrote it, and one invalidated the next one's end-of-turn test. A double-render
+diff could not isolate it, because under continuation both renders emit the
+channel marker so the difference is not the tail. Having the renderer *report* a
+tail alongside the prompt is the same mistake one layer in — it keeps a derived
+artefact alive instead of deleting the concept.
+
+The states are:
+
+| state | meaning |
+|---|---|
+| `IN_GENERATION_PROMPT` | prompt ended at a fresh turn opener |
+| `IN_REASONING` | prompt ended inside a thought — thinking-off prefill, or a continuation carrying `reasoning_content` |
+| `IN_CONTENT` | prompt ended with the model mid-content (continuation on content) |
+
+A test asserts the prompt bytes and the entry state. It does not assert a
+"generation prompt", any more than it asserts against a template.
 
 ## FSM↔grammar contract
 
