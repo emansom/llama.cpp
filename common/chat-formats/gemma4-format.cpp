@@ -744,7 +744,16 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
         }
         const bool has_tool_calls = message.contains("tool_calls") &&
             message["tool_calls"].is_array() && !message["tool_calls"].empty();
-        if (!thinking_text.empty() && static_cast<int>(i) > last_user_idx && has_tool_calls) {
+        if (i == open_turn_index && !thinking_text.empty() &&
+            inputs.continue_final_message != COMMON_CHAT_CONTINUATION_CONTENT) {
+            // Generation resumes INSIDE this thought, so it is emitted whether or
+            // not the turn has tool calls, and deliberately left unclosed --
+            // writing <channel|> here would tell the model the thought is done.
+            // The grammar's `open_thought` is the matching wire shape.
+            out << "<|channel>thought\n" << thinking_text;
+        } else if (!thinking_text.empty() && static_cast<int>(i) > last_user_idx && has_tool_calls) {
+            // Google's Rule 2: thoughts are preserved across an active
+            // tool-calling turn, and stripped from turns that already completed.
             out << "<|channel>thought\n" << thinking_text << "\n<channel|>";
         }
 
