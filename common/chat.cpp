@@ -1517,8 +1517,12 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
                                                          const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
-    data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
+    // Rendered in C++, not by Jinja. The renderer, the validator (the
+    // `conversation` rule), the tracker FSM and the grammar are one plugin and
+    // must agree; a Jinja template is a fifth artefact none of them can check.
+    // See docs/fork/ARCHITECTURE.md.
+    data.prompt            = common_chat_gemma4_render(inputs, tmpl.bos_token());
+    data.generation_prompt.clear();
 
     if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<turn|>\n")) {
         // This may happen if the model generates content + tool_call, the
