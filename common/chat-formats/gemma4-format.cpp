@@ -340,7 +340,7 @@ std::string trim_ws(const std::string & s) {
 // strip_thinking macro: split on `<channel|>` and strip text between
 // `<|channel>` and that close marker on each split. Returns trimmed result.
 // Mirrors lines 148-158 of the template.
-std::string strip_thinking(const std::string & text) {
+std::string strip_thinking(const std::string & text, bool trim = true) {
     std::string result;
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -361,7 +361,7 @@ std::string strip_thinking(const std::string & text) {
             result += part;
         }
     }
-    return trim_ws(result);
+    return trim ? trim_ws(result) : result;
 }
 
 // Forward declarations.
@@ -824,7 +824,11 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
             const auto & content = message["content"];
             if (content.is_string()) {
                 if (role == "model") {
-                    out << strip_thinking(content.get<std::string>());
+                    // Do NOT trim the open turn. Jinja's `| trim` is right for a
+                    // completed turn, but this one is where generation resumes,
+                    // so its trailing whitespace is load-bearing -- trimming it
+                    // turned a prefilled "Hello, " into "Hello,".
+                    out << strip_thinking(content.get<std::string>(), i != open_turn_index);
                 } else {
                     out << trim_ws(content.get<std::string>());
                 }
@@ -835,7 +839,7 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
                     if (type == "text") {
                         const std::string txt = item.value("text", std::string{});
                         if (role == "model") {
-                            out << strip_thinking(txt);
+                            out << strip_thinking(txt, i != open_turn_index);
                         } else {
                             out << trim_ws(txt);
                         }
@@ -894,6 +898,5 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
                     : common_chat_format_state::IN_REASONING;
 
     }
-
     return { out.str(), entry };
 }
