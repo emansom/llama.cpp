@@ -24,6 +24,16 @@ enum class common_chat_format_state : uint8_t {
     IN_TOOL_ARG_VAL, // tagged-args formats: between arg-value open and close
     IN_TOOL_PARAM,   // DSML <param>...</param>
     DONE,            // tool-call closed; back at top-level
+
+    // Conversation-scope states. Reached by walking the RENDERED PROMPT through
+    // the format's `conversation` rule, so the tracker arrives at generation
+    // already holding where it is and what the open turn contains -- rather than
+    // being handed a summary from outside. See docs/fork/ARCHITECTURE.md.
+    IN_SYSTEM_TURN,         // inside the system turn body
+    IN_TOOL_DECLARATIONS,   // inside the <|tool>declaration:...<tool|> block
+    IN_USER_TURN,           // inside a user turn body
+    IN_TOOL_RESPONSE,       // inside <|tool_response>response:NAME{...}
+    AWAITING_TOOL_RESPONSE, // model emitted tool calls; responses not yet supplied
 };
 
 // Read-only window into a tracker's FSM. Exposed to the PEG parser context AND
