@@ -1328,6 +1328,29 @@ int main(int argc, const char ** argv) {
         return rc;
     }
 
+    // Given a grammars dir, run ONLY the Gemma 4 case.
+    //
+    // The two need different vocabularies and cannot share a run. llguidance
+    // builds a token mask, so what a grammar accepts is a property of the
+    // tokenizer: `<|channel>` is a single special token in Gemma 4 (id 100) and
+    // an arbitrary run of ordinary tokens in llama-bpe. Testing the Gemma 4
+    // grammar against llama-bpe measures a tokenization the model will never
+    // produce.
+    //
+    // The reverse is also true: the generic cases above were written for
+    // llama-bpe and do not survive Gemma 4's 262k-token vocabulary -- the `+`
+    // quantifier case dies with "Too many items (limit 50000; mask); try
+    // avoiding single-byte/short lexemes". That is a property of those test
+    // grammars, not of this fork, so they stay on the vocab they were written
+    // for.
+    if (argc == 3) {
+        test_gemma4_chat_grammar(argv[2]);
+        llama_free(ctx);
+        llama_model_free(model);
+        fprintf(stdout, "All tests passed.\n");
+        return 0;
+    }
+
     test_simple_grammar();
     test_complex_grammar();
     test_special_chars();
@@ -1335,10 +1358,6 @@ int main(int argc, const char ** argv) {
     test_json_schema();
 
     test_sampler_chain();
-
-    if (argc == 3) {
-        test_gemma4_chat_grammar(argv[2]);
-    }
 
     llama_free(ctx);
     llama_model_free(model);

@@ -145,12 +145,33 @@ if (NOT WIN32)
 endif()
 
 if (LLAMA_LLGUIDANCE)
-    # The chat-grammars dir enables test_gemma4_chat_grammar(), which compiles the
-    # real Gemma 4 sampling grammar through llguidance. Without it, nothing in the
-    # suite ever compiles a Lark grammar -- test-chat builds constraints through
-    # the GBNF path and skips Lark -- and llguidance FAILS OPEN, so a grammar it
-    # cannot compile leaves the sampler unconstrained while every test passes.
-    llama_build_and_test(test-grammar-llguidance.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf ${PROJECT_SOURCE_DIR}/grammars/chat)
+    llama_build_and_test(test-grammar-llguidance.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
+
+    # Second invocation of the SAME binary, against the real Gemma 4 vocabulary,
+    # which is what compiles the chat grammar through llguidance. Without it
+    # nothing in the suite compiles a Lark grammar at all -- test-chat builds
+    # constraints through the GBNF path and skips Lark -- and llguidance FAILS
+    # OPEN, so a grammar it cannot compile leaves the sampler unconstrained while
+    # every test passes.
+    #
+    # It needs the REAL vocabulary, not the llama-bpe one the cases above use.
+    # llguidance builds a token mask, so what a grammar accepts depends on the
+    # tokenizer: `<|channel>` is one special token in Gemma 4 and an arbitrary run
+    # of ordinary tokens in llama-bpe.
+    #
+    # Registered only when the weights are present, since they ship in a separate
+    # package rather than this repo.
+    set(LLAMA_GEMMA4_VOCAB "/usr/share/protean/models/gemma-4-e2b-it.gguf"
+        CACHE FILEPATH "Gemma 4 GGUF supplying the vocabulary for the chat-grammar test")
+    if (EXISTS ${LLAMA_GEMMA4_VOCAB})
+        add_test(NAME test-grammar-llguidance-gemma4
+                 COMMAND $<TARGET_FILE:test-grammar-llguidance>
+                         ${LLAMA_GEMMA4_VOCAB} ${PROJECT_SOURCE_DIR}/grammars/chat)
+        set_property(TEST test-grammar-llguidance-gemma4 PROPERTY LABELS main)
+    else()
+        message(STATUS "Gemma 4 vocab not found at ${LLAMA_GEMMA4_VOCAB}; "
+                       "skipping test-grammar-llguidance-gemma4")
+    endif()
 endif ()
 
 llama_build(test-recurrent-state-rollback.cpp get-model.cpp)
