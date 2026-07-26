@@ -1139,26 +1139,44 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // See docs/fork/ARCHITECTURE.md.
     data.prompt = common_chat_gemma4_render(inputs, tmpl.bos_token());
 
-    // The generation prompt is the tail the renderer adds for add_generation_prompt:
-    // render twice and take the difference. Same technique as the Jinja helper this
-    // replaces -- a template can put the opener together with other trailing bytes,
-    // so the delta is the only reliable way to isolate it.
-    if (inputs.add_generation_prompt) {
+    // Exactly ONE of these branches may run, and each is responsible for both
+    // data.generation_prompt and the matching tail on data.prompt.
+    //
+    // They used to run in sequence, and the continuation case was silently
+    // broken by it: the add_generation_prompt branch appended "<|turn>model\n",
+    // so the continuation branch's string_ends_with(prompt, "<turn|>\n") test --
+    // which decides whether to emit the turn opener -- was already false by the
+    // time it ran. It dropped the opener and appended a second tail on top.
+    if (inputs.has_continuation()) {
+        // A continuation supersedes the plain opener: the model resumes inside
+        // its own turn, so the prompt ends mid-thought rather than at a fresh
+        // "<|turn>model".
+        const auto & msg = inputs.continue_msg;
+
+        data.generation_prompt  = string_ends_with(data.prompt, "<turn|>\n") ? "<|turn>model\n" : "";
+        data.generation_prompt += "<|channel>thought\n" + msg.reasoning_content;
+        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
+            data.generation_prompt += "<channel|>" + msg.render_content();
+        }
+        data.prompt += data.generation_prompt;
+    } else if (inputs.add_generation_prompt) {
+        // The tail the renderer adds for add_generation_prompt: render twice and
+        // take the difference, since the opener can arrive together with other
+        // trailing bytes.
         autoparser::generation_params no_gen = inputs;
         no_gen.add_generation_prompt         = false;
         const std::string without            = common_chat_gemma4_render(no_gen, tmpl.bos_token());
         data.generation_prompt =
             data.prompt.size() >= without.size() ? data.prompt.substr(without.size()) : std::string{};
+
+        if (string_ends_with(data.prompt, "<turn|>\n")) {
+            // The renderer closed the previous turn without opening the model's.
+            // Without this the model is left with no turn to speak in.
+            data.generation_prompt = "<|turn>model\n";
+            data.prompt += data.generation_prompt;
+        }
     } else {
         data.generation_prompt.clear();
-    }
-
-    if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<turn|>\n")) {
-        // This may happen if the model generates content + tool_call, the
-        // template does not add the model's next turn and confuses the model
-        // from emitting its proper reasoning token sequence.
-        data.generation_prompt = "<|turn>model\n";
-        data.prompt += data.generation_prompt;
     }
 
     data.message_delimiters = {
@@ -1178,18 +1196,6 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         "<tool_call|>",
         "<|turn>",
     };
-
-    if (inputs.has_continuation()) {
-        const auto & msg = inputs.continue_msg;
-
-        data.generation_prompt = string_ends_with(data.prompt, "<turn|>\n") ? "<|turn>model\n" : "";
-        data.generation_prompt += "<|channel>thought\n" + msg.reasoning_content;
-        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
-            data.generation_prompt += "<channel|>" + msg.render_content();
-        }
-
-        data.prompt += data.generation_prompt;
-    }
 
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
