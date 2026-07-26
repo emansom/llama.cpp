@@ -1521,8 +1521,21 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // `conversation` rule), the tracker FSM and the grammar are one plugin and
     // must agree; a Jinja template is a fifth artefact none of them can check.
     // See docs/fork/ARCHITECTURE.md.
-    data.prompt            = common_chat_gemma4_render(inputs, tmpl.bos_token());
-    data.generation_prompt.clear();
+    data.prompt = common_chat_gemma4_render(inputs, tmpl.bos_token());
+
+    // The generation prompt is the tail the renderer adds for add_generation_prompt:
+    // render twice and take the difference. Same technique as the Jinja helper this
+    // replaces -- a template can put the opener together with other trailing bytes,
+    // so the delta is the only reliable way to isolate it.
+    if (inputs.add_generation_prompt) {
+        autoparser::generation_params no_gen = inputs;
+        no_gen.add_generation_prompt         = false;
+        const std::string without            = common_chat_gemma4_render(no_gen, tmpl.bos_token());
+        data.generation_prompt =
+            data.prompt.size() >= without.size() ? data.prompt.substr(without.size()) : std::string{};
+    } else {
+        data.generation_prompt.clear();
+    }
 
     if (inputs.add_generation_prompt && string_ends_with(data.prompt, "<turn|>\n")) {
         // This may happen if the model generates content + tool_call, the
