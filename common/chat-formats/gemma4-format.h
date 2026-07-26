@@ -70,9 +70,19 @@ extern const common_chat_format_state_rules gemma4_state_rules;
 // resumed generation with the wrong root yields a plausible message instead of an
 // error. See the registry's note in gemma4-format.cpp.
 //
-// `tool_required` selects the `tool_choice: "required"` variant of the same
-// entry, whose turn cannot end without a tool call.
-std::string common_chat_gemma4_entry_root(common_chat_format_state state, bool tool_required);
+// The demand selects between three variants of the same entry: the ordinary one,
+// the `tool_choice: "required"` one whose turn cannot end without a call, and the
+// `response_format` one whose turn cannot be satisfied by prose. They are
+// mutually exclusive by construction -- a turn cannot be required to both call a
+// tool and emit a schema block.
+enum common_chat_gemma4_entry_demand {
+    COMMON_CHAT_GEMMA4_ENTRY_ANY,
+    COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL,
+    COMMON_CHAT_GEMMA4_ENTRY_RESPONSE_FORMAT,
+};
+
+std::string common_chat_gemma4_entry_root(common_chat_format_state state,
+                                          common_chat_gemma4_entry_demand demand);
 
 // Render the Gemma 4 prompt. Mirrors the canonical gemma-4-12B-it template (see docs/fork/ARCHITECTURE.md#normative-sources),
 // not the older vendored models/templates/google-gemma-4-31B-it.jinja

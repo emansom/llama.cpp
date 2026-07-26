@@ -72,6 +72,26 @@ tool_decl_close_tag:      <tool|>
 str_delim_tag:  <|"|>
 think_tag:      <|think|>
 
+# KNOWN CONFORMANCE GAP -- multimodal placeholders are UNMODELLED.
+#
+# Google's official control-token list (ai.google.dev, Gemma 4 prompt formatting)
+# names `<|image|>` and `<|audio|>` as "special placeholder tokens", and
+# common_chat_gemma4_render emits `<|image|>`, `<|audio|>` AND `<|video|>` for
+# typed content parts. Nothing here matches them.
+#
+# Consequence is one-sided but real: generation is unaffected (the model is never
+# asked to emit a placeholder), while the `conversation` validator would REJECT
+# any prompt carrying one, because a placeholder is a special token and the text
+# bodies are regexes, which cannot produce one. Latent today only because this
+# deployment runs with `no-mmproj = true` on both Gemma sections, so no request
+# carries media.
+#
+# Fixing it means giving user/model turn bodies an alternation of text and
+# placeholder rather than a single text run -- the same shape `model_body`
+# already has for channels. Left undone deliberately rather than half-added.
+# `<|video|>` needs checking first: the renderer emits it but the official token
+# list does not mention it, so one of the two is wrong.
+
 # Plain text bodies are LAZY LEXEMES, not tag-exclusion regexes.
 #
 # `foo[lazy]: /(.|\n)*/` tells llguidance to match as few bytes as possible, so
@@ -116,7 +136,29 @@ turn_start: channel_block? turn_tail
 # Everything a model turn can contain after its opening thought. Shared by both
 # generation entries so they cannot drift: `turn_start` and `resume_reasoning` differ
 # ONLY in where the model picks up, never in what it may say next.
-turn_tail: content (channel_block content)* (tool_call_request | response_format | )
+turn_tail: content (channel_block content)* (tool_call_request | response_format turn_close_tag? | turn_close_tag?)
+
+# `<turn|>` is how the model CLOSES ITS OWN TURN, and leaving it out of the
+# generation entries was a real, measured failure -- not a theoretical gap.
+#
+# Google lists it in eos_token_id ([1, 106, 50] = <eos>, <turn|>, <|tool_response>),
+# so it is one of the three ways a Gemma 4 turn can legitimately end, and which
+# one the model reaches for depends on context: after a tool response it wants
+# `<turn|>`. Traced live on the 12B, answering a question after a tool result:
+#
+#   llguidance: step 16 | check token 106 -> REJECTED, re-sampling under mask
+#   llguidance: step 16 | mask allows 262046 of 262144 tokens
+#   next token: 9792 ' sugar'
+#
+# The model had finished ("There are 40,213 rows in the memory table.") and tried
+# to close the turn. The grammar forbade the only token that ends it, `content`
+# is unbounded so 262046 tokens were still legal, and the generation ran away
+# into `sugar_bowl_01_10_2025_2025_01_01...` until max_tokens.
+#
+# It is optional rather than required because EOS also ends a turn and the model
+# uses it too -- the same request with thinking off stopped cleanly on EOS. A
+# tool-calling turn is the exception: it hands over at `<|tool_response>` and
+# never reaches here, which is why the closer sits on the other two branches.
 
 # The `tool_choice: "required"` pair of the two entries above. The model may
 # still think first -- that is where it decides WHICH call to make -- but the
@@ -136,6 +178,36 @@ turn_tail: content (channel_block content)* (tool_call_request | response_format
 # more content was always legal. A required call has to be reachable in bounded
 # output, which means it has to be the ONLY thing that follows.
 turn_start_tool_call: channel_block? tool_call_request
+
+# The `response_format` pair. Same shape and the same reasoning as the
+# tool_choice pair above: a caller that asked for a schema gets a turn that
+# CANNOT be satisfied by prose.
+#
+# It was an alternative in `turn_tail`, which meant "the model may answer in the
+# schema", not "must". Measured on the 12B with a two-property schema and
+# additionalProperties:false, it answered with three properties of its own
+# choosing and the request was reported as a success -- the schema had been
+# compiled into the grammar and then simply not taken.
+#
+# This matters more than the tool case for the workflow that drives this fork:
+# its Architect, Validator and cache stages are all schema-constrained calls
+# whose output is parsed, not read.
+# No `content` before the block, for the third time and the same reason. The
+# first version of this rule allowed the model to narrate first, on the theory
+# that the fenced opener would bound the text. It does not: `content` is an
+# unbounded regex, so "narrate, then emit the block" permits narrating forever.
+# Traced live -- 512 steps, every one `check token -> ok`, the mask never
+# rejecting anything, while the model wrote its JSON as prose and never reached
+# the block it still owed:
+#
+#   llguidance: step 511 | check token 236770 -> ok
+#   n_decoded = 512, n_remaining = 0
+#
+# Unbounded content next to a required continuation is the recurring shape of
+# this bug -- it produced the tool_choice=required emoji runaway and the missing
+# <turn|> runaway too. A required thing must be the ONLY thing that follows.
+turn_start_response_format: channel_block? response_format turn_close_tag?
+resume_reasoning_response_format: reasoning channel_close_tag response_format turn_close_tag?
 
 # The second generation entry, selected when the rendered prompt ended INSIDE an
 # unclosed thought (entry_state IN_REASONING) because the caller prefilled

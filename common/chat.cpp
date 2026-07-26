@@ -1432,10 +1432,24 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // "required" with an empty tool list would otherwise compose a grammar
         // demanding a call to nothing, which is unsatisfiable and would strand
         // the sampler with every token masked.
-        const bool tool_required =
-            has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+        //
+        // A requested response_format is likewise a demand, not a suggestion: its
+        // branch used to be one alternative in the turn, so a schema could be
+        // compiled into the grammar and then simply not taken. Measured on the
+        // 12B, a two-property schema with additionalProperties:false came back
+        // with three properties of the model's own choosing.
+        //
+        // tool_choice wins when both are set, because a turn cannot be required
+        // to both call a tool and emit a schema block, and the tool call is the
+        // more specific instruction.
+        auto demand = COMMON_CHAT_GEMMA4_ENTRY_ANY;
+        if (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED) {
+            demand = COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL;
+        } else if (has_response_format) {
+            demand = COMMON_CHAT_GEMMA4_ENTRY_RESPONSE_FORMAT;
+        }
         const std::string gen_root =
-            common_chat_gemma4_entry_root(rendered.entry_state, tool_required);
+            common_chat_gemma4_entry_root(rendered.entry_state, demand);
 
         // BOTH sides enter at the same rule. Extraction takes it as a parameter;
         // the sampler cannot be told, so the grammar is rewritten to enter there
@@ -1478,7 +1492,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // the narrower one could only reject output that was legitimately
         // generated. Same reasoning as withholding the tool schema from the parser.
         const std::string parse_root =
-            common_chat_gemma4_entry_root(rendered.entry_state, /* tool_required= */ false);
+            common_chat_gemma4_entry_root(rendered.entry_state, COMMON_CHAT_GEMMA4_ENTRY_ANY);
 
         data.grammar             = sampling_grammar;
         data.parser              = chat_grammar_to_peg(parser_base, parse_root).save();
