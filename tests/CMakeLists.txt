@@ -145,11 +145,12 @@ if (NOT WIN32)
 endif()
 
 if (LLAMA_LLGUIDANCE)
-    # NOTE: the chat-grammars dir is deliberately NOT passed yet. Passing it enables
-    # test_gemma4_chat_grammar(), which currently FAILS: llguidance rejects the
-    # composed grammar with "173(19): Expected value (at \"{\")" and then fails OPEN,
-    # so every string matches. Unresolved -- see the note on that function.
-    llama_build_and_test(test-grammar-llguidance.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
+    # The chat-grammars dir enables test_gemma4_chat_grammar(), which compiles the
+    # real Gemma 4 sampling grammar through llguidance. Without it, nothing in the
+    # suite ever compiles a Lark grammar -- test-chat builds constraints through
+    # the GBNF path and skips Lark -- and llguidance FAILS OPEN, so a grammar it
+    # cannot compile leaves the sampler unconstrained while every test passes.
+    llama_build_and_test(test-grammar-llguidance.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf ${PROJECT_SOURCE_DIR}/grammars/chat)
 endif ()
 
 llama_build(test-recurrent-state-rollback.cpp get-model.cpp)

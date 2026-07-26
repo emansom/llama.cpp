@@ -33,6 +33,8 @@ enum class LarkTok {
     NAME,
     PERCENT,
     COMMA,
+    LBRACK,
+    RBRACK,
 };
 
 struct LarkToken {
@@ -174,6 +176,8 @@ struct LarkLexer {
                 case ')': tokens.push_back({LarkTok::RPAREN, ")",  tok_line, tok_col}); advance(); continue;
                 case '~': tokens.push_back({LarkTok::TILDE,  "~",  tok_line, tok_col}); advance(); continue;
                 case ',': tokens.push_back({LarkTok::COMMA,  ",",  tok_line, tok_col}); advance(); continue;
+                case '[': tokens.push_back({LarkTok::LBRACK, "[",  tok_line, tok_col}); advance(); continue;
+                case ']': tokens.push_back({LarkTok::RBRACK, "]",  tok_line, tok_col}); advance(); continue;
                 default: break;
             }
 
@@ -516,6 +520,15 @@ std::string collect_rules(LarkLexer & lex, std::vector<RuleDef> & rule_defs) {
         size_t k = j + 1;
         // Skip optional .alias
         if (k < toks.size() && toks[k].type == LarkTok::DOT) k += 2;
+        // Skip an llguidance lexeme-option list: `name[lazy]:`, `name[suffix=X]:`.
+        // Options steer the SAMPLER (laziness, max_tokens, temperature); the PEG
+        // side takes its boundaries from the following sequence element instead,
+        // so they are skipped rather than interpreted. One grammar file feeds
+        // both, so this parser has to at least know the syntax exists.
+        if (k < toks.size() && toks[k].type == LarkTok::LBRACK) {
+            while (k < toks.size() && toks[k].type != LarkTok::RBRACK) ++k;
+            if (k < toks.size()) ++k;
+        }
         return k < toks.size() && toks[k].type == LarkTok::COLON;
     };
 
@@ -541,6 +554,12 @@ std::string collect_rules(LarkLexer & lex, std::vector<RuleDef> & rule_defs) {
         if (i < toks.size() && toks[i].type == LarkTok::DOT) {
             ++i; // '.'
             if (i < toks.size() && toks[i].type == LarkTok::NAME) ++i;
+        }
+
+        // Optional lexeme-option list -- see the note in is_rule_start.
+        if (i < toks.size() && toks[i].type == LarkTok::LBRACK) {
+            while (i < toks.size() && toks[i].type != LarkTok::RBRACK) ++i;
+            if (i < toks.size()) ++i;
         }
 
         if (i >= toks.size() || toks[i].type != LarkTok::COLON) {

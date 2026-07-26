@@ -18,7 +18,7 @@
 #                                      <|tool_response>response:NAME{...}<tool_response|>
 #   <|turn>model\n[<|channel>thought\n<channel|>]                     (generation prompt)
 #
-# {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
+# %json {"type": "object"} replaced at runtime with %json {schema}.
 
 # --- Tag vocabulary -------------------------------------------------------------
 #
@@ -157,15 +157,7 @@ channel_body: reasoning
 # The cost is that a thought cannot contain `<`. Accepted: it is the model's
 # scratchpad, the alternative forms are broken or panic, and the answer text
 # (`content` below) has no such restriction.
-#
-# The redundant group is load-bearing for the OTHER consumer. lark-to-peg maps a
-# pattern starting with `(` to an until-the-next-delimiter run, and decodes a
-# bare `[^<]*` into a plain character class instead. The character class is
-# greedy and never reports a PARTIAL match, so a half-streamed thought looked
-# complete and the no-reasoning transformer emitted `<|channel>thought<channel|>`
-# with an empty body, then re-emitted it with the body filled in -- a
-# non-monotonic content stream, which the streaming diff rejects.
-reasoning: /([^<])*/
+reasoning: /[^<]*/
 
 # `content` cannot use `lazy`, because it is NOT always followed by anything --
 # it may end the turn. llguidance is explicit about that case: "`foo[lazy]:
@@ -199,28 +191,15 @@ gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA
 # The string delimiter is the self-delimiting tag form <|NAME|>, with `"` as the
 # name -- not a bespoke marker. Note it is symmetric, which is why the format has
 # no way to escape it: see ARCHITECTURE.md.
-gemma4_string: str_delim_tag gemma4_str_content str_delim_tag
-
-# Assembled by the parser from small lexemes, for the same reason `content` is:
-# as a single terminal (`([^<]|<[^|]|<\|[^"]|<\|"[^|])*`) it could begin
-# consuming `<|"` -- a prefix of its own closing delimiter -- and llguidance's
-# lexer, which is maximal-munch with no backtracking, then committed to that path
-# and dead-ended on every quoted argument. `STR_LT` is two characters and cannot
-# match `<|`, so the closer is unreachable from inside the string.
-#
-# Still named `gemma4_str_content`: the decoder finds it by normalized rule name
-# when rebuilding JSON (gemma4_to_json), and lowercase-with-underscores
-# normalizes to the same `gemma4-str-content` the uppercase terminal did.
-STR_SAFE: /[^<]+/
-STR_LT:   /<[^|]/
-gemma4_str_content: (STR_SAFE | STR_LT)*
+gemma4_string: str_delim_tag GEMMA4_STR_CONTENT str_delim_tag
+GEMMA4_STR_CONTENT: /([^<]|<[^|]|<\|[^"]|<\|"[^|])*/
 gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
 
 GEMMA4_NUMBER: /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
 GEMMA4_BOOL: "true" | "false"
 
 response_format: "```json\n" response_content "\n```"
-response_content: {{RESPONSE_SCHEMA}}
+response_content: %json {"type": "object"}
 
 # --- Full-conversation walker entry --------------------------------------------
 #
@@ -304,3 +283,5 @@ tool_response_directive: "response"
 # the caller verbatim, and a global skip silently ate the trailing space of a
 # prefilled continuation ("Hello, " came back as "Hello,"). Every literal in
 # this grammar spells out the whitespace it expects.
+
+start: turn_start

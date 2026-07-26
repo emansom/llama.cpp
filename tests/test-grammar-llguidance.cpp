@@ -1172,10 +1172,17 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     // `{{RESPONSE_SCHEMA}}` in place, which is not valid Lark -- and a grammar
     // that fails to compile fails OPEN, so every string matches and the whole
     // test passes vacuously while asserting nothing at all.
+    // ALL occurrences, as the server does. The FIRST one is in the grammar's own
+    // header comment, so replacing only the first leaves the real rule untouched
+    // and the grammar still fails to compile -- which, failing open, looks like a
+    // pass. That is exactly what happened while writing this test.
     const std::string placeholder = "{{RESPONSE_SCHEMA}}";
-    const size_t      at          = base.find(placeholder);
-    assert(at != std::string::npos);
-    base.replace(at, placeholder.size(), "%json {\"type\": \"object\"}");
+    const std::string schema      = "%json {\"type\": \"object\"}";
+    assert(base.find(placeholder) != std::string::npos);
+    for (size_t at = base.find(placeholder); at != std::string::npos;
+         at = base.find(placeholder, at + schema.size())) {
+        base.replace(at, placeholder.size(), schema);
+    }
 
     // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
     // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the
@@ -1204,8 +1211,12 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
              thought_open + "\nchecking" + thought_close + call_open + "f{}" + call_close,
          },
          {
-             // A close with no open.
-             thought_close + "Hello",
+             // Two thought openers with no close between them. `content` may hold
+             // a stray CLOSE tag (see the note on LT_TEXT -- excluding those would
+             // cost the model `<html>` in ordinary prose), but it can never hold
+             // an OPEN tag, so a second `<|channel>` has to be a real one and the
+             // first thought must have closed before it.
+             thought_open + "\n" + thought_open,
          });
 
     // MEASURED, UNRESOLVED: llguidance ACCEPTS a generation that stops inside an
@@ -1238,6 +1249,32 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
              thought_open + "\nnested" + thought_close + "Hi",
              "Hello, world!",
          });
+}
+
+// Isolation harness: compile ONE grammar file and report. Driven by an env var
+// so a grammar can be bisected from the shell without recompiling C++.
+//   LLG_GRAMMAR_FILE=/path/to.lark ./test-grammar-llguidance <vocab>
+static int compile_only(const char * path) {
+    FILE * f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
+    std::string src;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) { src.append(buf, n); }
+    fclose(f);
+
+    auto * smpl = llama_sampler_init_llg(vocab, "lark", src.c_str());
+    if (smpl == nullptr) {
+        fprintf(stdout, "COMPILE: sampler is null\n");
+        return 1;
+    }
+    // A compile failure surfaces at first apply, not at init (it fails OPEN).
+    const char * probe = getenv("LLG_MATCH");
+    const std::string input = probe ? probe : "";
+    const bool ok = match_string(input, smpl);
+    fprintf(stdout, "COMPILE: init ok, match(%s)=%d\n", input.c_str(), (int) ok);
+    llama_sampler_free(smpl);
+    return 0;
 }
 
 int main(int argc, const char ** argv) {
@@ -1283,6 +1320,13 @@ int main(int argc, const char ** argv) {
     }
 
     vocab = llama_model_get_vocab(model);
+
+    if (const char * only = getenv("LLG_GRAMMAR_FILE")) {
+        int rc = compile_only(only);
+        llama_free(ctx);
+        llama_model_free(model);
+        return rc;
+    }
 
     test_simple_grammar();
     test_complex_grammar();
