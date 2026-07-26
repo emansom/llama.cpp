@@ -12,7 +12,8 @@ struct common_peg_ast_node;
 // uses a SUBSET of these. New states are added centrally and per-format
 // trackers declare which they actually use.
 enum class common_chat_format_state : uint8_t {
-    INITIAL,         // nothing emitted yet
+    INITIAL,
+    IN_GENERATION_PROMPT,  // prompt ended at a fresh turn opener; model has not spoken yet
     IN_CONTENT,      // free-form assistant content
     IN_REASONING,    // inside <think>/<channel|>thought/etc.
     IN_TOOL_CALL,    // inside a tool call envelope (after open, before close)
@@ -52,6 +53,12 @@ class common_chat_format_tracker : public common_chat_format_state_view {
     // Single transition entry-point. Concrete trackers MUST update `state_`
     // per their declared FSM.
     virtual void advance(const common_peg_ast_node & node) = 0;
+
+    // Seed the FSM with the state the rendered prompt leaves the model in.
+    // The format reports it (see docs/fork/ARCHITECTURE.md); extraction then
+    // starts from there rather than re-parsing a text prefix the model never
+    // emitted.
+    void seed(common_chat_format_state entry) { state_ = entry; }
 
     // common_chat_format_state_view
     common_chat_format_state current_state() const override { return state_; }

@@ -1137,47 +1137,17 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // `conversation` rule), the tracker FSM and the grammar are one plugin and
     // must agree; a Jinja template is a fifth artefact none of them can check.
     // See docs/fork/ARCHITECTURE.md.
-    data.prompt = common_chat_gemma4_render(inputs, tmpl.bos_token());
-
-    // Exactly ONE of these branches may run, and each is responsible for both
-    // data.generation_prompt and the matching tail on data.prompt.
-    //
-    // They used to run in sequence, and the continuation case was silently
-    // broken by it: the add_generation_prompt branch appended "<|turn>model\n",
-    // so the continuation branch's string_ends_with(prompt, "<turn|>\n") test --
-    // which decides whether to emit the turn opener -- was already false by the
-    // time it ran. It dropped the opener and appended a second tail on top.
-    if (inputs.has_continuation()) {
-        // A continuation supersedes the plain opener: the model resumes inside
-        // its own turn, so the prompt ends mid-thought rather than at a fresh
-        // "<|turn>model".
-        const auto & msg = inputs.continue_msg;
-
-        data.generation_prompt  = string_ends_with(data.prompt, "<turn|>\n") ? "<|turn>model\n" : "";
-        data.generation_prompt += "<|channel>thought\n" + msg.reasoning_content;
-        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
-            data.generation_prompt += "<channel|>" + msg.render_content();
-        }
-        data.prompt += data.generation_prompt;
-    } else if (inputs.add_generation_prompt) {
-        // The tail the renderer adds for add_generation_prompt: render twice and
-        // take the difference, since the opener can arrive together with other
-        // trailing bytes.
-        autoparser::generation_params no_gen = inputs;
-        no_gen.add_generation_prompt         = false;
-        const std::string without            = common_chat_gemma4_render(no_gen, tmpl.bos_token());
-        data.generation_prompt =
-            data.prompt.size() >= without.size() ? data.prompt.substr(without.size()) : std::string{};
-
-        if (string_ends_with(data.prompt, "<turn|>\n")) {
-            // The renderer closed the previous turn without opening the model's.
-            // Without this the model is left with no turn to speak in.
-            data.generation_prompt = "<|turn>model\n";
-            data.prompt += data.generation_prompt;
-        }
-    } else {
-        data.generation_prompt.clear();
-    }
+    // The format plugin owns the entire conversation shape -- input, output,
+    // decisions and parse tree -- as one FSM. It reports the prompt and its
+    // generation tail; nothing here reconstructs, appends to, or subtracts from
+    // either. Every previous attempt to do so from out here fought the renderer
+    // and lost: three sequential blocks each rewrote generation_prompt, one
+    // invalidated the next one's end-of-turn test, and a double-render diff
+    // could not isolate the tail under continuation.
+    const auto rendered    = common_chat_gemma4_render(inputs, tmpl.bos_token());
+    data.prompt            = rendered.prompt;
+    data.entry_state       = rendered.entry_state;
+    data.generation_prompt.clear();  // not part of this format's contract
 
     data.message_delimiters = {
         { COMMON_CHAT_ROLE_USER,      "<|turn>user"  },
@@ -1652,18 +1622,11 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
         common_chat_params data;
         auto params_copy               = params;
         params_copy.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
-        data.prompt                    = common_chat_gemma4_render(params_copy, tmpl.bos_token());
-        {
-            // Same double-render difference as the main path: the generation
-            // prompt is whatever tail add_generation_prompt contributes.
-            auto no_gen                  = params;
-            no_gen.add_generation_prompt = false;
-            const auto with_gen          = common_chat_gemma4_render(params, tmpl.bos_token());
-            const auto without_gen       = common_chat_gemma4_render(no_gen, tmpl.bos_token());
-            data.generation_prompt       = with_gen.size() >= without_gen.size()
-                                             ? with_gen.substr(without_gen.size())
-                                             : std::string{};
-        }
+        // Same rule as the main path: the plugin reports both values, nothing
+        // here derives one from the other.
+        const auto rendered            = common_chat_gemma4_render(params_copy, tmpl.bos_token());
+        data.prompt                    = rendered.prompt;
+        data.entry_state               = rendered.entry_state;
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
@@ -1786,6 +1749,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
         ? input
         : params.generation_prompt + input;
 
+
     //LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), effective_input.c_str());
 
     common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_LENIENT;
@@ -1796,6 +1760,29 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     common_peg_parse_context ctx(effective_input, flags);
     auto result = parser.parse(ctx);
 
+    // Extraction goes through the format's own pipeline -- tracker, decoder,
+    // transformer, presenter -- seeded with the state the prompt left the model
+    // in. The legacy mapper is the fallback for formats with no pipeline.
+    //
+    // This dispatch was lost during the re-derivation onto b10121: the pipeline
+    // files were ported but nothing called the factory, so the FSM this fork is
+    // built around was dead code and extraction silently ran on the mapper.
+    auto extract_message = [&](common_chat_msg & msg) {
+        auto pipeline = common_chat_make_format_pipeline(params.format, msg, is_partial, params.reasoning_format);
+        if (pipeline.valid()) {
+            pipeline.seed_entry(params.entry_state);
+            pipeline.run(ctx.ast, result);
+            return;
+        }
+        std::unique_ptr<common_chat_peg_mapper> mapper;
+        if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
+            mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
+        } else {
+            mapper = std::make_unique<common_chat_peg_mapper>(msg);
+        }
+        mapper->from_ast(ctx.ast, result);
+    };
+
     if (result.fail()) {
         // During partial parsing, return partial results if any AST nodes were captured
         // This allows streaming to work correctly for formats like FUNC_MARKDOWN_CODE_BLOCK
@@ -1803,13 +1790,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // Try to extract any partial results from what was successfully parsed
             common_chat_msg msg;
             msg.role = "assistant";
-            std::unique_ptr<common_chat_peg_mapper> mapper;
-            if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-                mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-            } else {
-                mapper = std::make_unique<common_chat_peg_mapper>(msg);
-            }
-            mapper->from_ast(ctx.ast, result);
+            extract_message(msg);
 
             if (ctx.is_debug()) {
                 fprintf(stderr, "\nAST for partial parse (fail):\n%s\n", ctx.ast.dump().c_str());
@@ -1825,13 +1806,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     common_chat_msg msg;
     msg.role = "assistant";
 
-    std::unique_ptr<common_chat_peg_mapper> mapper;
-    if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-        mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-    } else {
-        mapper = std::make_unique<common_chat_peg_mapper>(msg);
-    }
-    mapper->from_ast(ctx.ast, result);
+    extract_message(msg);
 
     if (ctx.is_debug()) {
         fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());

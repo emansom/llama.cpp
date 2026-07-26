@@ -33,6 +33,9 @@ struct common_chat_format_pipeline {
 
     // Walk the AST, drive the four layers in order. Returns when the walk is
     // complete; presenter.result is populated as a side effect.
+    // Seed the tracker with the state the prompt left the model in.
+    void seed_entry(common_chat_format_state entry) { if (tracker) { tracker->seed(entry); } }
+
     void run(const common_peg_ast_arena & arena, const common_peg_parse_result & result);
 
     bool valid() const { return tracker && decoder && transformer && presenter; }

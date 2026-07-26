@@ -76,5 +76,15 @@ extern const common_chat_format_state_rules gemma4_state_rules;
 //   * Forward-scan of consecutive `tool` messages following an assistant
 //     `tool_calls` message (legacy `tool_responses` field also supported).
 //   * Per-content-type rendering (text / image / audio / video).
-std::string common_chat_gemma4_render(const autoparser::generation_params & inputs,
-                                      const std::string & bos_token);
+//
+// Returns the prompt and the FSM state it leaves the model in. There is no
+// "generation prompt": that concept exists only so callers can recover where
+// generation begins in order to re-prepend it as a text prefix. The tracker is
+// seeded from entry_state instead. See docs/fork/ARCHITECTURE.md.
+struct common_chat_gemma4_rendered {
+    std::string              prompt;       // the bytes the model receives
+    common_chat_format_state entry_state;  // the state those bytes leave it in
+};
+
+common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generation_params & inputs,
+                                                      const std::string & bos_token);

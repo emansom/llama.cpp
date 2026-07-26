@@ -637,7 +637,7 @@ std::string format_tool_response_block(const std::string & tool_name, const orde
 
 }  // namespace
 
-std::string common_chat_gemma4_render(const autoparser::generation_params & inputs,
+common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generation_params & inputs,
                                       const std::string & bos_token) {
     std::ostringstream out;
 
@@ -849,14 +849,32 @@ std::string common_chat_gemma4_render(const autoparser::generation_params & inpu
     }
 
     // 5. Generation prompt.
+    //
+    // The tail is reported, never inferred. Mark where it begins so the caller
+    // gets it exactly, including the empty-thought prefill and the continuation
+    // case, where the tail is the unclosed remainder of the last model turn
+    // rather than a fresh "<|turn>model".
+    // The state the prompt leaves the model in, reported rather than inferred.
+    auto entry = common_chat_format_state::IN_CONTENT;
+
     if (inputs.add_generation_prompt &&
         prev_message_type != PREV_TOOL_RESPONSE &&
         prev_message_type != PREV_TOOL_CALL) {
         out << "<|turn>model\n";
+        entry = common_chat_format_state::IN_GENERATION_PROMPT;
         if (!inputs.enable_thinking) {
+            // The empty-thought prefill opens AND closes a thought, so the model
+            // resumes in content -- see the prefill note in this file.
             out << "<|channel>thought\n<channel|>";
+            entry = common_chat_format_state::IN_CONTENT;
         }
+    } else if (inputs.has_continuation()) {
+        // Resuming inside the model's own turn: the prompt ends mid-thought when
+        // the continuation carries reasoning, otherwise mid-content.
+        entry = inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT
+                    ? common_chat_format_state::IN_CONTENT
+                    : common_chat_format_state::IN_REASONING;
     }
 
-    return out.str();
+    return { out.str(), entry };
 }
