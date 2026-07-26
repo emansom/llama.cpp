@@ -988,6 +988,23 @@ json oaicompat_chat_params_parse(
         if (!json_schema.is_null() && !json_schema.empty() && !grammar.empty()) {
             throw std::invalid_argument("Cannot use both a JSON schema and a grammar in response_format");
         }
+        // A schema that is not an object is REJECTED, not ignored.
+        //
+        // `{"response_format": {"type": "json_object", "schema": 123}}` used to
+        // return 200 with unconstrained output: the format's
+        // `has_response_format` test is `is_object()`, so a scalar schema simply
+        // switched the constraint off. Silently unconstrained is the one outcome
+        // this fork exists to make impossible, and it is worse here than a plain
+        // mistake would be -- the caller asked for a schema and was told the
+        // request succeeded.
+        //
+        // `{"type": 123}` and `{"type": "hiccup"}` already 400 further down, when
+        // the schema is compiled. Only a non-object slipped past.
+        if (!json_schema.is_null() && !json_schema.is_object()) {
+            throw std::invalid_argument(
+                "response_format schema must be a JSON object, got " +
+                std::string(json_schema.type_name()));
+        }
     }
 
     // get input files

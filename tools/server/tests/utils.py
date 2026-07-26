@@ -113,6 +113,9 @@ class ServerProcess:
     log_path: str | None = None
     ui_mcp_proxy: bool = False
     backend_sampling: bool = False
+    # Arbitrary extra CLI flags, so a preset can pass fork-specific ones
+    # (--chat-grammars-dir, --chat-format) without a field each.
+    extra_args: list[str] | None = None
     gcp_compat: bool = False
     server_tools: str | None = None
     cors_origins: str | None = None
@@ -239,8 +242,10 @@ class ServerProcess:
             server_args.append("--no-ui")
         if self.no_models_autoload:
             server_args.append("--no-models-autoload")
-        else:
-            server_args.append("--no-jinja")
+        # `else: server_args.append("--no-jinja")` stood here -- a dangling else
+        # left when this fork removed --jinja, so every server started with a flag
+        # that no longer exists and died with "invalid argument: --no-jinja".
+        # That, not anything about the tests, is why the whole suite errored.
         if self.reasoning_format is not None:
             server_args.extend(("--reasoning-format", self.reasoning_format))
         if self.reasoning is not None:
@@ -265,6 +270,8 @@ class ServerProcess:
             server_args.extend(["--tools", self.server_tools])
         if self.backend_sampling:
             server_args.append("--backend_sampling")
+        if self.extra_args:
+            server_args.extend(self.extra_args)
         if self.gcp_compat:
             env["AIP_MODE"] = "PREDICTION"
 
@@ -499,8 +506,21 @@ class ServerPreset:
         ]
         for server in servers:
             server.offline = False
-            server.start()
-            server.stop()
+            try:
+                server.start()
+                server.stop()
+            except Exception as e:
+                # A preset that will not start is not a reason to abort the
+                # module. This is cache warming, not a test -- and on this fork
+                # most presets CANNOT start: the chat format resolves from the
+                # model's declared general.architecture and only `gemma4` is
+                # registered, so tinyllama2 (architecture `llama`) exits with
+                # "has no registered plugin". That failure took the whole file
+                # down before any test ran.
+                #
+                # A model a test genuinely needs still fails, loudly, in that
+                # test.
+                print(f"tests: skipping preset warm-up for {server.model_alias or server.model_file}: {e}")
 
     @staticmethod
     def tinyllama2() -> ServerProcess:
@@ -514,6 +534,52 @@ class ServerPreset:
         server.n_slots = 2
         server.n_predict = 64
         server.seed = 42
+        return server
+
+    @staticmethod
+    def gemma4() -> ServerProcess:
+        """The only format this build serves, from a local GGUF.
+
+        There is no tiny stand-in: format selection resolves from the model's
+        declared general.architecture, and a build that serves `gemma4` and
+        nothing else cannot be exercised end-to-end by a stories260K checkpoint
+        whose architecture is `llama`. So this preset names a real file rather
+        than an -hf repo, and the path is overridable for a machine that keeps
+        its weights elsewhere.
+
+        Consequence for the suite: assertions pinned to stories260K's exact
+        tokens and exact output text cannot hold here, and re-deriving them is
+        fixture maintenance rather than a measurement of this fork. Those tests
+        are marked, not silently adjusted.
+        """
+        server = ServerProcess()
+        server.model_file = os.environ.get(
+            "LLAMA_GEMMA4_GGUF", "/usr/share/protean/models/gemma-4-12b-it.gguf")
+        server.model_hf_repo = None
+        server.model_hf_file = None
+        server.model_alias = "gemma-4-12b"
+        server.n_ctx = 4096
+        server.n_batch = 512
+        server.n_slots = 2
+        server.n_predict = 64
+        server.n_gpu_layer = 999
+        server.seed = 42
+        # REASONING OFF by default, and this is load-bearing rather than tidying.
+        # These tests were written against a model that does not think, so many
+        # of them give max_tokens 5-10 and assert on message.content. Gemma 4
+        # spends that budget in the thought channel and answers nothing, and
+        # test_logprobs' invariant (the concatenated logprob tokens equal
+        # message.content) cannot hold at all while reasoning is being extracted
+        # into a separate field. Verified both ways: with reasoning on,
+        # aggregated='<|channel>thought\n"What' against content=''; with it off,
+        # both are 'Because "the best"'.
+        #
+        # A test that is actually about thinking asks for it per request.
+        server.reasoning = "off"
+        server.extra_args = [
+            "--chat-grammars-dir",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../grammars/chat"),
+        ]
         return server
 
     @staticmethod
