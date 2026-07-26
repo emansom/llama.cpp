@@ -315,6 +315,57 @@ const common_chat_format_state_rules gemma4_state_rules = {
     }
 };
 
+// Gemma 4 entry-state-to-GENERATION-ROOT registry.
+//
+// Distinct from gemma4_state_rules above, which names the rule ACTIVE in a state
+// once generation is under way. This names the rule generation STARTS at, given
+// the state the rendered prompt left the model in. The two answer different
+// questions and a state can appear in one and not the other.
+//
+// It is exhaustive on purpose. Defaulting an unlisted state to "start" is how
+// the reasoning continuation broke: `start` requires a `<|channel>thought`
+// opener, the resumed delta has none because the opener is already in the
+// prompt, and the rest of the thought plus its `<channel|>` closer were read as
+// ordinary content. Silently parsing with the wrong root produces a plausible
+// message, not an error, so an unmapped state must say so.
+//
+// The states absent here are absent because the renderer cannot currently
+// produce them, not because they are impossible:
+//
+//   * The conversation-scope states (IN_SYSTEM_TURN, IN_TOOL_DECLARATIONS,
+//     IN_USER_TURN, IN_TOOL_RESPONSE, AWAITING_TOOL_RESPONSE) describe positions
+//     INSIDE a rendered prompt. The walk passes through them; generation never
+//     begins at one, because a prompt never ends mid-user-turn.
+//   * A prompt ending after a tool response should resume inside a re-opened
+//     thought (`<|channel>thought\n` with no closer, per the writer spec) and so
+//     would map to `resume_reasoning`. The renderer does not emit that re-opener
+//     yet, so that state is unreachable today; when it is implemented, this table
+//     is where it gets its root.
+//   * The mid-tool-call states (IN_TOOL_CALL / IN_TOOL_NAME / IN_TOOL_ARGS) would
+//     need their own resume roots. Nothing prefills a partial tool call.
+static const std::unordered_map<common_chat_format_state, std::string> gemma4_entry_roots = {
+    // Fresh model turn: the model may open with a thought, then content.
+    { common_chat_format_state::INITIAL,              "start" },
+    { common_chat_format_state::IN_GENERATION_PROMPT, "start" },
+    // Mid-content: either a plain content continuation, or the empty-thought
+    // prefill, which opened AND closed a thought so the model resumes in content.
+    { common_chat_format_state::IN_CONTENT,           "start" },
+    // Mid-thought: the delta begins inside `reasoning`, with the opener already
+    // in the prompt and the `<channel|>` closer still to come.
+    { common_chat_format_state::IN_REASONING,         "resume_reasoning" },
+};
+
+std::string common_chat_gemma4_entry_root(common_chat_format_state state) {
+    auto it = gemma4_entry_roots.find(state);
+    if (it == gemma4_entry_roots.end()) {
+        throw std::runtime_error(
+            "gemma4: no generation root for entry state " +
+            std::to_string(static_cast<int>(state)) +
+            " (common_chat_format_state) -- add it to gemma4_entry_roots (see the note there)");
+    }
+    return it->second;
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Gemma 4 prompt writer
 // Mirrors the CANONICAL gemma-4-12B-it template (Google Gemma Eng., 2026-07-09),
@@ -751,9 +802,25 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
             // writing <channel|> here would tell the model the thought is done.
             // The grammar's `open_thought` is the matching wire shape.
             out << "<|channel>thought\n" << thinking_text;
-        } else if (!thinking_text.empty() && static_cast<int>(i) > last_user_idx && has_tool_calls) {
-            // Google's Rule 2: thoughts are preserved across an active
-            // tool-calling turn, and stripped from turns that already completed.
+        } else if (!thinking_text.empty() &&
+                   (static_cast<int>(i) > last_user_idx ||
+                    (inputs.preserve_thinking && has_tool_calls))) {
+            // Google's Rule 2, as the writer spec states it:
+            //
+            //     (idx > last_user_idx) OR (preserve_thinking AND tool_calls)
+            //
+            // Two independent reasons to keep a thought, not one compound one.
+            // The first clause carries the CURRENT exchange: everything after
+            // the last user message is the turn being worked on, so its
+            // reasoning stands whether or not tools are involved. The second
+            // reaches further back, keeping thoughts on older tool-calling
+            // turns so a multi-hop chain stays connected.
+            //
+            // This read `> last_user_idx && has_tool_calls`, an AND where the
+            // spec has an OR, which silently dropped the reasoning from every
+            // tool-free assistant turn -- including a content continuation,
+            // where the caller had prefilled reasoning_content and got a prompt
+            // with no thought block in it at all.
             out << "<|channel>thought\n" << thinking_text << "\n<channel|>";
         }
 
@@ -898,6 +965,24 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
             out << "<|channel>thought\n<channel|>";
             entry = common_chat_format_state::IN_CONTENT;
         }
+    } else if (inputs.add_generation_prompt &&
+               prev_message_type == PREV_TOOL_RESPONSE &&
+               inputs.enable_thinking) {
+        // Tool responses are rendered INSIDE the model turn, which is therefore
+        // still open: the model called a tool, got an answer, and carries on in
+        // the same turn. So there is no new "<|turn>model" here -- emitting one
+        // would split a single model turn in two and tell the model its previous
+        // turn had ended.
+        //
+        // What the writer spec does emit is a bare thought RE-OPENER, unclosed,
+        // so the model reasons about the tool result before answering. That is
+        // also why Google's rule keeps thoughts across a tool chain: the
+        // reasoning either side of a call is one line of thought.
+        //
+        // Unclosed means generation resumes inside it: entry is IN_REASONING, and
+        // the entry-root registry sends that to `resume_reasoning`.
+        out << "<|channel>thought\n";
+        entry = common_chat_format_state::IN_REASONING;
     } else if (inputs.has_continuation()) {
         // Resuming inside the model's own turn: the prompt ends mid-thought when
         // the continuation carries reasoning, otherwise mid-content.

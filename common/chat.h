@@ -284,6 +284,13 @@ struct common_chat_templates_inputs {
     bool                                  parallel_tool_calls = false;
     common_reasoning_format               reasoning_format    = COMMON_REASONING_FORMAT_NONE; // TODO: refactor this to "bool enable_thinking"
     bool                                  enable_thinking     = true;
+    // Keep reasoning on assistant turns that carry tool calls, so a multi-hop
+    // tool chain does not lose the thoughts connecting its steps. Google:
+    // "thoughts must NOT be removed between the function calls."
+    // Defaults off, matching the writer spec, where an unset template variable
+    // is falsy. Reasoning on the LAST assistant turn is preserved regardless --
+    // see the gate in common_chat_gemma4_render.
+    bool                                  preserve_thinking   = false;
     std::chrono::system_clock::time_point now                 = std::chrono::system_clock::now();
     std::map<std::string, std::string>    chat_template_kwargs;
     bool                                  add_bos = false;

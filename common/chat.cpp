@@ -1120,14 +1120,15 @@ static std::string inject_response_schema(const std::string & grammar_template, 
 // and re-imposing it during extraction would reject output the sampler had
 // legitimately produced.
 static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template,
-                                           const std::string & root_rule = "start") {
+                                           const std::string & root_rule = "start",
+                                           bool                require_eof = false) {
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
     base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
-    return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
+    return lark ? common_lark_to_peg(base, root_rule, require_eof) : common_gbnf_to_peg(base);
 }
 
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
@@ -1158,7 +1159,9 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     {
         const auto conv_grammar = common_chat_grammar_require("gemma4");
         data.rendered_prompt     = data.prompt;
-        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation");
+        // require_eof: this parse validates a COMPLETE rendered prompt, so it has
+        // to account for every byte. See common_lark_to_peg.
+        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation", /* require_eof = */ true);
     }
 
     data.message_delimiters = {
@@ -1209,8 +1212,19 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // constrained only to a generic dict, exactly as upstream leaves them.
         // That is the gap this fork exists to close; see FORK.md.
 
+        // The generation parse starts where the prompt left the model, so its root
+        // follows entry_state. Resuming inside an unclosed thought means the delta
+        // opens mid-`reasoning` with no `<|channel>thought` ahead of it; `start`
+        // requires that opener, so it would read the rest of the thought and the
+        // `<channel|>` closing it as content.
+        //
+        // entry_state was computed by the renderer and plumbed through two structs
+        // but read by nothing -- the same dead-plumbing shape that let the FSM
+        // itself run as unused code.
+        const std::string gen_root = common_chat_gemma4_entry_root(rendered.entry_state);
+
         data.grammar             = sampling_grammar;
-        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.parser              = chat_grammar_to_peg(parser_base, gen_root).save();
         data.grammar_file_parser = true;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};
@@ -1559,6 +1573,7 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
     params.tool_choice           = inputs.tool_choice;
     params.reasoning_format      = inputs.reasoning_format;
     params.enable_thinking       = inputs.enable_thinking;
+    params.preserve_thinking     = inputs.preserve_thinking;
     params.grammar               = inputs.grammar;
     params.now                   = inputs.now;
     params.add_generation_prompt = inputs.add_generation_prompt;

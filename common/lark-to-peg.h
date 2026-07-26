@@ -38,5 +38,16 @@
 //
 // Naming a production the grammar does not define throws, rather than silently
 // falling back to the default entry and parsing the wrong thing.
+//
+// require_eof anchors the root at end of input. A validator MUST set it: without
+// it the root may match a PREFIX and report success, which is not validation --
+// `conversation: closed_turn* open_model_turn?` happily matches the empty string
+// and leaves the entire prompt unread. It also makes ordered choice work as
+// written, since an alternative that matches vacuously no longer wins over the
+// one that consumes the input.
+//
+// Generation must leave it OFF: that parse is incremental and a partial response
+// is expected to stop mid-rule.
 common_peg_arena common_lark_to_peg(const std::string & lark_grammar,
-                                    const std::string & root_rule = "start");
+                                    const std::string & root_rule = "start",
+                                    bool                require_eof = false);

@@ -360,6 +360,42 @@ struct parser_executor {
     parser_executor(const common_peg_arena & arena, common_peg_parse_context & ctx, size_t start)
         : arena(arena), ctx(ctx), start_pos(start) {}
 
+    // True if `id` matches exactly one fixed string, which is appended to `out`.
+    // Descends through refs/rules/tags/atomics and sequences whose every child is
+    // itself exact. Anything else (regex, choice, repetition) is not exact.
+    //
+    // This is what lets a tag spelled as separate delimiter/name/delimiter
+    // literals -- TAG_LT "turn" TAG_R -- be recognised as the fixed string
+    // "<turn|>" that it is. See the sequence branch of collect_leading_literals.
+    bool exact_literal(common_peg_parser_id id, std::string & out, int depth = 0) const {
+        if (depth > 16 || id == COMMON_PEG_INVALID_PARSER_ID || id >= arena.size()) return false;
+        std::string acc;
+        bool ok = false;
+        std::visit([&](const auto & p) {
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, common_peg_literal_parser>) {
+                acc = p.literal;
+                ok  = true;
+            } else if constexpr (std::is_same_v<T, common_peg_ref_parser>) {
+                try { ok = exact_literal(arena.get_rule(p.name), acc, depth + 1); }
+                catch (...) { ok = false; }
+            } else if constexpr (std::is_same_v<T, common_peg_rule_parser>) {
+                ok = exact_literal(p.child, acc, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_tag_parser>) {
+                ok = exact_literal(p.child, acc, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_atomic_parser>) {
+                ok = exact_literal(p.child, acc, depth + 1);
+            } else if constexpr (std::is_same_v<T, common_peg_sequence_parser>) {
+                ok = true;
+                for (const auto & cid : p.children) {
+                    if (!exact_literal(cid, acc, depth + 1)) { ok = false; break; }
+                }
+            }
+        }, arena.get(id));
+        if (ok) out += acc;
+        return ok;
+    }
+
     // Collect the leading literal(s) from a parser id (through refs, rules, tags, sequences).
     // For a choice, collects all non-empty leading literals from each alternative.
     // Used by the sequence parser to build ctx.next_sequence_delimiters for Until(no-delimiter) children.
@@ -388,8 +424,29 @@ struct parser_executor {
                 // (e.g. `X?` or `X*`), keep going so the leading literals of the NEXT required
                 // item are also included. Otherwise `content` before `X? Y ...` would only stop
                 // at X's first literal, even though the real input may skip X and start with Y.
+                //
+                // Consecutive EXACT-literal children are CONCATENATED into one delimiter
+                // rather than each contributing its own. A delimiter is a string the
+                // following sequence must start with, and a run of fixed literals starts
+                // with all of them, so the concatenation is both correct and maximally
+                // precise -- while any single one of them is merely a prefix.
+                //
+                // This is load-bearing once tags are spelled as delimiter + name +
+                // delimiter. `turn_close_tag: TAG_LT "turn" TAG_R` has exactly the language
+                // of the fused literal "<turn|>", but taking only its first child yielded
+                // "<" -- which occurs in every tag in the format. The preceding Until then
+                // stopped at the first "<" it saw, so a system turn's body came back empty,
+                // `closed_turn` failed, and `conversation: closed_turn* open_model_turn?`
+                // matched the empty string. That is a silent pass, not an error: the walk
+                // validated nothing and emitted nothing.
+                std::string prefix;
                 for (const auto & cid : p.children) {
-                    collect_leading_literals(cid, out, depth + 1);
+                    if (exact_literal(cid, prefix, depth + 1)) continue;
+
+                    std::vector<std::string> lits;
+                    collect_leading_literals(cid, lits, depth + 1);
+                    for (const auto & l : lits) out.push_back(prefix + l);
+
                     bool skippable = false;
                     std::visit([&](const auto & cp) {
                         using CT = std::decay_t<decltype(cp)>;
@@ -399,8 +456,23 @@ struct parser_executor {
                             skippable = true;
                         }
                     }, arena.get(cid));
-                    if (!skippable) break;
+                    // A required non-literal child ends the fixed prefix: nothing after it
+                    // is guaranteed to appear at a known offset.
+                    //
+                    // If that child had no leading literals of its own, the prefix is still
+                    // the best delimiter available and must be emitted on its own -- it is
+                    // a string every match of this sequence begins with. `tool_call` is the
+                    // case in point: `<|tool_call> "call" ":"` are exact, and the next child
+                    // `func_name` is a regex with no literal, so dropping the prefix here
+                    // left the whole choice contributing NO delimiter and `content` ran to
+                    // end of input, swallowing the tool call as text.
+                    if (!skippable) {
+                        if (lits.empty() && !prefix.empty()) { out.push_back(prefix); }
+                        prefix.clear();
+                        break;
+                    }
                 }
+                if (!prefix.empty()) out.push_back(prefix);
             } else if constexpr (std::is_same_v<T, common_peg_choice_parser>) {
                 for (const auto & child : p.children) {
                     collect_leading_literals(child, out, depth + 1);

@@ -67,17 +67,37 @@ tool_response_close_tag:  TAG_LT "tool_response" TAG_R
 # escape it -- see ARCHITECTURE.md.
 str_delim_tag: TAG_L "\"" TAG_R
 
-start: channel_block? content (channel_block content)* (tool_calls | response_format | dangling_channel_close | )
+# This grammar describes VALID Gemma 4 output and nothing else. It is the same
+# grammar llguidance enforces during sampling, so a malformed construct is not
+# something the model can emit -- and a production that tolerates one would be
+# describing a language the format does not have. A stray `<|channel>` with no
+# kind, or a `<channel|>` closing nothing, are parse errors here by design.
+start: channel_block? turn_tail
+
+# Everything a model turn can contain after its opening thought. Shared by both
+# generation entries so they cannot drift: `start` and `resume_reasoning` differ
+# ONLY in where the model picks up, never in what it may say next.
+turn_tail: content (channel_block content)* (tool_calls | response_format | )
+
+# The second generation entry, selected when the rendered prompt ended INSIDE an
+# unclosed thought (entry_state IN_REASONING) because the caller prefilled
+# reasoning_content.
+#
+# The delta then begins in the MIDDLE of `reasoning`, with no `<|channel>thought`
+# opener -- that opener is already in the prompt. Parsed with `start` the delta
+# has no leading channel block, so the continuation of the thought and the
+# `<channel|>` that closes it are read as ordinary content and the reasoning is
+# lost.
+#
+# `reasoning` is reused verbatim, so the same REASONING tag fires and the
+# continuation lands in the same field as the part already in the prompt.
+resume_reasoning: reasoning channel_close_tag turn_tail
 
 # --- Assistant turn continuation (sampler entry) -------------------------------
 #
 # A channel is the tag plus its KIND. `thought` is the only kind the model emits
 # today, but it is a production rather than part of the opener, so a different
 # kind is a grammar question and not a new literal to remember.
-#
-# This also removes the old `stray_open` special case: "a <|channel> without
-# thought" was never a stray marker, it was a channel whose kind the grammar had
-# no way to express.
 channel_block: channel_open channel_body channel_close_tag
 channel_open: channel_open_tag channel_kind
 channel_kind: "thought"
@@ -100,11 +120,6 @@ channel_body: reasoning
 # response_format block can match.
 content: /([^<`]|<(?!\|)(?![a-zA-Z_][a-zA-Z0-9_]*\|>)|`(?!``)|``(?!`))*/
 reasoning: /(.|\n)*?/
-
-# A close tag with no matching open. Kept as its own production so the bytes are
-# consumed rather than surfacing as content, while <channel|> stays a REQUIRED
-# literal wherever a channel is actually opened (POLICIES.md).
-dangling_channel_close: channel_close_tag
 
 tool_calls: tool_call+
 # Open, directive, colon, payload, close -- the shape shared by the whole
@@ -182,13 +197,24 @@ model_turn_close: turn_close | tool_response_block+
 # failure that policy exists to prevent.
 open_model_turn: turn_open_tag "model" "\n" open_model_body
 
-# ORDER MATTERS. PEG takes the first alternative that matches, and
-# `open_thought`'s reasoning body has no following sibling, so it runs to end of
-# input -- it would swallow `<channel|>` and every byte after it, leaving content
-# empty. Try the CLOSED shape first; only a genuinely unclosed thought, where
-# `model_body` cannot match because there is no `<channel|>`, reaches
-# `open_thought`.
-open_model_body: model_body | open_thought
+# Each alternative must be decidable WHERE IT STANDS. PEG commits to the first
+# one that succeeds and never returns to it, so an alternative that can match the
+# empty string makes every later one unreachable.
+#
+# `model_body | open_thought` looked right -- "closed shape first" -- and was
+# not: every part of `model_body` is optional, so on an unclosed thought it
+# matched EMPTY and won. The reasoning bytes went unread and the walk recovered
+# nothing, with no error anywhere. (The `conversation` root is now anchored at
+# end of input, which turns that class of mistake into a loud failure instead of
+# a silent wrong parse -- but the anchor cannot un-commit the choice, so the
+# alternatives still have to be written to discriminate on their own.)
+#
+# So the unclosed shape is spelled out in full and tried first: any number of
+# COMPLETE thought/content pairs, then a thought that has no `<channel|>`. It
+# cannot match a closed body, because the trailing `open_thought` is required and
+# a closed body has nothing left for it. `model_body` then covers everything that
+# ends in content or tool calls, including an empty body.
+open_model_body: (channel_block content)* open_thought | model_body
 
 # A thought still in progress: opener required, body captured as reasoning, no
 # closer because the model has not finished thinking.

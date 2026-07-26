@@ -603,7 +603,7 @@ std::string collect_rules(LarkLexer & lex, std::vector<RuleDef> & rule_defs) {
 // Public API
 // ──────────────────────────────────────────────────────────────────────────────
 
-common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std::string & root_rule) {
+common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std::string & root_rule, bool require_eof) {
     LarkLexer lex(lark_grammar);
     lex.tokenize();
 
@@ -652,30 +652,25 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
         std::string normalized_name = rdef.name;
         for (char & c : normalized_name) { if (c == '_') c = '-'; }
 
-        // Apply semantic tags based on conventional rule names.
+        // Apply semantic tags based on rule names, matched EXACTLY against the
+        // names listed below.
         //
-        // Matched on the name's ROLE SUFFIX as well as the whole name, so a rule
-        // called `open-reasoning`, `channel-content` or `model-tool-args` carries
-        // the same tag as the bare role.
+        // A tag says "the text this rule captures IS content / IS reasoning", so
+        // it belongs only on a rule whose whole match is that payload. Inferring
+        // it from a name pattern instead -- treating any `*-thought` or
+        // `*-content` rule as the payload -- guesses at a rule's meaning from its
+        // spelling, and guesses wrong on wrappers: a rule like `open_thought`,
+        // whose match includes the `<|channel>thought` opener, then emits those
+        // literal bytes as reasoning AND emits the inner `reasoning` rule again,
+        // duplicating every payload it contains.
         //
-        // Exact-match-only made the tag a property of one exact spelling:
-        // renaming a rule, or splitting one into a wrapper plus a body, silently
-        // dropped it. Since the decoder emits ONLY for tagged nodes, the result
-        // was a tree that parsed perfectly and produced no events whatsoever --
-        // a failure with no error message at any layer. Restructuring the Gemma 4
-        // grammar hit exactly this.
-        //
-        // Suffix, not substring: `-content` at the end names the role, whereas a
-        // name that merely contains "content" may be something else entirely.
+        // A grammar that needs a differently-named payload rule adds it to a list
+        // here. Wrappers stay untagged and reference the payload rule, which is
+        // how the Gemma 4 grammar is written: `channel_body: reasoning`.
         const std::string & n = normalized_name;
         auto role_is = [&n](std::initializer_list<const char *> names) {
             for (const char * nm : names) {
                 if (n == nm) {
-                    return true;
-                }
-                const std::string suffix = std::string("-") + nm;
-                if (n.size() > suffix.size() &&
-                    n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
                     return true;
                 }
             }
@@ -727,7 +722,18 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
     }
 
     if (root_set) {
-        builder.set_root(root_parser);
+        // Anchoring at end of input is what makes this a validator rather than a
+        // prefix matcher: without it, a root that matches the empty string
+        // reports success while reading none of the prompt.
+        //
+        // It does NOT rescue an ordered choice that picks a vacuous alternative.
+        // PEG commits to the first alternative that succeeds and never revisits
+        // it when a later sibling fails, so a rule like `a | b` where `a` can
+        // match empty will never reach `b`. The anchor turns that from a silent
+        // wrong parse into a loud failure at the first unread byte -- which is
+        // the point. Each alternative must be decidable where it stands.
+        builder.set_root(require_eof ? builder.sequence({ root_parser, builder.end() })
+                                     : root_parser);
     }
 
     return builder.build();

@@ -66,6 +66,15 @@ class common_chat_gemma4_transformer : public common_chat_format_transformer {
 
 extern const common_chat_format_state_rules gemma4_state_rules;
 
+// The grammar rule generation STARTS at, given the state the rendered prompt left
+// the model in. Distinct from gemma4_state_rules, which names the rule active in a
+// state once generation is under way.
+//
+// Throws on a state with no mapping rather than falling back to "start": parsing a
+// resumed generation with the wrong root yields a plausible message instead of an
+// error. See the registry's note in gemma4-format.cpp.
+std::string common_chat_gemma4_entry_root(common_chat_format_state state);
+
 // Render the Gemma 4 prompt. Mirrors the canonical gemma-4-12B-it template (see docs/fork/ARCHITECTURE.md#normative-sources),
 // not the older vendored models/templates/google-gemma-4-31B-it.jinja
 // byte-for-byte. The template is the most intricate of the migrated formats:
