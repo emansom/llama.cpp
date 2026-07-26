@@ -12,9 +12,6 @@
 #include "lark-to-peg.h"
 #include "log.h"
 
-#include "jinja/value.h"
-#include "jinja/runtime.h"
-#include "jinja/caps.h"
 #include "peg-parser.h"
 
 #include "nlohmann/json.hpp"
@@ -971,97 +968,9 @@ static void foreach_parameter(const json &                                      
     }
 }
 
-static std::string common_chat_template_direct_apply_impl(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs,
-    const std::optional<json> & messages_override = std::nullopt,
-    const std::optional<json> & tools_override = std::nullopt,
-    const std::optional<json> & additional_context = std::nullopt) {
-    jinja::context ctx(tmpl.source());
 
-    nlohmann::ordered_json inp = nlohmann::ordered_json{
-        {"messages", messages_override.has_value() ? *messages_override : inputs.messages},
-        {"bos_token", tmpl.bos_token()},
-        {"eos_token", tmpl.eos_token()},
-        {"enable_thinking", inputs.enable_thinking},
-    };
-    if (tools_override.has_value() || !inputs.tools.empty()) {
-        inp["tools"] = tools_override.has_value() ? *tools_override : inputs.tools;
-    }
-    if (inputs.extra_context.is_object()) {
-        // TODO: do we need to merge, or replacing is fine?
-        for (const auto & [k, v] : inputs.extra_context.items()) {
-            inp[k] = v;
-        }
-    }
-    if (additional_context.has_value()) {
-        // TODO: merge properly instead of overwriting (matching old behavior)
-        for (const auto & [k, v] : additional_context->items()) {
-            inp[k] = v;
-        }
-    }
-    if (inputs.add_generation_prompt) {
-        inp["add_generation_prompt"] = true;
-    }
-    if (inp.contains("preserve_reasoning") && inp["preserve_reasoning"].is_boolean()) {
-        bool enabled = inp["preserve_reasoning"].get<bool>();
-        jinja::caps_apply_preserve_reasoning(ctx, enabled);
-    }
 
-    jinja::global_from_json(ctx, inp, inputs.mark_input);
 
-    // render
-    jinja::runtime runtime(ctx);
-    const jinja::value results = runtime.execute(tmpl.prog);
-    auto parts = jinja::runtime::gather_string_parts(results);
-
-    std::string result = parts->as_string().str();
-
-    // TODO: improve this later
-    if (inputs.add_bos && string_starts_with(result, tmpl.bos_token())) {
-        result = result.substr(tmpl.bos_token().size());
-    }
-    if (inputs.add_eos && string_ends_with(result, tmpl.eos_token())) {
-        result = result.substr(0, result.size() - tmpl.eos_token().size());
-    }
-    return result;
-}
-
-std::string common_chat_template_direct_apply(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs) {
-    return common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
-}
-
-static std::string common_chat_template_generation_prompt_impl(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs,
-    const std::optional<json> & messages_override = std::nullopt,
-    const std::optional<json> & tools_override = std::nullopt,
-    const std::optional<json> & additional_context = std::nullopt) {
-
-    auto adjusted_messages = messages_override ? *messages_override : inputs.messages;
-
-    autoparser::generation_params params = inputs;
-    params.add_generation_prompt = false;
-    params.continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
-    std::string no_gen_prompt    = common_chat_template_direct_apply_impl(tmpl, params, adjusted_messages, tools_override, additional_context);
-    params.add_generation_prompt = true;
-    std::string gen_prompt       = common_chat_template_direct_apply_impl(tmpl, params, adjusted_messages, tools_override, additional_context);
-
-    size_t prefix_len = 0;
-    size_t min_size = std::min(no_gen_prompt.size(), gen_prompt.size());
-    while (prefix_len < min_size && no_gen_prompt[prefix_len] == gen_prompt[prefix_len]) {
-        prefix_len++;
-    }
-    return gen_prompt.substr(prefix_len);
-}
-
-std::string common_chat_template_generation_prompt(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs) {
-    return common_chat_template_generation_prompt_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Grammar-file-driven chat parsing
@@ -1733,8 +1642,18 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         common_chat_params data;
         auto params_copy               = params;
         params_copy.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
-        data.prompt                    = common_chat_template_direct_apply_impl(tmpl, params_copy);
-        data.generation_prompt         = common_chat_template_generation_prompt_impl(tmpl, params);
+        data.prompt                    = common_chat_gemma4_render(params_copy, tmpl.bos_token());
+        {
+            // Same double-render difference as the main path: the generation
+            // prompt is whatever tail add_generation_prompt contributes.
+            auto no_gen                  = params;
+            no_gen.add_generation_prompt = false;
+            const auto with_gen          = common_chat_gemma4_render(params, tmpl.bos_token());
+            const auto without_gen       = common_chat_gemma4_render(no_gen, tmpl.bos_token());
+            data.generation_prompt       = with_gen.size() >= without_gen.size()
+                                             ? with_gen.substr(without_gen.size())
+                                             : std::string{};
+        }
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
