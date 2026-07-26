@@ -71,6 +71,51 @@ as arbiter.
 | OBJECT `properties` comma — LiteRT-LM's Jinja emits malformed `{,properties:{…}}` for a description-less object | **Guard the comma** — the unguarded form is malformed output |
 | `<\|think\|>` trailing newline; the `\n\n` separator before tool declarations; image rendering | **Decided by the renderer**, and pinned by explicit expected bytes in its tests |
 
+### `<|` and `|>` are a tag syntax, and the grammar should treat them as one
+
+Gemma 4's markers are not unrelated magic strings. They are a consistent tag
+syntax, with the `|` position marking direction:
+
+| form | meaning | examples |
+|---|---|---|
+| `<\|NAME>` | open | `<\|turn>`, `<\|channel>`, `<\|tool_call>`, `<\|tool_response>`, `<\|tool>` |
+| `<NAME\|>` | close | `<turn\|>`, `<channel\|>`, `<tool_call\|>`, `<tool_response\|>`, `<tool\|>` |
+| `<\|NAME\|>` | self-delimiting | `<\|"\|>`, `<\|think\|>`, `<\|image\|>` |
+
+The grammar currently ignores this and matches every marker as an independent
+literal. The cost is visible in the `content` rule, a chain of negative
+lookaheads — one per tag whoever wrote it happened to think of:
+
+```
+content: /([^<`]|<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)|`(?!``)|``(?!`))*/
+```
+
+**That is permissive in exactly the wrong direction.** A tag nobody enumerated
+does not fail — it falls through and is captured as *content*. A format whose
+whole purpose is that malformed input never reaches the model should reject an
+unrecognised tag, not quietly hand it to the caller as text.
+
+**Target shape.** Lex `<|NAME>` / `<NAME|>` / `<|NAME|>` as tag tokens, then
+define content as *"any run of text containing no tag"*. Structure follows:
+
+- `content` stops being a lookahead pile and becomes one negative condition,
+  which cannot go stale when a tag is added.
+- An unknown tag becomes a **parse error**: it lexes as a tag and matches no
+  production. That is the strictness the format is supposed to provide.
+- Open/close pairing is expressible per tag (`turn`, `channel`, `tool_call`)
+  rather than as two unrelated strings that merely look related.
+- The `<|"|>` string delimiter stops being a special case; it is simply the
+  self-delimiting form.
+
+**Where interpretation is required, and it is.** The official sources describe
+the markers individually and never state the tag syntax as a rule, so reading
+`<|` / `|>` as structural rather than incidental is a deliberate reading of an
+under-specified format. It is well supported — every marker in LiteRT-LM's
+config and in the canonical wire shape obeys it without exception — but it is a
+choice. If a future Gemma revision ships a marker that breaks the pattern, this
+is the assumption that breaks with it. Record such a marker here rather than
+adding another lookahead.
+
 ### The `<|"|>` delimiter has no escape mechanism
 
 This is a **hole in the format, not a gap in the implementation.** S1 is
