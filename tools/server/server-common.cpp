@@ -937,6 +937,16 @@ json oaicompat_chat_params_parse(
     }
 
     // Handle "response_format" field
+    //
+    // Two vendor types extend OpenAI's set, `lark_grammar` and `gbnf_grammar`.
+    // They are additive: text / json_object / json_schema behave exactly as
+    // before, so a stock OpenAI client is unaffected (FORK.md §1.0).
+    //
+    // Why here and not the top-level `grammar` extension: `response_format` is
+    // the standard field with a vendor-extended `type`, it is per-request and
+    // free to vary per call, and -- unlike `grammar` -- it composes with `tools`
+    // rather than being refused alongside them. A scoped agent stage sends the
+    // grammar for the one operation it is performing.
     if (body.contains("response_format")) {
         json response_format      = json_value(body, "response_format", json::object());
         std::string response_type = json_value(response_format, "type", std::string());
@@ -947,8 +957,36 @@ json oaicompat_chat_params_parse(
         } else if (response_type == "json_schema") {
             auto schema_wrapper = json_value(response_format, "json_schema", json::object());
             json_schema = json_value(schema_wrapper, "schema", json::object());
+        } else if (response_type == "lark_grammar" || response_type == "gbnf_grammar") {
+            // The payload key matches the type, the way `json_schema` does.
+            const std::string key = response_type == "lark_grammar" ? "lark_grammar" : "gbnf_grammar";
+            grammar = json_value(response_format, key, std::string());
+            if (grammar.empty()) {
+                throw std::invalid_argument("response_format type \"" + response_type +
+                                            "\" requires a non-empty \"" + key + "\" field");
+            }
+            // Converted to Lark eagerly, and by the chat format rather than
+            // here, so that every caller of common_chat_templates_apply gets the
+            // same treatment. What matters at this boundary is that the TYPE is
+            // stated: nothing downstream has to guess which syntax this is.
+            //
+            // The declared marker that carries the answer downstream is Lark's
+            // own `%llguidance` header, which is also what the sampler has
+            // always used to tell the two apart. A Lark grammar without it is
+            // not a Lark grammar to llguidance either, so say so now rather than
+            // letting it be parsed as GBNF and fail obscurely.
+            if (response_type == "lark_grammar" && grammar.compare(0, 11, "%llguidance") != 0) {
+                throw std::invalid_argument(
+                    "response_format \"lark_grammar\" must begin with a \"%llguidance\" "
+                    "declaration (see llguidance docs/syntax.md, \"Grammar options\")");
+            }
         } else if (!response_type.empty() && response_type != "text") {
-            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
+            throw std::invalid_argument(
+                "response_format type must be one of \"text\", \"json_object\", \"json_schema\", "
+                "\"lark_grammar\" or \"gbnf_grammar\", but got: " + response_type);
+        }
+        if (!json_schema.is_null() && !json_schema.empty() && !grammar.empty()) {
+            throw std::invalid_argument("Cannot use both a JSON schema and a grammar in response_format");
         }
     }
 
@@ -1062,9 +1100,22 @@ json oaicompat_chat_params_parse(
     }
     inputs.enable_thinking = opt.enable_thinking;
     if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
-        if (body.contains("grammar")) {
-            throw std::invalid_argument("Cannot use custom grammar constraints with tools.");
-        }
+        // Stock rejects a caller grammar alongside `tools` with a 400, and it
+        // has to: there, the two are separate samplers masking one token stream,
+        // and two grammars whose languages do not nest can intersect to NOTHING
+        // -- every logit -INF mid-generation, with no diagnostic.
+        //
+        // Here the caller's grammar is a PRODUCTION inside the format grammar
+        // (gemma4_compose_grammars), so one matcher and one mask result and
+        // there is no intersection to empty out. The request is answerable
+        // rather than a 400.
+        //
+        // What the two mean together is decided by precedence, not by union:
+        // `tool_choice: "required"` wins and the turn must call a tool; anything
+        // else and the stated grammar governs the answer. A turn that may EITHER
+        // call a tool OR answer in the caller's grammar is not expressible yet
+        // -- the tool-call branch would have to be present only when tools were
+        // declared, and the entry rules are static. See gemma4.lark.
         llama_params["parse_tool_calls"] = true;
     }
 

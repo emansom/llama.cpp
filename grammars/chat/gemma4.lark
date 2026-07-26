@@ -209,6 +209,40 @@ turn_start_tool_call: channel_block? tool_call_request
 turn_start_response_format: channel_block? response_format turn_close_tag?
 resume_reasoning_response_format: reasoning channel_close_tag response_format turn_close_tag?
 
+# The caller's OWN grammar, as `response_format: {"type": "lark_grammar"}` or
+# `{"type": "gbnf_grammar"}` (GBNF is converted to Lark first -- llguidance reads
+# only Lark and JSON Schema).
+#
+# It is a SUBGRAMMAR, referenced through `{{USER_GRAMMAR}}`, not text pasted into
+# this file. llguidance composes a list of grammars and lets one reference
+# another by name (`@response_grammar`, docs/syntax.md "Multiple grammars"), each
+# with its own lexeme class -- so a caller rule called `content` or `start`
+# cannot collide with the ones here, and nothing has to rename anything.
+#
+# Deliberately ONE sampler. The alternative -- and what the top-level `grammar`
+# extension used to do -- is to run the caller's grammar as a second sampler
+# beside this one. Two grammars masking one token stream intersect their
+# languages, and if neither is a superset the intersection can be EMPTY: every
+# logit -INF mid-generation, with no diagnostic. As a production inside this
+# grammar there is one language and one mask, which is also why `tools` and
+# `response_format` can now be sent together.
+#
+# Unlike `response_format`, the caller's grammar is NOT fenced: it describes the
+# answer text itself, so it stands where content would. Same discipline as the
+# two entries above -- no `content` beside it, or "must" degrades to "may".
+#
+# KNOWN LIMITATION: there is no tool-call alternative here, so a turn cannot be
+# "either call a tool or answer in this grammar". `tools` may still be sent
+# alongside (the fork allows the combination stock rejects outright), but
+# precedence decides: tool_choice=required makes it a calling turn, otherwise the
+# grammar governs the answer. Adding the alternative needs the tool branch to
+# appear only when tools were actually declared -- otherwise a request with no
+# tools would regain the unconstrained `{{TOOL_SCHEMA}}` fallback as an escape
+# hatch out of the caller's grammar, which is worse than not offering it.
+turn_start_user_grammar: channel_block? user_content turn_close_tag?
+resume_reasoning_user_grammar: reasoning channel_close_tag user_content turn_close_tag?
+user_content: {{USER_GRAMMAR}}
+
 # The second generation entry, selected when the rendered prompt ended INSIDE an
 # unclosed thought (entry_state IN_REASONING) because the caller prefilled
 # reasoning_content.

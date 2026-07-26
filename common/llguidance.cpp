@@ -21,6 +21,21 @@ struct llama_sampler_llg {
     int                 step;
 };
 
+// Why the last grammar failed to build.
+//
+// The matcher owns the message and is freed on failure, so it has to be copied
+// out here or it is gone. It is worth keeping: the caller supplied that grammar
+// and gets a 400 for it, and "failed to parse grammar" does not tell them which
+// line of their own text was wrong. llguidance's message does.
+static std::string & llg_last_error_slot() {
+    static thread_local std::string err;
+    return err;
+}
+
+const char * llama_sampler_llg_last_error() {
+    return llg_last_error_slot().c_str();
+}
+
 static LlgMatcher * llama_sampler_llg_new(LlgTokenizer * tokenizer, const char * grammar_kind,
                                           const char * grammar_data) {
     LlgConstraintInit cinit;
@@ -29,9 +44,11 @@ static LlgMatcher * llama_sampler_llg_new(LlgTokenizer * tokenizer, const char *
     if (log_level && *log_level) {
         cinit.log_stderr_level = atoi(log_level);
     }
+    llg_last_error_slot().clear();
     auto c = llg_new_matcher(&cinit, grammar_kind, grammar_data);
     if (llg_matcher_get_error(c)) {
         LOG_ERR("llg error: %s\n", llg_matcher_get_error(c));
+        llg_last_error_slot() = llg_matcher_get_error(c);
         llg_free_matcher(c);
         return nullptr;
     }
@@ -325,12 +342,25 @@ llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab, const char * g
             LOG_DBG("llguidance: matcher built for a %s grammar (%zu bytes); constraint ACTIVE\n",
                     grammar_kind, ctx->grammar_data.size());
         } else {
-            // The grammar was ASKED for and could not be built. Every apply() is
-            // now a no-op, so the whole generation runs unconstrained.
-            ctx->failed_open = true;
-            LOG_ERR("%s", "llguidance: grammar failed to build; this generation will be "
-                          "UNCONSTRAINED. Output may not conform to the requested grammar "
-                          "or tool schema.\n");
+            // The grammar was ASKED for and could not be built.
+            //
+            // FAIL CLOSED. Returning a sampler here returns one whose every
+            // apply() is a no-op, i.e. a generation that runs with no constraint
+            // at all while looking constrained from the outside -- and it looked
+            // constrained to common_sampler_init too, whose
+            // `if (!grmr && !grammar_str.empty()) throw` could never fire
+            // because this function always handed back a non-null sampler. So
+            // the loudest failure this fork has was reduced to one LOG_ERR in a
+            // busy log, and the request succeeded with unconstrained output.
+            //
+            // A caller that asked for a grammar and cannot have one needs an
+            // error, not prose. nullptr is what makes that throw reachable; the
+            // server turns it into a request error naming the grammar.
+            LOG_ERR("%s", "llguidance: grammar failed to build; refusing to sample "
+                          "unconstrained (the request asked for a grammar).\n");
+            llg_free_tokenizer(tokenizer);
+            delete ctx;
+            return nullptr;
         }
     } else {
         *ctx = {
@@ -356,6 +386,10 @@ llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab, const char * g
 llama_sampler * llama_sampler_init_llg(const llama_vocab *, const char *, const char *) {
     LOG_WRN("llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled");
     return nullptr;
+}
+
+const char * llama_sampler_llg_last_error() {
+    return "llguidance is not enabled in this build";
 }
 
 #endif  // LLAMA_USE_LLGUIDANCE

@@ -112,8 +112,18 @@ std::string common_sampler_type_to_str(enum common_sampler_type cnstr);
 std::vector<enum common_sampler_type> common_sampler_types_from_names(const std::vector<std::string> & names);
 std::vector<enum common_sampler_type> common_sampler_types_from_chars(const std::string & chars);
 
+// Returns nullptr when a grammar was requested and could not be built. That is
+// deliberate and load-bearing: a non-null sampler with no matcher behind it
+// samples UNCONSTRAINED while looking constrained from the outside, which is the
+// worst failure a grammar-driven format has. Callers must treat nullptr as an
+// error, not as "no grammar".
 llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab,
                 const char * grammar_kind, const char * grammar_data);
+
+// llguidance's own message for the last failed build, on this thread; empty when
+// the last build succeeded. Use it to tell the caller what was wrong with the
+// grammar THEY sent -- "failed to parse grammar" names no line and no rule.
+const char * llama_sampler_llg_last_error();
 
 struct common_sampler_deleter {
     void operator()(common_sampler * s) { common_sampler_free(s); }

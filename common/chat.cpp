@@ -5,6 +5,7 @@
 #include "chat-formats/gemma4-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
+#include "gbnf-to-lark.h"
 #include "gbnf-to-peg.h"
 #include "ggml.h"
 #include "json-schema-to-grammar.h"
@@ -59,6 +60,10 @@ static std::string trim_whitespace(const std::string & str) {
 
 static std::unordered_map<std::string, std::string> s_chat_grammar_registry;
 
+// Defined below, next to the transpiler it needs. Runs once the registry is
+// populated: see the note at its definition for why this is a startup check.
+static void common_chat_check_format_contracts();
+
 void common_chat_grammar_init(const std::string & grammars_dir) {
     s_chat_grammar_registry.clear();
 
@@ -96,6 +101,8 @@ void common_chat_grammar_init(const std::string & grammars_dir) {
 
     LOG_INF("Loaded %zu chat grammar file(s) from %s\n",
             s_chat_grammar_registry.size(), grammars_dir.c_str());
+
+    common_chat_check_format_contracts();
 }
 
 std::string common_chat_grammar_get(const std::string & model_key) {
@@ -1234,6 +1241,44 @@ static std::string inject_tool_schema(const std::string & grammar_template, cons
     return replace_all(grammar_template, placeholder, schema);
 }
 
+// The caller's own grammar, as a SUBGRAMMAR reference.
+//
+// `@response_grammar` names the second entry of the llguidance grammar list this
+// request compiles to (see gemma4_compose_grammars below). Referencing rather
+// than pasting is what makes a caller rule named `content` or `start` harmless:
+// llguidance gives each grammar in the list its own lexeme class, so nothing has
+// to be renamed and nothing can collide.
+//
+// With no caller grammar the production is still substituted -- with the format's
+// own free-text `content` -- because the placeholder has to become valid Lark
+// either way. Leaving `{{USER_GRAMMAR}}` in the text was the exact shape of an
+// earlier bug: llguidance rejected the grammar and, rejecting it, constrained
+// nothing at all.
+static std::string inject_user_grammar(const std::string & grammar_template, bool have_user_grammar) {
+    return replace_all(grammar_template, "{{USER_GRAMMAR}}",
+                       have_user_grammar ? "@response_grammar" : "content");
+}
+
+// One llguidance grammar LIST: the format grammar, plus the caller's under the
+// name the format grammar references.
+//
+// llguidance takes a list via its "llguidance" constraint type and lets an entry
+// reference another by name (docs/syntax.md, "Multiple grammars"); nested Lark
+// grammars are explicitly not supported yet, so this is the sanctioned way to
+// compose two Lark grammars. ONE matcher results, and therefore one mask -- the
+// point of §1.7: two samplers over one token stream intersect their languages,
+// and an empty intersection is every logit -INF with no diagnostic.
+static std::string gemma4_compose_grammars(const std::string & format_grammar,
+                                           const std::string & user_lark) {
+    if (user_lark.empty()) {
+        return format_grammar;
+    }
+    json grammars = json::array();
+    grammars.push_back({ { "lark_grammar", format_grammar } });
+    grammars.push_back({ { "name", "response_grammar" }, { "lark_grammar", user_lark } });
+    return json{ { "grammars", grammars } }.dump();
+}
+
 static std::string inject_response_schema(const std::string & grammar_template, const json & json_schema) {
     const std::string placeholder = "{{RESPONSE_SCHEMA}}";
     if (grammar_template.find(placeholder) == std::string::npos) {
@@ -1284,8 +1329,44 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     base = replace_all(base, "{{TOOL_SCHEMA}}",
                        lark ? "tool_call_directive \":\" func_name gemma4_dict?" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
+    // Likewise the caller's grammar: extraction reads back what the sampler
+    // produced, and the sampler already required it to match. Re-imposing it
+    // here could only reject legitimate output -- and the subgrammar reference
+    // it is replaced with means nothing to the PEG transpiler anyway.
+    base = replace_all(base, "{{USER_GRAMMAR}}", lark ? "content" : "([^]*)");
 
     return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
+}
+
+// Every registered format's FSM<->grammar contract, checked once at startup.
+//
+// ARCHITECTURE.md states the contract as binding -- every state reachable in a
+// per-format FSM corresponds to a named rule in that format's Lark grammar, and
+// the C++ tracker mirrors llguidance's rule path. It has been a convention until
+// now, and a convention cannot catch drift: IN_TOOL_ARGS sat in the registry
+// naming a rule the tracker never entered, which is precisely what the registry
+// existed to prevent.
+//
+// STARTUP, not per request, because the failure is silent in the worst possible
+// way. The generation entry is composed as `start: <rule>`; a `<rule>` llguidance
+// cannot resolve makes it fail OPEN, and a server that cannot constrain its
+// output must not come up pretending it can.
+//
+// Checked against the grammar as PARSED, not as text: a name that appears only
+// inside another rule's body is not a definition, and a text scan cannot tell
+// the two apart.
+static void common_chat_check_format_contracts() {
+    const auto grammar = common_chat_grammar_get("gemma4");
+    if (grammar.empty()) {
+        // No grammar loaded is a separate failure, reported by
+        // common_chat_grammar_require at the point of use with a message that
+        // says what to set. Nothing to check here.
+        return;
+    }
+    // Any root that exists will do -- has_rule() looks at the whole rule table,
+    // not the entry. `conversation` is the widest and reaches every production.
+    common_chat_gemma4_check_state_rule_contract(chat_grammar_to_peg(grammar, "conversation"));
+    LOG_DBG("%s", "gemma4: FSM state<->grammar rule contract OK\n");
 }
 
 // Append `start: <root_rule>` so the chosen production becomes the entry rule.
@@ -1400,6 +1481,27 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
 
+    // A caller-supplied grammar, from `response_format: {"type": "lark_grammar"}`
+    // / `{"type": "gbnf_grammar"}` or the legacy top-level `grammar` field.
+    //
+    // Normalized to Lark HERE rather than at the request boundary so every
+    // caller of this function gets the same treatment -- the server, the CLI's
+    // --grammar, and the tests. Which of the two syntaxes a string is follows
+    // the convention the sampler has always used for this field (`%llguidance`
+    // opens a Lark grammar); that is a declared marker in the text, not a guess
+    // about what the grammar looks like.
+    //
+    // A malformed grammar throws, and the throw becomes a request error. That is
+    // the whole point of converting eagerly: the alternative is llguidance
+    // refusing the grammar at sampling time, which it expresses by constraining
+    // NOTHING.
+    std::string user_lark;
+    if (!inputs.grammar.empty()) {
+        user_lark = is_lark_grammar(inputs.grammar) ? inputs.grammar
+                                                    : common_gbnf_to_lark(inputs.grammar);
+    }
+    const bool has_user_grammar = !user_lark.empty();
+
     // The grammar comes from grammars/chat/gemma4.lark (or .gbnf), not from
     // hand-written PEG builder lambdas. One artefact drives BOTH sampling and
     // extraction, so the two cannot drift apart -- which is the whole point of
@@ -1442,9 +1544,16 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // tool_choice wins when both are set, because a turn cannot be required
         // to both call a tool and emit a schema block, and the tool call is the
         // more specific instruction.
+        //
+        // A caller-supplied grammar is the same kind of demand and sits in the
+        // same precedence order, below tool_choice and above the JSON schema:
+        // asking for BOTH a schema and a grammar is contradictory, and the
+        // grammar is the more specific of the two.
         auto demand = COMMON_CHAT_GEMMA4_ENTRY_ANY;
         if (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED) {
             demand = COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL;
+        } else if (has_user_grammar) {
+            demand = COMMON_CHAT_GEMMA4_ENTRY_USER_GRAMMAR;
         } else if (has_response_format) {
             demand = COMMON_CHAT_GEMMA4_ENTRY_RESPONSE_FORMAT;
         }
@@ -1484,6 +1593,11 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // shape. With no tools declared this is the unconstrained form, so a
         // request without tools is unaffected.
         sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
+        sampling_grammar = inject_user_grammar(sampling_grammar, has_user_grammar);
+        // Last, because it stops being a Lark grammar here and becomes an
+        // llguidance grammar LIST. Every substitution above operates on Lark
+        // text and would have to be JSON-aware otherwise.
+        sampling_grammar = gemma4_compose_grammars(sampling_grammar, user_lark);
 
         // Extraction enters at the PERMISSIVE root even when sampling was pinned
         // to the tool-required one. The required variant's language is a strict
@@ -1904,9 +2018,15 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
     params.parallel_tool_calls = inputs.parallel_tool_calls;
 
     if (params.tools.is_array()) {
-        if (params.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE && !params.grammar.empty()) {
-            throw std::runtime_error("Cannot specify grammar with tools");
-        }
+        // The second of the two "no grammar with tools" guards, one layer below
+        // the server's. Both are gone for the same reason: the caller's grammar
+        // is composed into the format grammar as a production, so there are not
+        // two samplers to intersect. See gemma4_compose_grammars, and the note
+        // in oaicompat_chat_params_parse.
+        //
+        // Removing only the outer one left this reachable, and it answered a
+        // valid request with a 500 -- found live, not by the suite, because no
+        // test sent both.
         if (caps.supports_tool_calls && !caps.supports_tools) {
             LOG_WRN(
                 "Template supports tool calls but does not natively describe tools. The fallback behaviour used may "

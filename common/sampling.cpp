@@ -198,9 +198,19 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
     std::vector<llama_sampler *> samplers;
 
     const std::string & grammar_str = common_grammar_value(params.grammar);
-    if (grammar_str.compare(0, 11, "%llguidance") == 0) {
+    // Two llguidance encodings, told apart by their own leading marker and not
+    // by anything inferred about the content:
+    //
+    //   %llguidance ...      a single Lark grammar
+    //   {"grammars":[...]}   a grammar LIST, which is how a chat format composes
+    //                        a caller-supplied grammar in as a SUBGRAMMAR (see
+    //                        gemma4_compose_grammars in common/chat.cpp). It
+    //                        still yields ONE matcher and one mask -- never a
+    //                        second sampler running beside the format's own.
+    const bool is_llg_list = grammar_str.compare(0, 12, "{\"grammars\":") == 0;
+    if (is_llg_list || grammar_str.compare(0, 11, "%llguidance") == 0) {
 #ifdef LLAMA_USE_LLGUIDANCE
-        grmr = llama_sampler_init_llg(vocab, "lark", grammar_str.c_str());
+        grmr = llama_sampler_init_llg(vocab, is_llg_list ? "llguidance" : "lark", grammar_str.c_str());
 #else
         GGML_ABORT("llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled");
 #endif // LLAMA_USE_LLGUIDANCE
@@ -260,7 +270,16 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         }
     }
     if (!grmr && !grammar_str.empty()) {
-        throw std::runtime_error("failed to parse grammar");
+        // Reachable at all only because llama_sampler_init_llg now returns
+        // nullptr on a failed build. It used to hand back a sampler that
+        // constrained nothing, so this line could never run and a request with
+        // an unusable grammar succeeded, unconstrained, with prose.
+        //
+        // Carry llguidance's diagnostic through: the grammar came from the
+        // caller, the caller gets a 400 for it, and "failed to parse grammar"
+        // names neither the line nor the rule that was wrong.
+        std::string why = llama_sampler_llg_last_error();
+        throw std::invalid_argument("failed to parse grammar" + (why.empty() ? "" : ": " + why));
     }
 
     // Compute prefill tokens from the generation prompt

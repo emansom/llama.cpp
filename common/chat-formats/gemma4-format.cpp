@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cctype>
 #include <string>
@@ -60,6 +61,20 @@ void common_chat_gemma4_tracker::advance(const common_peg_ast_node & node) {
         }
         return;
     }
+    // The argument region. Matched by RULE rather than tag because the dict
+    // subtree is deliberately untagged -- the decoder assembles it in one walk
+    // (gemma4_to_json) instead of emitting per-argument events.
+    //
+    // This transition did not exist. IN_TOOL_ARGS was declared in
+    // gemma4_state_rules and returned a production list from
+    // expected_productions(), and nothing ever put the tracker in it: a dead
+    // state that read as a live one. The startup contract check now compares
+    // reachable_states() against the registry in both directions so the pair
+    // cannot drift apart again.
+    if (normalize_rule(node.rule) == "gemma4-dict") {
+        state_ = common_chat_format_state::IN_TOOL_ARGS;
+        return;
+    }
     if (tag_is(node, common_chat_peg_builder::REASONING)) {
         state_ = common_chat_format_state::IN_REASONING;
         return;
@@ -68,6 +83,21 @@ void common_chat_gemma4_tracker::advance(const common_peg_ast_node & node) {
         state_ = common_chat_format_state::IN_CONTENT;
         return;
     }
+}
+
+std::vector<common_chat_format_state> common_chat_gemma4_tracker::reachable_states() {
+    // Exactly the states advance() above can assign, plus the ones a prompt walk
+    // can seed(). Keep this in step with advance() -- the startup contract check
+    // compares it against gemma4_state_rules in BOTH directions, so a state
+    // added here without a rule, or a rule left behind for a state removed here,
+    // stops the server rather than sitting in the registry unnoticed.
+    return {
+        common_chat_format_state::IN_CONTENT,
+        common_chat_format_state::IN_REASONING,
+        common_chat_format_state::IN_TOOL_CALL,
+        common_chat_format_state::IN_TOOL_NAME,
+        common_chat_format_state::IN_TOOL_ARGS,
+    };
 }
 
 std::vector<std::string> common_chat_gemma4_tracker::expected_productions() const {
@@ -379,23 +409,25 @@ const common_chat_format_state_rules gemma4_state_rules = {
 struct gemma4_entry_root {
     const char * any;              // tool_choice auto/none, no response_format
     const char * tool_required;    // tool_choice: required
-    const char * schema_required;  // response_format asked for a schema
+    const char * schema_required;  // response_format asked for a JSON schema
+    const char * user_grammar;     // response_format asked for a Lark/GBNF grammar
 };
 
 static const std::unordered_map<common_chat_format_state, gemma4_entry_root> gemma4_entry_roots = {
     // Fresh model turn: the model may open with a thought, then content.
     { common_chat_format_state::INITIAL,
-      { "turn_start", "turn_start_tool_call", "turn_start_response_format" } },
+      { "turn_start", "turn_start_tool_call", "turn_start_response_format", "turn_start_user_grammar" } },
     { common_chat_format_state::IN_GENERATION_PROMPT,
-      { "turn_start", "turn_start_tool_call", "turn_start_response_format" } },
+      { "turn_start", "turn_start_tool_call", "turn_start_response_format", "turn_start_user_grammar" } },
     // Mid-content: either a plain content continuation, or the empty-thought
     // prefill, which opened AND closed a thought so the model resumes in content.
     { common_chat_format_state::IN_CONTENT,
-      { "turn_start", "turn_start_tool_call", "turn_start_response_format" } },
+      { "turn_start", "turn_start_tool_call", "turn_start_response_format", "turn_start_user_grammar" } },
     // Mid-thought: the delta begins inside `reasoning`, with the opener already
     // in the prompt and the `<channel|>` closer still to come.
     { common_chat_format_state::IN_REASONING,
-      { "resume_reasoning", "resume_reasoning_tool_call", "resume_reasoning_response_format" } },
+      { "resume_reasoning", "resume_reasoning_tool_call", "resume_reasoning_response_format",
+        "resume_reasoning_user_grammar" } },
 };
 
 std::string common_chat_gemma4_entry_root(common_chat_format_state state,
@@ -410,9 +442,87 @@ std::string common_chat_gemma4_entry_root(common_chat_format_state state,
     switch (demand) {
         case COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL:       return it->second.tool_required;
         case COMMON_CHAT_GEMMA4_ENTRY_RESPONSE_FORMAT: return it->second.schema_required;
+        case COMMON_CHAT_GEMMA4_ENTRY_USER_GRAMMAR:    return it->second.user_grammar;
         case COMMON_CHAT_GEMMA4_ENTRY_ANY:             break;
     }
     return it->second.any;
+}
+
+std::vector<std::string> common_chat_gemma4_entry_roots_all() {
+    std::vector<std::string> out;
+    for (const auto & [state, roots] : gemma4_entry_roots) {
+        (void) state;
+        out.emplace_back(roots.any);
+        out.emplace_back(roots.tool_required);
+        out.emplace_back(roots.schema_required);
+        out.emplace_back(roots.user_grammar);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// The state<->rule contract, checked rather than assumed
+// ──────────────────────────────────────────────────────────────────────────────
+
+void common_chat_gemma4_check_state_rule_contract(const common_peg_arena & arena) {
+    std::vector<std::string> broken;
+
+    // (1) Every generation entry the dispatcher can select must be a rule the
+    //     grammar defines. This is the one that fails OPEN: the entry is
+    //     composed as `start: <name>`, and llguidance answers a `<name>` it
+    //     cannot resolve by sampling with no constraint at all.
+    //
+    //     Deriving a variant's name by appending a suffix would make this
+    //     unnecessary and unreliable at once -- the composed name would always
+    //     look plausible. The table names all four explicitly; this checks all
+    //     four exist.
+    for (const auto & rule : common_chat_gemma4_entry_roots_all()) {
+        if (!arena.has_rule(normalize_rule(rule))) {
+            broken.push_back("entry root '" + rule + "' is selectable but the grammar defines no such rule");
+        }
+    }
+
+    // (2) Every rule the state registry names must exist. The tracker is the
+    //     mirror of llguidance's rule path, so a name here the grammar does not
+    //     define means the mirror has drifted off the grammar.
+    for (const auto & rule : gemma4_state_rules.missing_in(arena)) {
+        broken.push_back("state rule '" + rule + "' is declared but the grammar defines no such rule");
+    }
+
+    // (3) Drift in the other direction: a state the tracker can actually enter,
+    //     with no rule declared for it. IN_TOOL_ARGS was the reverse of this --
+    //     declared in the registry, never entered -- and went unnoticed for the
+    //     same reason, that nothing compared the two lists.
+    const auto reachable = common_chat_gemma4_tracker::reachable_states();
+    for (const auto state : reachable) {
+        if (gemma4_state_rules.rule_for(state).empty()) {
+            broken.push_back("state " + std::to_string(static_cast<int>(state)) +
+                             " is reachable in the tracker but declares no grammar rule");
+        }
+    }
+
+    // (4) And a state the registry names that the tracker can never enter. This
+    //     is the P2-13 shape exactly: IN_TOOL_ARGS was declared here, named a
+    //     rule that does exist (so (2) was happy), and advance() never assigned
+    //     it -- so the registry described an FSM the code did not implement.
+    //     Only comparing the two lists finds that.
+    for (const auto & [state, rule] : gemma4_state_rules.by_state) {
+        if (std::find(reachable.begin(), reachable.end(), state) == reachable.end()) {
+            broken.push_back("state " + std::to_string(static_cast<int>(state)) + " declares rule '" + rule +
+                             "' but the tracker can never enter it");
+        }
+    }
+
+    if (!broken.empty()) {
+        std::string msg = "gemma4: the FSM state<->grammar rule contract is broken "
+                          "(see docs/fork/ARCHITECTURE.md):";
+        for (const auto & b : broken) {
+            msg += "\n  - " + b;
+        }
+        throw std::runtime_error(msg);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

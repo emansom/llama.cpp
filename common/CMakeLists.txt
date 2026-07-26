@@ -91,6 +91,8 @@ add_library(${TARGET}
     http.h
     imatrix-loader.cpp
     imatrix-loader.h
+    gbnf-to-lark.cpp
+    gbnf-to-lark.h
     gbnf-to-peg.cpp
     gbnf-to-peg.h
     json-schema-to-grammar.cpp

@@ -3,9 +3,14 @@
 #endif
 
 #include "chat.h"
+#include "chat-formats/gemma4-format.h"
+#include "lark-to-peg.h"
 #include "sampling.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cassert>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1202,6 +1207,11 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     // per-tool alternation is exercised in test_gemma4_tool_schema, through the
     // production path rather than by retyping the emitter's output here.
     substitute("{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
+    // The no-caller-grammar form. With one supplied it becomes a subgrammar
+    // reference, which needs the grammar LIST encoding and so cannot be
+    // compiled as a bare Lark string; test_gemma4_user_grammar covers that
+    // through the production path.
+    substitute("{{USER_GRAMMAR}}", "content");
 
     // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
     // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the
@@ -1399,7 +1409,29 @@ struct mask_step {
     size_t                   n_allowed;
     bool                     text_allowed;  // could the model have written prose instead?
     std::vector<std::string> allowed;       // the whole legal set, when it is small
+    // Which of the format's markers survived the mask here. Counting tokens says
+    // how MANY were legal; this says WHICH, and the official ordering is a claim
+    // about which marker may follow which -- so it is the only form of the
+    // question that can check conformance against the spec.
+    std::set<std::string>    allowed_markers;
 };
+
+// Every control token Google's prompt-formatting page names, by the spelling the
+// grammar uses. Built from the tokenizer, so a marker that is not one token in
+// this vocabulary fails here rather than silently testing as prose.
+static std::vector<std::pair<std::string, llama_token>> marker_probes() {
+    static const char * const kMarkers[] = {
+        "<|turn>", "<turn|>", "<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>",
+        "<|tool_response>", "<tool_response|>", "<|tool>", "<tool|>", "<|\"|>", "<|think|>",
+    };
+    std::vector<std::pair<std::string, llama_token>> out;
+    for (const char * m : kMarkers) {
+        auto ids = common_tokenize(vocab, m, false, true);
+        assert(ids.size() == 1 && "a Gemma 4 control token must be exactly one token");
+        out.emplace_back(m, ids[0]);
+    }
+    return out;
+}
 
 // Above this, the set is a free-text run and listing it is noise.
 static constexpr size_t kSmallMaskLimit = 8;
@@ -1407,7 +1439,8 @@ static constexpr size_t kSmallMaskLimit = 8;
 static std::vector<mask_step> walk_mask(const std::string &              input,
                                         llama_sampler *                  grammar,
                                         const std::vector<llama_token> & text_probes,
-                                        bool *                           eos_allowed_at_end) {
+                                        bool *                           eos_allowed_at_end,
+                                        const std::vector<std::pair<std::string, llama_token>> & markers = {}) {
     llama_sampler_reset(grammar);
     // parse_special=true: this stands in for tokens a model emitted, not for a
     // spelling a user typed. See the note on match_string.
@@ -1441,6 +1474,11 @@ static std::vector<mask_step> walk_mask(const std::string &              input,
             if (cur[p].logit >= 0.0f) {
                 s.text_allowed = true;
                 break;
+            }
+        }
+        for (const auto & [name, id] : markers) {
+            if (cur[id].logit >= 0.0f) {
+                s.allowed_markers.insert(name);
             }
         }
         if (s.n_allowed <= kSmallMaskLimit) {
@@ -1596,6 +1634,575 @@ static void test_gemma4_mask_walk() {
     fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E mask walk\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Conformance: the mask at EVERY FSM state, against the documented ordering
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// test_gemma4_mask_walk above proves the sampler steers one representative
+// generation. It cannot answer the question that matters -- whether what the
+// mask permits is what the FORMAT permits, at every position, in every state
+// the FSM can start generation from.
+//
+// The ordering being checked is Google's, from the Gemma 4 prompt-formatting
+// page (ai.google.dev/gemma/docs/core/prompt-formatting-gemma4):
+//
+//   <|turn>model -> <|channel>thought -> <channel|> -> <|tool_call>call:
+//                -> <tool_call|> -> <|tool_response>response: -> <tool_response|>
+//                -> final text -> <turn|>
+//
+// Each case below states, at a named point in a generation, which control tokens
+// MUST be legal and which MUST NOT. A "must not" is the half a conformance run
+// can never see: a model that simply does not emit `<|channel>` inside a thought
+// looks identical to a grammar that forbids it.
+
+struct fsm_checkpoint {
+    std::string               after;        // the generation prefix already accepted
+    std::vector<const char *> must_allow;   // markers legal at this point
+    std::vector<const char *> must_deny;    // markers the format does not permit here
+    int                       prose = -1;   // 1 = free text legal, 0 = masked, -1 = don't care
+};
+
+struct fsm_case {
+    const char *                entry_root;  // the FSM state's generation rule
+    const char *                label;
+    std::string                 generation;
+    std::vector<fsm_checkpoint> checkpoints;
+};
+
+// Compile a grammar rooted at one entry rule, with the per-request placeholders
+// filled the way production fills them for a request with no tools and no
+// caller grammar.
+static std::string gemma4_grammar_at(const std::string & base, const std::string & root) {
+    auto sub = [](std::string s, const std::string & ph, const std::string & with) {
+        for (size_t at = s.find(ph); at != std::string::npos; at = s.find(ph, at + with.size())) {
+            s.replace(at, ph.size(), with);
+        }
+        return s;
+    };
+    std::string g = base;
+    g = sub(g, "{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
+    g = sub(g, "{{RESPONSE_SCHEMA}}", "%json {\"type\": \"object\"}");
+    g = sub(g, "{{USER_GRAMMAR}}", "content");
+    return common_chat_grammar_set_entry(g, root);
+}
+
+static void run_fsm_case(const std::string & base, const fsm_case & tc,
+                         const std::vector<std::pair<std::string, llama_token>> & markers,
+                         const std::vector<llama_token> & text_probes) {
+    const std::string grammar = gemma4_grammar_at(base, tc.entry_root);
+    auto *            smpl    = llama_sampler_init_llg(vocab, "lark", grammar.c_str());
+    // Null here means the grammar did not compile. That used to be survivable --
+    // the sampler came back non-null and constrained nothing -- so this assert
+    // is load-bearing, not defensive.
+    assert(smpl != nullptr && "entry grammar failed to compile");
+
+    const auto all = common_tokenize(vocab, tc.generation, false, true);
+    auto       steps = walk_mask(tc.generation, smpl, text_probes, nullptr, markers);
+    assert(steps.size() == all.size());
+
+    fprintf(stderr, "\n  %s  (start: %s)\n", tc.label, tc.entry_root);
+    for (const auto & cp : tc.checkpoints) {
+        const std::string & prefix = cp.after;
+        const auto          pre    = common_tokenize(vocab, prefix, false, true);
+        // The checkpoint is located by tokenizing its prefix on its own, so it
+        // must actually BE a prefix of the whole generation's tokenization --
+        // otherwise the step index would silently point somewhere else.
+        assert(pre.size() <= all.size());
+        for (size_t i = 0; i < pre.size(); i++) {
+            assert(pre[i] == all[i] && "checkpoint prefix does not tokenize as a prefix");
+        }
+        const auto & s = steps[pre.size()];
+
+        std::string shown;
+        for (const auto & m : s.allowed_markers) { shown += (shown.empty() ? "" : " ") + m; }
+        fprintf(stderr, "    after %-46s prose=%-6s markers: %s\n",
+                ("\"" + prefix + "\"").substr(0, 46).c_str(),
+                s.text_allowed ? "OPEN" : "masked", shown.empty() ? "(none)" : shown.c_str());
+
+        for (const char * m : cp.must_allow) {
+            if (s.allowed_markers.count(m) == 0) {
+                fprintf(stderr, "    FAIL: %s must be legal after \"%s\" but is masked\n", m, prefix.c_str());
+                assert(false);
+            }
+        }
+        for (const char * m : cp.must_deny) {
+            if (s.allowed_markers.count(m) != 0) {
+                fprintf(stderr, "    FAIL: %s must NOT be legal after \"%s\" but the mask allows it\n",
+                        m, prefix.c_str());
+                assert(false);
+            }
+        }
+        if (cp.prose >= 0 && s.text_allowed != (cp.prose == 1)) {
+            fprintf(stderr, "    FAIL: prose should be %s after \"%s\"\n",
+                    cp.prose == 1 ? "legal" : "masked", prefix.c_str());
+            assert(false);
+        }
+    }
+    llama_sampler_free(smpl);
+}
+
+static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
+    common_chat_grammar_init(grammars_dir);
+    const std::string base = common_chat_grammar_get("gemma4");
+    assert(!base.empty());
+
+    const auto markers = marker_probes();
+
+    std::vector<llama_token> text_probes;
+    for (const char * w : { "The", " the", "Hello", " I", "Sure", " a" }) {
+        auto ids = common_tokenize(vocab, w, false, false);
+        if (!ids.empty()) { text_probes.push_back(ids[0]); }
+    }
+    assert(!text_probes.empty());
+
+    const std::string TH_OPEN  = "<|channel>thought";
+    const std::string TH_CLOSE = "<channel|>";
+    const std::string CALL     = "<|tool_call>call:";
+    const std::string CALL_END = "<tool_call|>";
+    const std::string HANDOVER = "<|tool_response>";
+
+    const std::vector<fsm_case> cases = {
+        // ── INITIAL / IN_GENERATION_PROMPT / IN_CONTENT, no demand ────────────
+        {
+            "turn_start", "fresh model turn, no demand",
+            TH_OPEN + "\nthinking" + TH_CLOSE + "Hello." + "<turn|>",
+            {
+                // A turn may open with a thought, open with a call, answer
+                // directly, or be empty -- all four are the format's, and all
+                // four must be reachable.
+                { "", { "<|channel>", "<|tool_call>", "<turn|>" },
+                      { "<channel|>", "<tool_call|>", "<|tool_response>", "<tool_response|>",
+                        "<|turn>", "<|tool>", "<tool|>" }, 1 },
+                // A channel's KIND is a production, so `<|channel>` alone leaves
+                // only the word "thought" -- no marker may follow it directly.
+                { TH_OPEN.substr(0, 10), { }, { "<channel|>", "<|channel>", "<|tool_call>", "<turn|>" }, 0 },
+                // Inside a thought: prose, and the closer. NOT a second thought,
+                // and NOT a tool call -- the ordering puts the call after
+                // `<channel|>`, never inside the channel.
+                { TH_OPEN, { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>", "<|tool_response>" }, 1 },
+                // Back in content after the thought closes.
+                { TH_OPEN + "\nthinking" + TH_CLOSE,
+                  { "<|tool_call>", "<turn|>", "<|channel>" },
+                  { "<channel|>", "<tool_call|>", "<|tool_response>", "<|turn>" }, 1 },
+                // And the model can end its own turn from content.
+                { TH_OPEN + "\nthinking" + TH_CLOSE + "Hello.",
+                  { "<turn|>", "<|tool_call>" }, { "<channel|>", "<tool_call|>", "<|turn>" }, 1 },
+            },
+        },
+        // ── the tool-call ordering, exactly as documented ─────────────────────
+        {
+            "turn_start", "tool call: call -> args -> close -> hand-over",
+            CALL + "get_time{city:<|\"|>London<|\"|>}" + CALL_END + HANDOVER,
+            {
+                // Having opened a call, the directive is the only continuation:
+                // no prose, and no marker at all.
+                { "<|tool_call>", { }, { "<|tool_call>", "<tool_call|>", "<|channel>", "<channel|>",
+                                         "<turn|>", "<|tool_response>", "<|\"|>" }, 0 },
+                // A string argument is delimited by <|"|>, and inside it the
+                // body is deliberately unrestricted -- a value is arbitrary text.
+                { CALL + "get_time{city:", { "<|\"|>" }, { "<tool_call|>", "<|tool_response>", "<turn|>" } },
+                // The hand-over is not reachable until the call has closed.
+                { CALL + "get_time{city:<|\"|>London<|\"|>}",
+                  { "<tool_call|>" }, { "<|tool_response>", "<turn|>", "<|channel>" }, 0 },
+                // Closed: another call, or the hand-over. `<turn|>` is NOT one of
+                // them -- a calling turn hands over, it does not close.
+                { CALL + "get_time{city:<|\"|>London<|\"|>}" + CALL_END,
+                  { "<|tool_call>", "<|tool_response>" }, { "<turn|>", "<|channel>", "<tool_call|>" }, 0 },
+            },
+        },
+        // ── IN_REASONING: generation resumes inside a thought already opened ──
+        {
+            "resume_reasoning", "resume inside an open thought",
+            "still thinking" + TH_CLOSE + "Answer." + "<turn|>",
+            {
+                // The opener is already in the prompt. Emitting another would be
+                // a thought inside a thought; this entry exists precisely so it
+                // is unrepresentable.
+                { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>", "<|tool_response>" }, 1 },
+                { "still thinking", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
+                { "still thinking" + TH_CLOSE, { "<turn|>", "<|tool_call>", "<|channel>" },
+                  { "<channel|>", "<|turn>" }, 1 },
+            },
+        },
+        // ── tool_choice: "required" ───────────────────────────────────────────
+        {
+            "turn_start_tool_call", "tool_choice=required leaves no way not to call",
+            TH_OPEN + "\npicking" + TH_CLOSE + CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                // Think first, or call. Answering is not on the menu, and
+                // neither is ending the turn.
+                { "", { "<|channel>", "<|tool_call>" }, { "<turn|>", "<channel|>", "<|tool_response>" }, 0 },
+                // Even after the thought closes, the call is still owed.
+                { TH_OPEN + "\npicking" + TH_CLOSE, { "<|tool_call>" },
+                  { "<turn|>", "<|channel>", "<|tool_response>" }, 0 },
+            },
+        },
+        // ── response_format: json_schema ──────────────────────────────────────
+        {
+            "turn_start_response_format", "a schema demand cannot be answered in prose",
+            "```json\n{}\n```",
+            {
+                // The fence, or a thought first. Not prose, which is the whole
+                // difference between a demand and a suggestion.
+                { "", { "<|channel>" }, { "<turn|>", "<|tool_call>", "<channel|>" }, 0 },
+            },
+        },
+        // ── response_format: a caller's own grammar ───────────────────────────
+        {
+            "turn_start_user_grammar", "a caller grammar stands where content would",
+            // {{USER_GRAMMAR}} is `content` here: with a real caller grammar the
+            // production is a subgrammar reference, which needs the grammar-list
+            // encoding. test_gemma4_user_grammar drives that one live.
+            "anything at all<turn|>",
+            {
+                { "", { "<|channel>", "<turn|>" }, { "<channel|>", "<|tool_call>", "<|tool_response>" }, 1 },
+            },
+        },
+        // ── and every demand again from the OTHER state ───────────────────────
+        // The resume entries are where getting this wrong is invisible: the
+        // opener is already in the prompt, so a grammar that still expects one
+        // reads the rest of the thought as content and loses the reasoning.
+        {
+            "resume_reasoning_tool_call", "resumed mid-thought, still owes a call",
+            "deciding" + TH_CLOSE + CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
+                // Thought closed, and the only way on is the call.
+                { "deciding" + TH_CLOSE, { "<|tool_call>" }, { "<turn|>", "<|channel>", "<channel|>" }, 0 },
+            },
+        },
+        {
+            "resume_reasoning_response_format", "resumed mid-thought, still owes a schema",
+            "deciding" + TH_CLOSE + "```json\n{}\n```",
+            {
+                { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
+                { "deciding" + TH_CLOSE, { }, { "<turn|>", "<|tool_call>", "<|channel>", "<channel|>" }, 0 },
+            },
+        },
+        {
+            "resume_reasoning_user_grammar", "resumed mid-thought, then the caller's grammar",
+            "deciding" + TH_CLOSE + "anything<turn|>",
+            {
+                { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
+                { "deciding" + TH_CLOSE, { "<turn|>" }, { "<channel|>", "<|tool_call>" }, 1 },
+            },
+        },
+    };
+
+    for (const auto & tc : cases) {
+        run_fsm_case(base, tc, markers, text_probes);
+    }
+
+    // EVERY entry root the registry can hand out has a case above.
+    //
+    // Without this the suite covers whichever roots someone remembered to write
+    // a case for, and a fifth demand added later would be untested while the
+    // test still reported "FSM conformance: N cases". The registry enumerates
+    // itself (common_chat_gemma4_entry_roots_all), so the coverage check cannot
+    // go stale either.
+    std::set<std::string> covered;
+    for (const auto & tc : cases) {
+        covered.insert(tc.entry_root);
+    }
+    for (const auto & root : common_chat_gemma4_entry_roots_all()) {
+        if (covered.count(root) == 0) {
+            fprintf(stderr, "    FAIL: entry root '%s' is selectable but no conformance case walks it\n",
+                    root.c_str());
+            assert(false);
+        }
+    }
+    fprintf(stderr, "\n  \xE2\x9C\x85\xEF\xB8\x8E FSM conformance: %zu cases over all %zu entry roots\n",
+            cases.size(), common_chat_gemma4_entry_roots_all().size());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// response_format: lark_grammar / gbnf_grammar
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Through the PRODUCTION path -- common_chat_templates_apply -- because what is
+// under test is the composition, not a grammar string retyped here. The result
+// is an llguidance grammar LIST, so this is also the only test that exercises
+// that encoding end to end.
+//
+// The two syntaxes are asserted to produce the SAME mask, which is what makes
+// the GBNF converter checkable: it is a port of llguidance's own script, and
+// "the converted grammar constrains identically" is the property that matters
+// rather than the text it emits.
+static void test_gemma4_user_grammar() {
+    const auto markers = marker_probes();
+    std::vector<llama_token> text_probes;
+    for (const char * w : { "The", " the", "Hello", " I", "Sure", " a" }) {
+        auto ids = common_tokenize(vocab, w, false, false);
+        if (!ids.empty()) { text_probes.push_back(ids[0]); }
+    }
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "is the sky blue?";
+
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+
+    auto compile_for = [&](const std::string & grammar) {
+        common_chat_templates_inputs inputs;
+        inputs.messages              = { user };
+        inputs.grammar               = grammar;
+        inputs.add_generation_prompt = true;
+        inputs.enable_thinking       = false;
+        auto params = common_chat_templates_apply(tmpls.get(), inputs);
+        // The composed artefact is a grammar LIST, not a bare Lark string: the
+        // caller's grammar is the second entry, referenced by name from the
+        // first. One matcher comes out of it, which is the point.
+        assert(params.grammar.compare(0, 12, "{\"grammars\":") == 0);
+        assert(params.grammar.find("response_grammar") != std::string::npos);
+        auto * smpl = llama_sampler_init_llg(vocab, "llguidance", params.grammar.c_str());
+        assert(smpl != nullptr && "composed grammar list failed to compile");
+        return smpl;
+    };
+
+    // The same language written both ways, chosen to cover the parts of the
+    // conversion that are not a transliteration: character classes become
+    // regexes, `{m,n}` repetition carries over, groups nest, `root` is renamed
+    // to `start`.
+    const struct {
+        const char * label;
+        const char * lark;
+        const char * gbnf;
+        const char * generation;
+    } pairs[] = {
+        { "literal alternation",
+          "%llguidance {}\nstart: \"yes\" | \"no\"\n",
+          "root ::= \"yes\" | \"no\"\n",
+          "yes<turn|>" },
+        { "character class + repetition",
+          "%llguidance {}\nstart: /[a-z]/{2,4} \"!\"\n",
+          "root ::= [a-z]{2,4} \"!\"\n",
+          "abc!<turn|>" },
+        { "nested group, referenced rule",
+          "%llguidance {}\nstart: \"(\" item (\",\" item)* \")\"\nitem: /[0-9]/+\n",
+          "root ::= \"(\" item (\",\" item)* \")\"\nitem ::= [0-9]+\n",
+          "(1,22)<turn|>" },
+    };
+
+    for (const auto & p : pairs) {
+        auto * lark = compile_for(p.lark);
+        auto * gbnf = compile_for(p.gbnf);
+
+        for (auto * smpl : { lark, gbnf }) {
+            auto steps = walk_mask(p.generation, smpl, text_probes, nullptr, markers);
+            assert(!steps.empty());
+
+            // The caller stated the answer's shape, so prose is not an answer and
+            // the mask has to say so. This is the whole difference between a
+            // grammar that is enforced and one that was merely sent.
+            assert(!steps[0].text_allowed);
+            // A thought is still allowed first: the caller constrained the
+            // ANSWER, not the reasoning channel.
+            assert(steps[0].allowed_markers.count("<|channel>") == 1);
+            // ...and cannot end the turn before giving one.
+            assert(steps[0].allowed_markers.count("<turn|>") == 0);
+
+            // Having answered, closing the turn is all that is left.
+            const auto & last = steps[steps.size() - 1];
+            assert(last.piece == "<turn|>");
+            assert(!last.text_allowed);
+            assert(last.allowed_markers.count("<turn|>") == 1);
+        }
+
+        // Identical masks, step for step. This is the converter's real
+        // assertion: not that it emits particular text, but that the grammar it
+        // produces constrains the model the same way the Lark original does.
+        auto a = walk_mask(p.generation, lark, text_probes, nullptr, markers);
+        auto b = walk_mask(p.generation, gbnf, text_probes, nullptr, markers);
+        assert(a.size() == b.size());
+        for (size_t i = 0; i < a.size(); i++) {
+            if (a[i].n_allowed != b[i].n_allowed || a[i].allowed_markers != b[i].allowed_markers) {
+                fprintf(stderr, "    FAIL: %s diverges at step %zu (lark %zu allowed, gbnf %zu)\n",
+                        p.label, i, a[i].n_allowed, b[i].n_allowed);
+                assert(false);
+            }
+        }
+        fprintf(stderr, "    %-32s lark == gbnf across %zu steps\n", p.label, a.size());
+
+        llama_sampler_free(lark);
+        llama_sampler_free(gbnf);
+    }
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response_format lark_grammar/gbnf_grammar: same mask, prose masked\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The entry rule is chosen BY the FSM state, not by the request alone
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The conformance walk above shows each entry rule masks correctly. That is only
+// half the claim: the other half is that the rule generation actually starts at
+// is the one the state the RENDERED PROMPT left the model in calls for.
+//
+// It is worth pinning because it has already been wrong in the way that does not
+// show. Generation resuming inside a prefilled thought was compiled at
+// `turn_start`, which expects a `<|channel>thought` opener the delta does not
+// have -- so the model was free to open a second thought inside the first, or to
+// drop into content leaving the first unclosed, and only extraction was any the
+// wiser.
+static std::string entry_root_of(const std::string & grammar) {
+    // With a caller grammar composed in, this is an llguidance grammar LIST and
+    // the format grammar is its first entry. Decoding it rather than scanning
+    // the raw string matters: the caller's grammar has a `start:` rule of its
+    // own, and a scan finds that one.
+    std::string lark = grammar;
+    if (grammar.compare(0, 12, "{\"grammars\":") == 0) {
+        lark = nlohmann::json::parse(grammar).at("grammars").at(0).at("lark_grammar").get<std::string>();
+    }
+    // `start: X` is appended last by common_chat_grammar_set_entry.
+    const size_t at = lark.rfind("\nstart: ");
+    if (at == std::string::npos) {
+        return {};
+    }
+    size_t      i = at + strlen("\nstart: ");
+    std::string name;
+    while (i < lark.size() && (isalnum((unsigned char) lark[i]) || lark[i] == '_')) {
+        name += lark[i++];
+    }
+    return name;
+}
+
+static void test_gemma4_entry_selection() {
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "hello";
+
+    common_chat_tool get_time{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the time",
+        /* .parameters = */ R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})",
+    };
+
+    // A prefilled, still-open thought. The renderer leaves the model mid-
+    // `reasoning`, which is the one state whose entry rules differ.
+    common_chat_msg half_thought;
+    half_thought.role              = "assistant";
+    half_thought.reasoning_content = "let me think";
+
+    struct sel_case {
+        const char *                 label;
+        std::vector<common_chat_msg> messages;
+        common_chat_continuation     continuation;
+        bool                         generation_prompt;
+        std::vector<common_chat_tool> tools;
+        common_chat_tool_choice      tool_choice;
+        std::string                  json_schema;
+        std::string                  grammar;
+        const char *                 expect_root;
+    };
+
+    const std::vector<sel_case> cases = {
+        { "fresh turn, no demand",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
+          "turn_start" },
+        { "fresh turn, tool_choice=required",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, { get_time }, COMMON_CHAT_TOOL_CHOICE_REQUIRED, "", "",
+          "turn_start_tool_call" },
+        { "fresh turn, response_format json_schema",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO,
+          R"({"type":"object"})", "",
+          "turn_start_response_format" },
+        { "fresh turn, response_format lark_grammar",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO, "",
+          "%llguidance {}\nstart: \"yes\"\n",
+          "turn_start_user_grammar" },
+        // The state changes and every root changes with it -- same four demands,
+        // four different rules, decided by where the prompt stopped.
+        { "resumed mid-thought, no demand",
+          { user, half_thought }, COMMON_CHAT_CONTINUATION_REASONING, false, {},
+          COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
+          "resume_reasoning" },
+        { "resumed mid-thought, tool_choice=required",
+          { user, half_thought }, COMMON_CHAT_CONTINUATION_REASONING, false, { get_time },
+          COMMON_CHAT_TOOL_CHOICE_REQUIRED, "", "",
+          "resume_reasoning_tool_call" },
+        { "resumed mid-thought, response_format json_schema",
+          { user, half_thought }, COMMON_CHAT_CONTINUATION_REASONING, false, {},
+          COMMON_CHAT_TOOL_CHOICE_AUTO, R"({"type":"object"})", "",
+          "resume_reasoning_response_format" },
+        { "resumed mid-thought, response_format lark_grammar",
+          { user, half_thought }, COMMON_CHAT_CONTINUATION_REASONING, false, {},
+          COMMON_CHAT_TOOL_CHOICE_AUTO, "", "%llguidance {}\nstart: \"yes\"\n",
+          "resume_reasoning_user_grammar" },
+    };
+
+    fprintf(stderr, "\n  entry rule selected from the FSM state:\n");
+    for (const auto & tc : cases) {
+        common_chat_templates_inputs inputs;
+        inputs.messages              = tc.messages;
+        inputs.tools                 = tc.tools;
+        inputs.tool_choice           = tc.tool_choice;
+        inputs.json_schema           = tc.json_schema;
+        inputs.grammar               = tc.grammar;
+        inputs.continue_final_message = tc.continuation;
+        inputs.add_generation_prompt  = tc.generation_prompt;
+        inputs.enable_thinking        = true;
+
+        auto        params = common_chat_templates_apply(tmpls.get(), inputs);
+        const auto  root   = entry_root_of(params.grammar);
+        fprintf(stderr, "    %-46s -> %s\n", tc.label, root.c_str());
+        if (root != tc.expect_root) {
+            fprintf(stderr, "    FAIL: expected %s\n", tc.expect_root);
+            assert(false);
+        }
+    }
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E entry selection: %zu cases\n", cases.size());
+}
+
+// The startup contract check must actually FAIL when the contract is broken.
+//
+// A check that has only ever been observed passing is indistinguishable from one
+// that always passes -- and this one guards a failure mode (an entry rule that
+// does not exist, so llguidance constrains nothing) whose whole character is
+// that it looks fine.
+static void test_gemma4_contract_check_catches_drift(const std::string & grammars_dir) {
+    common_chat_grammar_init(grammars_dir);
+    std::string base = common_chat_grammar_get("gemma4");
+    assert(!base.empty());
+
+    auto sub = [](std::string s, const std::string & ph, const std::string & with) {
+        for (size_t at = s.find(ph); at != std::string::npos; at = s.find(ph, at + with.size())) {
+            s.replace(at, ph.size(), with);
+        }
+        return s;
+    };
+    // The PEG spellings, which are what chat_grammar_to_peg substitutes -- the
+    // transpiler has no `%json`, and the schema was already enforced at sampling
+    // time anyway.
+    base = sub(base, "{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
+    base = sub(base, "{{RESPONSE_SCHEMA}}", "__JSON_VALUE__");
+    base = sub(base, "{{USER_GRAMMAR}}", "content");
+
+    // Intact: the contract holds. (common_chat_grammar_init already asserted
+    // this at startup; repeating it here is what makes the negative case below
+    // meaningful rather than a check of nothing.)
+    common_chat_gemma4_check_state_rule_contract(common_lark_to_peg(base, "conversation"));
+
+    // Now remove one selectable entry rule, exactly the way it would go missing:
+    // somebody renames or deletes a rule and the table still names it.
+    const std::string victim = "turn_start_user_grammar:";
+    const size_t      at     = base.find("\n" + victim);
+    assert(at != std::string::npos);
+    const size_t eol = base.find('\n', at + 1);
+    std::string  broken = base.substr(0, at) + base.substr(eol);
+
+    bool threw = false;
+    try {
+        common_chat_gemma4_check_state_rule_contract(common_lark_to_peg(broken, "conversation"));
+    } catch (const std::exception & e) {
+        threw = true;
+        // And it must SAY which rule, or the message is not actionable.
+        assert(std::string(e.what()).find("turn_start_user_grammar") != std::string::npos);
+    }
+    assert(threw && "the state<->rule contract check did not notice a missing entry rule");
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E state<->rule contract: holds, and fails when broken\n");
+}
+
 // Isolation harness: compile ONE grammar file and report. Driven by an env var
 // so a grammar can be bisected from the shell without recompiling C++.
 //   LLG_GRAMMAR_FILE=/path/to.lark ./test-grammar-llguidance <vocab>
@@ -1716,6 +2323,10 @@ int main(int argc, const char ** argv) {
         test_gemma4_chat_grammar(argv[2]);
         test_gemma4_tool_schema();
         test_gemma4_mask_walk();
+        test_gemma4_fsm_conformance(argv[2]);
+        test_gemma4_user_grammar();
+        test_gemma4_entry_selection();
+        test_gemma4_contract_check_catches_drift(argv[2]);
         llama_free(ctx);
         llama_model_free(model);
         fprintf(stdout, "All tests passed.\n");

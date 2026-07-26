@@ -8,6 +8,7 @@
 #include "peg-parser.h"
 
 #include <string>
+#include <vector>
 
 #include <unordered_set>
 
@@ -30,6 +31,15 @@ class common_chat_gemma4_tracker : public common_chat_format_tracker {
   public:
     void advance(const common_peg_ast_node & node) override;
     std::vector<std::string> expected_productions() const override;
+
+    // The states `advance()` can actually put this tracker in.
+    //
+    // Hand-maintained beside advance(), and checked against the state->rule
+    // registry at startup, because the two drifting apart is silent: a state
+    // reached with no rule declared for it, or a rule declared for a state
+    // nothing reaches, both look fine until something reads the registry and
+    // believes it.
+    static std::vector<common_chat_format_state> reachable_states();
 };
 
 class common_chat_gemma4_decoder : public common_chat_format_decoder {
@@ -70,16 +80,44 @@ extern const common_chat_format_state_rules gemma4_state_rules;
 // resumed generation with the wrong root yields a plausible message instead of an
 // error. See the registry's note in gemma4-format.cpp.
 //
-// The demand selects between three variants of the same entry: the ordinary one,
-// the `tool_choice: "required"` one whose turn cannot end without a call, and the
-// `response_format` one whose turn cannot be satisfied by prose. They are
-// mutually exclusive by construction -- a turn cannot be required to both call a
-// tool and emit a schema block.
+// The demand selects between four variants of the same entry: the ordinary one,
+// the `tool_choice: "required"` one whose turn cannot end without a call, the
+// `response_format: json_schema` one whose turn cannot be satisfied by prose,
+// and the one whose answer must match a caller-supplied Lark/GBNF grammar. They
+// are mutually exclusive by construction -- a turn cannot be required to both
+// call a tool and emit a schema block.
 enum common_chat_gemma4_entry_demand {
     COMMON_CHAT_GEMMA4_ENTRY_ANY,
     COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL,
     COMMON_CHAT_GEMMA4_ENTRY_RESPONSE_FORMAT,
+    COMMON_CHAT_GEMMA4_ENTRY_USER_GRAMMAR,
 };
+
+// Every entry root the registry can hand out, for any state and any demand.
+//
+// Exists so the startup contract check can enumerate them without knowing the
+// table's shape: "every state's every demand names a rule this grammar file
+// actually defines" is only a real check if nothing can be left out of the walk.
+std::vector<std::string> common_chat_gemma4_entry_roots_all();
+
+// Assert the state<->rule contract for this format, or throw.
+//
+// docs/fork/ARCHITECTURE.md states it as binding: every state reachable in the
+// FSM must correspond to a named rule in the Lark grammar, and the C++ tracker
+// is the mirror of llguidance's internal state. It was a convention, and
+// conventions do not catch drift -- `IN_TOOL_ARGS` sat in the state->rule
+// registry naming a rule nothing ever entered, which is exactly what this table
+// existed to prevent.
+//
+// Checked at STARTUP rather than per request because the failure it guards is
+// silent: llguidance answers a missing start rule by failing OPEN, i.e. by
+// sampling with no constraint at all. A server that cannot constrain must not
+// start.
+//
+// Takes the grammar as a PEG arena because that is the grammar as PARSED, so a
+// rule the file mentions only inside another rule's body does not count as
+// defined -- which a text scan could not tell apart.
+void common_chat_gemma4_check_state_rule_contract(const common_peg_arena & arena);
 
 std::string common_chat_gemma4_entry_root(common_chat_format_state state,
                                           common_chat_gemma4_entry_demand demand);
