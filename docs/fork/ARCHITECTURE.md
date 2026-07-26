@@ -21,32 +21,38 @@ detection; see `docs/fork/POLICIES.md#nothing-is-inferred`.
 
 ## Normative sources
 
-Conformance is measured against these, in this order — **not** against what the
-grammar currently happens to accept.
+**There is no canonical template.** The format plugin -- renderer, validator,
+tracker, grammar -- IS the definition of the wire format for this build. A
+`.jinja` file is not a spec here; it is at best a historical artefact of how
+someone else implemented the same format.
+
+That distinction is load-bearing. While a test asserted render *parity against a
+template*, the template was the source of truth and the FSM was derivative --
+which is how this tree ended up asserting against a stale vendored copy (16448
+bytes vs 18683, missing the post-tool-response thought re-opener) and could not
+detect three renderer divergences. Inverting it removes that whole class of
+failure: there is nothing left to be stale against.
+
+Tests therefore assert **explicit expected bytes**, not template output.
+
+External references, used to *derive* the plugin and to settle questions during
+review -- never consulted at runtime, never asserted against:
 
 | id | source | authority |
 |---|---|---|
-| **S1** | LiteRT-LM ANTLR grammar — `runtime/components/tool_use/antlr/AntlrFcLexer.g4`, `AntlrFcParser.g4` | **the parser spec** |
-| **S2** | `runtime/components/tool_use/fc_tool_format_utils.cc` (`FormatValueAsFc` / `FormatToolAsFc`) | **the writer spec** |
-| **S3** | `runtime/components/logits_processor/constrained_decoding/llg_fc_tool_calls.cc` | **the generation-grammar spec** |
+| **S1** | LiteRT-LM ANTLR grammar -- `runtime/components/tool_use/antlr/AntlrFcLexer.g4`, `AntlrFcParser.g4` | **the parser reference** |
+| **S2** | `runtime/components/tool_use/fc_tool_format_utils.cc` (`FormatValueAsFc` / `FormatToolAsFc`) | **the writer reference** |
+| **S3** | `runtime/components/logits_processor/constrained_decoding/llg_fc_tool_calls.cc` | **the generation-grammar reference** |
 | **S4** | `runtime/conversation/model_data_processor/gemma4_data_processor_config.h` | token constants |
 | **S5** | `runtime/components/tool_use/rust/fc_parser.rs` | parse semantics |
-| **S7** | the canonical `gemma-4-12B-it.jinja` (Google Gemma Eng., 2026-07-09) | canonical wire shape |
 | **S8** | ai.google.dev `capabilities/thinking` | official prose |
 
-LiteRT-LM is `github.com/google-ai-edge/LiteRT-LM`; the inventory above was taken
-at `7231f65`.
+LiteRT-LM is `github.com/google-ai-edge/LiteRT-LM`, inventoried at `7231f65`.
 
-> ⚠️ **Do not cite `ai.google.dev/gemma/docs/core/prompt-structure`.** It is
-> Gemma-3 era: it documents `<start_of_turn>` and states *"the `system` role or a
-> system turn is not supported"* — flatly wrong for Gemma 4 and contradicted by
-> every source above.
-
-> ⚠️ **`models/templates/google-gemma-4-31B-it.jinja` in this tree is an older
-> revision** of the canonical template. The 2026-07-09 version changed the
-> reasoning gate, argument-string handling, continuation and turn-closure logic.
-> Assert render parity against the canonical template, never against the vendored
-> copy.
+> Do not cite `ai.google.dev/gemma/docs/core/prompt-structure`. It is Gemma-3
+> era: it documents `<start_of_turn>` and states *"the `system` role or a system
+> turn is not supported"* -- wrong for Gemma 4 and contradicted by every source
+> above.
 
 ### Arbitration where sources disagree
 
