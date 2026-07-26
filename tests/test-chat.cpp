@@ -475,6 +475,21 @@ static common_chat_tool empty_args_tool{
     })",
 };
 
+// A dotted name, the shape every MCP server produces (`filesystem.read_file`,
+// `github-search`). Nothing about it is exotic -- it just has to survive a
+// grammar whose identifier charset was written for bare words.
+static common_chat_tool dotted_name_tool{
+    /* .name = */ "filesystem.read_file",
+    /* .description = */ "Read a file",
+    /* .parameters = */ R"({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "Absolute path" }
+        },
+        "required": ["path"]
+    })",
+};
+
 static common_chat_tool empty_args_tool_no_properties{
     /* .name = */ "empty_args_no_props",
     /* .description = */ "A tool that takes no arguments and has no properties",
@@ -2097,30 +2112,42 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect_content("<|channel>thought\nI'm\nthinking<channel|>Hello, world!\nWhat's up?")
             .run();
 
+        // Every tool-calling fixture below ends at `<|tool_response>`, because
+        // that is where a tool-calling turn ends: it does not close with
+        // `<turn|>`, it hands over by OPENING the response block so the runtime
+        // can fill it in and the model continues inside the same turn. Required,
+        // not decorative -- see tool_call_request in gemma4.lark, and
+        // POLICIES.md#closing-tokens-are-required for why the fixture moves
+        // rather than the grammar.
+        //
+        // The sampler cannot stop short of it either; that is asserted directly
+        // against llguidance in test-grammar-llguidance.cpp, where a turn ending
+        // at `<tool_call|>` is in the REJECTED set.
+
         // Simple tool call with string argument
         tst.test(
-                "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|>")
+                "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|><|tool_response>")
             .tools({ get_time_tool })
             .expect(message_with_tool_calls("get_time", R"({"city": "London"})"))
             .run();
 
         // Tool call with string argument containing special chars
         tst.test(
-                "<|tool_call>call:get_time{city:<|\"|>San Francisco<|\"|>}<tool_call|>")
+                "<|tool_call>call:get_time{city:<|\"|>San Francisco<|\"|>}<tool_call|><|tool_response>")
             .tools({ get_time_tool })
             .expect(message_with_tool_calls("get_time", R"({"city": "San Francisco"})"))
             .run();
 
         // Tool call with empty args
         tst.test(
-                "<|tool_call>call:empty_args{}<tool_call|>")
+                "<|tool_call>call:empty_args{}<tool_call|><|tool_response>")
             .tools({ empty_args_tool })
             .expect(message_with_tool_calls("empty_args", "{}"))
             .run();
 
         // Tool call with string and content
         tst.test(
-                "Hello, world!\nWhat's up?<|tool_call>call:get_time{city:<|\"|>Paris<|\"|>}<tool_call|>")
+                "Hello, world!\nWhat's up?<|tool_call>call:get_time{city:<|\"|>Paris<|\"|>}<tool_call|><|tool_response>")
             .tools({ get_time_tool })
             .expect(message_with_content_and_tool_call("Hello, world!\nWhat's up?", "get_time", R"({"city": "Paris"})"))
             .run();
@@ -2128,7 +2155,7 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
         // Parallel tool calls
         tst.test(
                 "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|>"
-                "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>")
+                "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|><|tool_response>")
             .tools({ get_time_tool, get_weather_tool })
             .parallel_tool_calls(true)
             .expect_tool_calls({
@@ -2139,79 +2166,115 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
 
         // Tool call with integer argument (number type)
         tst.test(
-                "<|tool_call>call:special_function{arg1:42}<tool_call|>")
+                "<|tool_call>call:special_function{arg1:42}<tool_call|><|tool_response>")
             .tools({ special_function_tool })
             .expect(message_with_tool_calls("special_function", R"({"arg1": 42})"))
             .run();
 
         // Tool call with negative number argument
         tst.test(
-                "<|tool_call>call:special_function{arg1:-7}<tool_call|>")
+                "<|tool_call>call:special_function{arg1:-7}<tool_call|><|tool_response>")
             .tools({ special_function_tool })
             .expect(message_with_tool_calls("special_function", R"({"arg1": -7})"))
             .run();
 
         // Tool call with decimal number argument
         tst.test(
-                "<|tool_call>call:amount{orig:3.14}<tool_call|>")
+                "<|tool_call>call:amount{orig:3.14}<tool_call|><|tool_response>")
             .tools({ amount_tool })
             .expect(message_with_tool_calls("amount", R"({"orig": 3.14})"))
             .run();
 
         // Tool call with boolean argument (true)
         tst.test(
-                "<|tool_call>call:toggle{enabled:true}<tool_call|>")
+                "<|tool_call>call:toggle{enabled:true}<tool_call|><|tool_response>")
             .tools({ toggle_tool })
             .expect(message_with_tool_calls("toggle", R"({"enabled": true})"))
             .run();
 
         // Tool call with boolean argument (false)
         tst.test(
-                "<|tool_call>call:toggle{enabled:false}<tool_call|>")
+                "<|tool_call>call:toggle{enabled:false}<tool_call|><|tool_response>")
             .tools({ toggle_tool })
             .expect(message_with_tool_calls("toggle", R"({"enabled": false})"))
             .run();
 
         // Tool call with null argument
         tst.test(
-                "<|tool_call>call:set_nullable{value:null}<tool_call|>")
+                "<|tool_call>call:set_nullable{value:null}<tool_call|><|tool_response>")
             .tools({ nullable_tool })
             .expect(message_with_tool_calls("set_nullable", R"({"value": null})"))
             .run();
 
         // Tool call with array argument (todo list)
         tst.test(
-                "<|tool_call>call:todo_list{todos:[<|\"|>buy milk<|\"|>,<|\"|>walk dog<|\"|>]}<tool_call|>")
+                "<|tool_call>call:todo_list{todos:[<|\"|>buy milk<|\"|>,<|\"|>walk dog<|\"|>]}<tool_call|><|tool_response>")
             .tools({ todo_list })
             .expect(message_with_tool_calls("todo_list", R"({"todos":["buy milk","walk dog"]})"))
             .run();
 
         // Tool call with object/dict argument
         tst.test(
-                "<|tool_call>call:set_config{config:{theme:<|\"|>dark<|\"|>,count:3}}<tool_call|>")
+                "<|tool_call>call:set_config{config:{theme:<|\"|>dark<|\"|>,count:3}}<tool_call|><|tool_response>")
             .tools({ config_tool })
             .expect(message_with_tool_calls("set_config", R"({"config":{"theme":"dark","count":3}})"))
             .run();
 
         // Tool call with empty array
         tst.test(
-                "<|tool_call>call:todo_list{todos:[]}<tool_call|>")
+                "<|tool_call>call:todo_list{todos:[]}<tool_call|><|tool_response>")
             .tools({ todo_list })
             .expect(message_with_tool_calls("todo_list", R"({"todos":[]})"))
             .run();
 
         // Tool call with empty dict
         tst.test(
-                "<|tool_call>call:set_config{config:{}}<tool_call|>")
+                "<|tool_call>call:set_config{config:{}}<tool_call|><|tool_response>")
             .tools({ config_tool })
             .expect(message_with_tool_calls("set_config", R"({"config":{}})"))
             .run();
 
         // Tool call with scientific notation number
         tst.test(
-                "<|tool_call>call:amount{orig:1.5e10}<tool_call|>")
+                "<|tool_call>call:amount{orig:1.5e10}<tool_call|><|tool_response>")
             .tools({ amount_tool })
             .expect(message_with_tool_calls("amount", R"({"orig": 1.5e10})"))
+            .run();
+
+        // A call that is COMPLETE but whose turn has not handed over yet -- what
+        // the parser sees on every streamed token between `<tool_call|>` and the
+        // `<|tool_response>` that follows it, and what it is left with if the
+        // generation is cut short by a token budget.
+        //
+        // The call must still come out whole. Making the hand-over required is
+        // only safe because a partial parse still reports the completed calls
+        // inside it; if it did not, a truncated generation would lose the tool
+        // call entirely instead of losing only the hand-over.
+        tst.test(
+                "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|>")
+            .tools({ get_time_tool })
+            .is_partial(true)
+            .expect(message_with_tool_calls("get_time", R"({"city": "London"})"))
+            .run();
+
+        // S1's `functionCall: CALL COLON ID object?` -- a zero-argument call may
+        // omit the braces, and zero-argument tools are the commonest kind an
+        // agent declares. Arguments come out as `{}` either way, which is what
+        // the decoder already substituted when the subtree was absent; only the
+        // grammar had to stop insisting on it.
+        tst.test(
+                "<|tool_call>call:empty_args<tool_call|><|tool_response>")
+            .tools({ empty_args_tool })
+            .expect(message_with_tool_calls("empty_args", "{}"))
+            .run();
+
+        // A dotted name, as every MCP server produces. The sampler gets these as
+        // literals from the declared tools; extraction needs FUNC_NAME to admit
+        // them, which is the whole of what P0-1 was about.
+        tst.test(
+                "<|tool_call>call:filesystem.read_file{path:<|\"|>/etc/hosts<|\"|>}<tool_call|><|tool_response>")
+            .tools({ dotted_name_tool })
+            .expect(message_with_tool_calls("filesystem.read_file", R"({"path": "/etc/hosts"})"))
             .run();
 
         // A trailing empty thought: the grammar's `(channel_block content)*`

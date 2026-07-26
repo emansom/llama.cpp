@@ -13,7 +13,21 @@ static const llama_vocab * vocab;
 
 static bool match_string(const std::string & input, llama_sampler * grammar) {
     llama_sampler_reset(grammar);
-    auto tokens = common_tokenize(vocab, input, false, false);
+    // parse_special=true, because this stands in for text the MODEL GENERATED.
+    // A model emits token ids, and a marker it was trained on is one of them; the
+    // grammar masks that id directly. Tokenizing with parse_special=false models
+    // a user typing the marker's spelling into a prompt instead, which splits it
+    // into ordinary text and asks the grammar about a token sequence the model
+    // would never produce.
+    //
+    // It is not a distinction without a difference here. `tokenizer_st_partition`
+    // skips CONTROL tokens when parse_special is false but keeps USER_DEFINED
+    // ones, and Gemma 4's markers are split across both classes: `<|tool_call>`
+    // (48) is USER_DEFINED and survived, `<|tool_response>` (50) and `<|tool>`
+    // (46) carry CONTROL and did not. So the false setting silently tested two of
+    // the format's markers as prose -- which reads as a grammar that rejects a
+    // valid string, and cost real time to chase.
+    auto tokens = common_tokenize(vocab, input, false, true);
 
     auto n_vocab = llama_vocab_n_tokens(vocab);
 
@@ -1185,8 +1199,9 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     };
     substitute("{{RESPONSE_SCHEMA}}", "%json {\"type\": \"object\"}");
     // The no-tools form, which is what a request without `tools` produces. The
-    // per-tool alternation is exercised separately below.
-    substitute("{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict");
+    // per-tool alternation is exercised in test_gemma4_tool_schema, through the
+    // production path rather than by retyping the emitter's output here.
+    substitute("{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
 
     // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
     // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the
@@ -1201,6 +1216,9 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     const std::string call_open     = open("tool_call") + "call:";
     const std::string call_close    = close("tool_call");
     const std::string q             = self("\"");
+    // A tool-calling turn's required closer: it does not end at <turn|>, it hands
+    // over by OPENING the response block and stopping there. See tool_call_request.
+    const std::string await_resp = open("tool_response");
 
     // Exactly what the server hands llguidance for an ordinary request: the
     // {{RESPONSE_SCHEMA}} placeholder is substituted only when the caller asked
@@ -1211,8 +1229,14 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
          {
              "Hello, world!",
              thought_open + "\nthinking" + thought_close + "Hello, world!",
-             call_open + "get_time{city:" + q + "London" + q + "}" + call_close,
-             thought_open + "\nchecking" + thought_close + call_open + "f{}" + call_close,
+             call_open + "get_time{city:" + q + "London" + q + "}" + call_close + await_resp,
+             thought_open + "\nchecking" + thought_close + call_open + "f{}" + call_close + await_resp,
+             // S1's `object?`: `call:name` with the braces omitted is a
+             // well-formed zero-argument call.
+             call_open + "f" + call_close + await_resp,
+             // A dotted MCP name. Nothing in the tag vocabulary stops it, and with
+             // no tools declared FUNC_NAME is what bounds the name.
+             call_open + "filesystem.read_file{}" + call_close + await_resp,
          },
          {
              // Two thought openers with no close between them. `content` may hold
@@ -1221,6 +1245,9 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
              // an OPEN tag, so a second `<|channel>` has to be a real one and the
              // first thought must have closed before it.
              thought_open + "\n" + thought_open,
+             // The closer is required, not optional: a turn cannot simply stop
+             // after its calls (POLICIES.md#closing-tokens-are-required).
+             call_open + "f{}" + call_close,
          });
 
     // MEASURED, UNRESOLVED: llguidance ACCEPTS a generation that stops inside an
@@ -1243,7 +1270,7 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
          common_chat_grammar_set_entry(base, "resume_reasoning"),
          {
              " thinking" + thought_close + "Hello, world!",
-             " thinking" + thought_close + call_open + "f{}" + call_close,
+             " thinking" + thought_close + call_open + "f{}" + call_close + await_resp,
          },
          {
              // Opening a SECOND thought while already inside one, and dropping
@@ -1252,6 +1279,80 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
              // what entry selection fixes.
              thought_open + "\nnested" + thought_close + "Hi",
              "Hello, world!",
+         });
+}
+
+// The per-tool alternation, compiled from the REQUEST rather than from a
+// hand-typed copy of what the emitter is believed to produce.
+//
+// It goes through common_chat_templates_apply, so what llguidance is handed here
+// is byte-for-byte what the server hands it for the same request. Retyping the
+// expected Lark instead would only assert that the test author and the emitter
+// agree, which is the assertion least worth making: the emitter could be wrong
+// in exactly the way the copy is.
+static void test_gemma4_tool_schema() {
+    common_chat_tool get_time{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the current time in a city",
+        /* .parameters = */ R"({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string", "description": "City name" },
+                "utc":  { "type": "boolean", "description": "Report in UTC" }
+            },
+            "required": ["city"]
+        })",
+    };
+    // No arguments at all -- the commonest shape an agent declares, and the one
+    // S1 lets a call spell without braces.
+    common_chat_tool ping{
+        /* .name = */ "system.ping",
+        /* .description = */ "Check liveness",
+        /* .parameters = */ R"({ "type": "object", "properties": {} })",
+    };
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "what time is it in London?";
+
+    common_chat_templates_inputs inputs;
+    inputs.messages             = { user };
+    inputs.tools                = { get_time, ping };
+    inputs.add_generation_prompt = true;
+
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto params = common_chat_templates_apply(tmpls.get(), inputs);
+    assert(!params.grammar.empty());
+
+    const std::string call_open  = "<|tool_call>call:";
+    const std::string call_close = "<tool_call|>";
+    const std::string await_resp = "<|tool_response>";
+    const std::string q          = "<|\"|>";
+
+    test("gemma4 tool schema (declared tools)", params.grammar,
+         {
+             call_open + "get_time{city:" + q + "London" + q + "}" + call_close + await_resp,
+             call_open + "get_time{city:" + q + "London" + q + ",utc:true}" + call_close + await_resp,
+             // A dotted name reaches the sampler as a literal, so MCP-style names
+             // need nothing from FUNC_NAME.
+             call_open + "system.ping{}" + call_close + await_resp,
+             // Braces omitted: legal precisely because `ping` has no required
+             // property. `get_time` does, so the same spelling is rejected below.
+             call_open + "system.ping" + call_close + await_resp,
+         },
+         {
+             // Undeclared tool.
+             call_open + "not_a_real_tool{city:" + q + "x" + q + "}" + call_close + await_resp,
+             // Undeclared argument on a declared tool.
+             call_open + "get_time{bogus:" + q + "x" + q + "}" + call_close + await_resp,
+             // Declared argument, wrong type.
+             call_open + "get_time{city:123}" + call_close + await_resp,
+             // Required argument missing, both spellings.
+             call_open + "get_time{}" + call_close + await_resp,
+             call_open + "get_time" + call_close + await_resp,
+             // One tool's name with another tool's arguments -- the correlation
+             // the per-tool alternation exists to enforce.
+             call_open + "system.ping{city:" + q + "London" + q + "}" + call_close + await_resp,
          });
 }
 
@@ -1373,6 +1474,7 @@ int main(int argc, const char ** argv) {
     // for.
     if (argc == 3) {
         test_gemma4_chat_grammar(argv[2]);
+        test_gemma4_tool_schema();
         llama_free(ctx);
         llama_model_free(model);
         fprintf(stdout, "All tests passed.\n");

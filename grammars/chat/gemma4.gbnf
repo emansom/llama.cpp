@@ -1,5 +1,27 @@
 # Gemma 4 chat grammar (GBNF)
 #
+# STALE. DO NOT READ THIS AS A SECOND DESCRIPTION OF THE FORMAT.
+#
+# common_chat_grammar_get selects `.lark` when LLAMA_USE_LLGUIDANCE is defined
+# and this file otherwise, and llguidance is NOT optional in this fork (see
+# FORK.md) -- so nothing here is built against, sampled with, or tested, and it
+# has drifted several commits behind gemma4.lark with nothing to notice. Known
+# divergences, none of them subtle:
+#
+#   * no {{TOOL_SCHEMA}} placeholder, so tool arguments are UNCONSTRAINED here --
+#     the exact defect this fork exists to close
+#   * `tool-calls` omits the mandatory trailing `<|tool_response>`
+#   * the argument object is mandatory, so a zero-argument `call:name` fails
+#   * `func-name` still rejects the `.` and `-` in every MCP tool name
+#   * markers are byte literals with hand-rolled prefix exclusions rather than
+#     the single tokens they are, which is what gemma4.lark's tag vocabulary
+#     replaced
+#   * `conversation` is still the swallow-everything `turn-body-text` version,
+#     which validates turn framing and nothing inside a turn
+#
+# Restoring parity is its own change (P1-11 in the plan). Patching it piecemeal
+# would be worse than leaving it: partial parity reads as parity.
+#
 # Covers the full output format for tool-call, content-only, and response_format responses.
 # {{RESPONSE_SCHEMA}} replaced at runtime.
 

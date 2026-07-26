@@ -993,14 +993,6 @@ static bool is_lark_grammar(const std::string & grammar) {
     return grammar.find("%llguidance") != std::string::npos;
 }
 
-// Build a `%json {schema}` expression for llguidance from the tool schemas.
-//
-// KNOWN DEFECT, tracked: this emits a single `oneOf` across ALL tools, so a call
-// naming tool A may legally carry tool B's arguments. Upstream's hand-written
-// PEG builds a per-tool alternative (p.rule("tool-" + name, ...)) and does
-// correlate them. The fix is a per-tool alternation pairing each name literal
-// with its own schema; see docs/fork/ARCHITECTURE.md. Do not treat the current
-// behaviour as intended.
 // --- Gemma 4 tool-argument constraint ----------------------------------------
 //
 // Gemma 4's argument syntax is NOT JSON: bare keys, `<|"|>`-delimited strings,
@@ -1107,9 +1099,15 @@ static std::string gemma4_value_rule(const json & schema, int depth) {
 //
 // It also retires the FUNC_NAME charset limit: names come from literals, so a
 // dotted or dashed MCP name like `filesystem.read_file` needs nothing special.
+//
+// With no tool declared there is nothing to correlate against, so the shape is
+// the format's own: any identifier, any dict. The dict is optional here for the
+// same reason it is optional per-tool below.
+static const char * const gemma4_tool_call_any = "tool_call_directive \":\" func_name gemma4_dict?";
+
 static std::string build_gemma4_tool_schema(const json & tools) {
     if (!tools.is_array() || tools.empty()) {
-        return "tool_call_directive \":\" func_name gemma4_dict";
+        return gemma4_tool_call_any;
     }
     std::vector<std::string> alts;
     foreach_function(tools, [&](const json & tool) {
@@ -1119,11 +1117,31 @@ static std::string build_gemma4_tool_schema(const json & tools) {
         const json params = function.contains("parameters") && function.at("parameters").is_object()
             ? function.at("parameters")
             : json::object();
-        alts.push_back("(tool_call_directive \":\" " + gemma4_string_literal(name) + " " +
-                       gemma4_value_rule(params, 0) + ")");
+
+        // Arguments are a DICT or nothing; a bare scalar is not a call. So a
+        // schema the emitter cannot read falls back to `gemma4_dict`, not to
+        // gemma4_value_rule's generic any-value -- which would have let a tool
+        // whose `parameters` omits `"type": "object"` be called with a string.
+        std::string args = gemma4_value_rule(params, 0);
+        if (args == "gemma4_value") { args = "gemma4_dict"; }
+
+        // S1 is `functionCall: CALL COLON ID object?`, so `call:name` with the
+        // braces omitted is a well-formed zero-argument call -- and zero-argument
+        // tools are the commonest kind an agent declares.
+        //
+        // Generation gets that freedom exactly when an EMPTY object would also be
+        // legal, i.e. the tool declares no required property. Omitting the braces
+        // therefore cannot become a way around a required argument, and the
+        // writer's own `{}` spelling stays available either way.
+        const json required = params.value("required", json::array());
+        if (!required.is_array() || required.empty()) {
+            args = "(" + args + ")?";
+        }
+
+        alts.push_back("(tool_call_directive \":\" " + gemma4_string_literal(name) + " " + args + ")");
     });
     if (alts.empty()) {
-        return "tool_call_directive \":\" func_name gemma4_dict";
+        return gemma4_tool_call_any;
     }
     return "(" + string_join(alts, " | ") + ")";
 }
@@ -1258,8 +1276,13 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     // schema. The schema was already enforced at sampling time; re-imposing it
     // here would reject output the sampler had legitimately produced, and would
     // make parsing depend on which tools a request happened to declare.
+    // The argument object is optional on the PARSE side because S1 is
+    // `functionCall: CALL COLON ID object?` -- `call:name` with no braces is a
+    // well-formed zero-argument call, and zero-argument tools are the commonest
+    // kind an agent declares. Requiring the braces here dropped such a call on
+    // the floor entirely rather than reporting it with `{}` for arguments.
     base = replace_all(base, "{{TOOL_SCHEMA}}",
-                       lark ? "tool_call_directive \":\" func_name gemma4_dict" : "([^]*)");
+                       lark ? "tool_call_directive \":\" func_name gemma4_dict?" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
     return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
@@ -1343,11 +1366,25 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     data.thinking_start_tag = "<|channel>thought";
     data.thinking_end_tag   = "<channel|>";
 
+    // Every marker the model can emit. A token absent from this list is DROPPED
+    // from the text the parser sees: the server converts each generated token
+    // with `special = params_base.special || preserved_tokens.count(tok)`, and
+    // llama_vocab::token_to_piece returns nothing for a CONTROL token when
+    // `special` is false.
+    //
+    // Which markers that silently affects is not something to reason about from
+    // the spelling. Gemma 4 splits them across two attribute classes --
+    // `<|tool_call>` (48) is USER_DEFINED and renders either way, `<|tool_response>`
+    // (50) carries CONTROL and does not -- so a list curated by eye happens to
+    // work until it names a token from the other class. Listing every marker the
+    // grammar can emit removes the dependency on which class each one landed in.
     data.preserved_tokens = {
         "<|channel>",
         "<channel|>",
         "<|tool_call>",
         "<tool_call|>",
+        "<|tool_response>",
+        "<|\"|>",
         "<|turn>",
     };
 

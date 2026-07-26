@@ -231,9 +231,23 @@ std::vector<common_chat_decoded_event> common_chat_gemma4_decoder::decode(
                 events.push_back({K::TOOL_NAME, std::string(name_node.text), {}, {}, false, false});
             }
         }
-        std::string args_json = (args_id != COMMON_PEG_INVALID_AST_ID)
-                                    ? gemma4_to_json(args_id)
-                                    : std::string("{}");
+        // No dict subtree means one of two things, and they must not be
+        // conflated: the call is still in flight and its arguments have not
+        // begun, or the call is COMPLETE and genuinely has none -- S1's
+        // `functionCall: CALL COLON ID object?`. Only the second may report `{}`.
+        //
+        // Reporting `{}` while the call is partial breaks the streaming diff,
+        // which requires the arguments string to be APPEND-ONLY: `{}` would have
+        // to become `{"city": ...` a token later, a rewrite rather than an
+        // append, and the server rejects that outright ("Invalid diff"). Nothing
+        // caught it before because the grammar required the braces, so a call
+        // whose dict had not started could not parse as a call at all.
+        std::string args_json;
+        if (args_id != COMMON_PEG_INVALID_AST_ID) {
+            args_json = gemma4_to_json(args_id);
+        } else if (!node.is_partial) {
+            args_json = "{}";
+        }
         events.push_back({K::TOOL_ARGS_RAW, std::move(args_json), {}, {}, false, node.is_partial});
         if (!node.is_partial) {
             events.push_back({K::TOOL_CLOSE, {}, {}, {}, false, false});

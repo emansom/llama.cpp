@@ -127,6 +127,63 @@ containing a literal `<|"|>` is silently corrupted 10/10.
 It cannot be fixed, only detected. **The renderer must reject such a payload with
 an OpenAI-shaped 400 naming the offending argument**, never silently truncate.
 
+### `<escape>` and `<ctrl46>` do not apply to Gemma 4, and must not be added
+
+S1 accepts three interchangeable spellings of the string delimiter, so the gap
+list carried "alternate delimiters unsupported" as a P0. **Measured against the
+shipped tokenizer, they are not delimiters here at all** — neither name exists in
+the vocabulary of `gemma-4-e2b-it.gguf`:
+
+| spelling | tokenizes as |
+|---|---|
+| `<\|"\|>` | **one token, id 52** |
+| `<escape>` | 4 ordinary text tokens |
+| `<ctrl46>` | 6 ordinary text tokens |
+
+A scan of the whole vocabulary region finds no `<escape>`, no `<ctrl46>`, and no
+`<ctrlN>` for any N. They are legacy spellings from LiteRT-LM's ANTLR lexer, which
+is a **text-level** parser and had to accept whatever an earlier tokenizer named
+its escape token.
+
+So the arbitration resolves the other way from the rest of the table. Adding them
+to the generation grammar would not be "accepting liberally" — it would let the
+sampler spend several ordinary text tokens spelling `<escape>` where the writer
+emits one marker, widening the sampled language with a sequence the writer never
+produces. Adding them to the parser buys nothing either: the only inputs that path
+sees are this fork's own rendered prompts and grammar-constrained model output,
+and neither can contain them. **Re-derive from the tokenizer before reinstating
+this, not from S1.**
+
+### Which markers survive to the parser is an attribute, not a spelling
+
+`preserved_tokens` decides whether a generated marker's text reaches the parser at
+all: the server converts each token with
+`special = params_base.special || preserved_tokens.count(tok)`, and
+`llama_vocab::token_to_piece` returns **nothing** for a `CONTROL` token when
+`special` is false.
+
+Gemma 4 splits its markers across two attribute classes, and the split does not
+follow the naming:
+
+| token | id | class | reaches the parser unlisted? |
+|---|---|---|---|
+| `<\|tool_call>` / `<tool_call\|>` | 48 / 49 | USER_DEFINED | yes |
+| `<\|tool_response>` | 50 | **CONTROL** | **no** |
+| `<tool_response\|>` | 51 | USER_DEFINED | yes |
+| `<\|"\|>` | 52 | USER_DEFINED | yes |
+| `<\|tool>` | 46 | **CONTROL** | **no** |
+| `<\|channel>` / `<channel\|>` | 100 / 101 | USER_DEFINED | yes |
+
+A list curated by eye therefore works until it names a token from the other class.
+**List every marker the grammar can emit** rather than reasoning about which ones
+need it.
+
+The same split has a second edge: `tokenizer_st_partition` skips `CONTROL` tokens
+when `parse_special` is false, so tokenizing a marker's *spelling* silently
+produces ordinary text for exactly those two. Any test that stands in for model
+output must tokenize with `parse_special = true` — a model emits token ids, not
+spellings.
+
 ## Why per-format pipelines
 
 The legacy `common_chat_peg_mapper::map()` was a 280-line method conflating four

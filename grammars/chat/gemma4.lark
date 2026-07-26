@@ -116,7 +116,7 @@ turn_start: channel_block? turn_tail
 # Everything a model turn can contain after its opening thought. Shared by both
 # generation entries so they cannot drift: `turn_start` and `resume_reasoning` differ
 # ONLY in where the model picks up, never in what it may say next.
-turn_tail: content (channel_block content)* (tool_calls | response_format | )
+turn_tail: content (channel_block content)* (tool_call_request | response_format | )
 
 # The second generation entry, selected when the rendered prompt ended INSIDE an
 # unclosed thought (entry_state IN_REASONING) because the caller prefilled
@@ -156,6 +156,23 @@ channel_body: reasoning
 reasoning: /(.|\n)*/
 content: /(.|\n)*/
 
+# A turn that CALLS tools does not close with `<turn|>`. It hands over by OPENING
+# the response block and stopping there, so the runtime can fill the response in
+# and the model carries on INSIDE the same turn -- which is also why a thought
+# re-opener, not a fresh `<|turn>model`, follows a tool response.
+#
+# `<|tool_response>` is therefore this turn's closing token rather than an
+# optional extra, and POLICIES.md#closing-tokens-are-required covers it like any
+# other. Both normative sources agree, so there is nothing to arbitrate: S3's
+# generation grammar makes `fc_resp` mandatory, and the canonical template emits
+# it in place of `<turn|>` for an assistant message whose calls have no responses
+# yet (S7:369-370).
+#
+# It was missing here while the renderer already emitted it, so the sampler
+# forbade the one token the model had to produce next: a grammar violation at the
+# end of every tool-calling turn.
+tool_call_request: tool_calls tool_response_open_tag
+
 tool_calls: tool_call+
 # Open, directive, colon, payload, close -- the shape shared by the whole
 # tool family. `call` is a directive, not part of the tag.
@@ -168,7 +185,13 @@ tool_calls: tool_call+
 tool_call: tool_call_open_tag {{TOOL_SCHEMA}} tool_call_close_tag
 tool_call_directive: "call"
 func_name: FUNC_NAME
-FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+# The PARSER's charset, which is deliberately wider than the writer's: S1 admits
+# `.` and `-` in an identifier, and every MCP tool name uses them
+# (`filesystem.read_file`, `github-search`). Generation does not reach this rule
+# at all -- {{TOOL_SCHEMA}} names each declared tool as a literal -- so widening
+# it cannot loosen the sampler. It only stops extraction from dropping a call
+# whose name the model was explicitly told to emit.
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_.-]*/
 
 gemma4_dict: "{" (gemma4_kv ("," gemma4_kv)*)? "}"
 gemma4_kv: gemma4_dict_key ":" gemma4_value
@@ -260,11 +283,24 @@ decl_text: /(.|\n)*/
 user_turn: turn_open_tag "user" "\n" user_text turn_close
 user_text: /(.|\n)*/
 
-# A model turn that completed. It may end at <turn|> or, when it left tool calls
-# outstanding, at a bare <|tool_response> -- both are required literals, not an
-# optional closer (see POLICIES.md#closing-tokens-are-required).
+# A model turn that completed. Three shapes, all of them things the renderer
+# actually emits, and every one of them a REQUIRED literal rather than an
+# optional closer (see POLICIES.md#closing-tokens-are-required):
+#
+#   <turn|>\n                          the ordinary case
+#   <|tool_response>...<tool_response|>[<turn|>\n]
+#                                      calls answered in-turn; the `<turn|>` is
+#                                      present only when the turn also carried
+#                                      content, since a turn that ends on a tool
+#                                      response stays open for the model to
+#                                      resume in
+#   <|tool_response>                   calls outstanding -- the bare opener, the
+#                                      same token generation ends on
+#
+# The last of those was unrepresentable, so any prompt replaying an assistant
+# message whose calls had no results yet failed to validate.
 closed_model_turn: turn_open_tag "model" "\n" model_body model_turn_close
-model_turn_close: turn_close | tool_response_block+
+model_turn_close: turn_close | tool_response_block+ turn_close? | tool_response_open_tag
 
 # Same shape as the generation entry, so the same decoder tags fire.
 model_body: channel_block? content (channel_block content)* tool_calls?
