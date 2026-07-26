@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cctype>
 #include <string>
 
@@ -655,6 +656,21 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
     prev_t prev_message_type = PREV_NONE;
 
     ordered_json loop_messages = inputs.messages;
+
+    // The continuation message is part of the conversation and must be rendered
+    // like any other assistant turn -- it is what the caller already prefilled
+    // and expects completed. It arrives outside inputs.messages, and leaving it
+    // there meant the prompt silently omitted the prefill while every layer
+    // downstream faithfully processed the shortened text.
+    //
+    // Its turn is deliberately left OPEN: this is exactly where generation
+    // resumes, so no <turn|> closer is emitted for it (see the end-of-turn
+    // marker below).
+    const bool continuing = inputs.has_continuation();
+    if (continuing) {
+        loop_messages.push_back(inputs.continue_msg.to_json_oaicompat());
+    }
+    const size_t open_turn_index = continuing ? loop_messages.size() - 1 : SIZE_MAX;
     if (inputs.enable_thinking || has_tools || first_is_system) {
         out << "<|turn>system\n";
         if (inputs.enable_thinking) {
@@ -841,7 +857,9 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
         const bool has_content = message.contains("content") && !message["content"].is_null() &&
             !(message["content"].is_string() && message["content"].get<std::string>().empty()) &&
             !(message["content"].is_array() && message["content"].empty());
-        if (prev_message_type == PREV_TOOL_CALL && !tr_out_flag) {
+        if (i == open_turn_index) {
+            // Leave the turn open -- generation continues inside it.
+        } else if (prev_message_type == PREV_TOOL_CALL && !tr_out_flag) {
             out << "<|tool_response>";
         } else if (!(tr_out_flag && !has_content)) {
             out << "<turn|>\n";

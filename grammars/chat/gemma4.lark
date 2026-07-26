@@ -92,4 +92,7 @@ tool_response_block: "<|tool_response>response:" func_name gemma4_dict "<tool_re
 # so they stay opaque rather than inventing structure the decoder would ignore.
 opaque_body: /([^<]|<(?!turn\|>))*/
 
-%ignore /[ \t\r]/
+# NO %ignore. Whitespace is significant in this format: content is returned to
+# the caller verbatim, and a global skip silently ate the trailing space of a
+# prefilled continuation ("Hello, " came back as "Hello,"). Every literal in
+# this grammar spells out the whitespace it expects.
