@@ -153,3 +153,7 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# Debug dumps written by tests/test-grammar-llguidance.cpp on a failure
+test-grammar-integration.grammar.gbnf
+test-grammar-integration.string.txt
