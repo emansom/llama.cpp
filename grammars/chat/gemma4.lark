@@ -20,10 +20,68 @@
 #
 # {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
 
-start: think_or_stray? content (think_block content)* (tool_calls | response_format | trailing_channel_marker | )
+# --- Tag vocabulary -------------------------------------------------------------
+#
+# Every marker in this format is a tag: <|NAME> opens, <NAME|> closes,
+# <|NAME|> is self-delimiting. Naming them here, once, is what stops the rest of
+# the grammar from being a soup of literals in which "<|channel>thought" looks
+# like one atom rather than a tag plus the channel's kind.
+#
+# Structure that follows from it:
+#   <|channel>KIND ... <channel|>          a channel, with a kind
+#   <|tool_call>DIRECTIVE:PAYLOAD<tool_call|>
+#   <|tool>DIRECTIVE:PAYLOAD<tool|>
+#   <|tool_response>DIRECTIVE:PAYLOAD<tool_response|>
+#
+# The three tool-family tags share one shape -- open, directive, colon, payload,
+# close -- which the old literals hid completely.
+
+# The DELIMITERS are the vocabulary. `<|` and `|>` carry the meaning -- opening
+# and closing -- independently of which tag they wrap, exactly as `<` and `/>`
+# do in XML. A tag is therefore delimiter + name + delimiter, not one fused
+# string, and the name is a token the grammar can reason about.
+#
+#   open  <|NAME>   =  TAG_L NAME TAG_GT
+#   close <NAME|>   =  TAG_LT NAME TAG_R
+#   self  <|NAME|>  =  TAG_L NAME TAG_R
+#
+# Fusing them ("<|channel>") hid that `<|channel>thought` is a tag plus a
+# channel kind, and made every tag an unrelated magic string that content had
+# to be taught about one at a time.
+TAG_L:  "<|"
+TAG_R:  "|>"
+TAG_LT: "<"
+TAG_GT: ">"
+
+turn_open_tag:            TAG_L "turn" TAG_GT
+turn_close_tag:           TAG_LT "turn" TAG_R
+channel_open_tag:         TAG_L "channel" TAG_GT
+channel_close_tag:        TAG_LT "channel" TAG_R
+tool_call_open_tag:       TAG_L "tool_call" TAG_GT
+tool_call_close_tag:      TAG_LT "tool_call" TAG_R
+tool_response_open_tag:   TAG_L "tool_response" TAG_GT
+tool_response_close_tag:  TAG_LT "tool_response" TAG_R
+
+# Self-delimiting: the name is `"`, so the string delimiter is not a bespoke
+# marker but the third tag form. Being symmetric is why the format cannot
+# escape it -- see ARCHITECTURE.md.
+str_delim_tag: TAG_L "\"" TAG_R
+
+start: channel_block? content (channel_block content)* (tool_calls | response_format | dangling_channel_close | )
 
 # --- Assistant turn continuation (sampler entry) -------------------------------
-think_or_stray: think_block | stray_open
+#
+# A channel is the tag plus its KIND. `thought` is the only kind the model emits
+# today, but it is a production rather than part of the opener, so a different
+# kind is a grammar question and not a new literal to remember.
+#
+# This also removes the old `stray_open` special case: "a <|channel> without
+# thought" was never a stray marker, it was a channel whose kind the grammar had
+# no way to express.
+channel_block: channel_open channel_body channel_close_tag
+channel_open: channel_open_tag channel_kind
+channel_kind: "thought"
+channel_body: reasoning
 # Content is any run of text containing NO TAG.
 #
 # `<|` always begins a tag (open `<|NAME>` or self-delimiting `<|NAME|>`), and
@@ -41,18 +99,18 @@ think_or_stray: think_block | stray_open
 # The backtick clauses are unrelated: they keep ``` from being swallowed so the
 # response_format block can match.
 content: /([^<`]|<(?!\|)(?![a-zA-Z_][a-zA-Z0-9_]*\|>)|`(?!``)|``(?!`))*/
-think_block: "<|channel>thought" reasoning "<channel|>"
 reasoning: /(.|\n)*?/
-# Some Gemma 4 fixtures emit a stray '<|channel>' (without 'thought') at the
-# start of the body. Match and discard it.
-stray_open: "<|channel>"
-# Some Gemma 4 fixtures emit trailing '<channel|>' after the body. Match
-# and discard it so the strict closing-tokens-required policy still
-# applies but the stray bytes don't surface as content.
-trailing_channel_marker: "<channel|>"
+
+# A close tag with no matching open. Kept as its own production so the bytes are
+# consumed rather than surfacing as content, while <channel|> stays a REQUIRED
+# literal wherever a channel is actually opened (POLICIES.md).
+dangling_channel_close: channel_close_tag
 
 tool_calls: tool_call+
-tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"
+# Open, directive, colon, payload, close -- the shape shared by the whole
+# tool family. `call` is a directive, not part of the tag.
+tool_call: tool_call_open_tag tool_call_directive ":" func_name gemma4_dict tool_call_close_tag
+tool_call_directive: "call"
 func_name: FUNC_NAME
 FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 
@@ -60,7 +118,10 @@ gemma4_dict: "{" (gemma4_kv ("," gemma4_kv)*)? "}"
 gemma4_kv: gemma4_dict_key ":" gemma4_value
 gemma4_dict_key: /[^:{}]+/
 gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA4_BOOL | "null"
-gemma4_string: "<|\"|>" GEMMA4_STR_CONTENT "<|\"|>"
+# The string delimiter is the self-delimiting tag form <|NAME|>, with `"` as the
+# name -- not a bespoke marker. Note it is symmetric, which is why the format has
+# no way to escape it: see ARCHITECTURE.md.
+gemma4_string: str_delim_tag GEMMA4_STR_CONTENT str_delim_tag
 GEMMA4_STR_CONTENT: /([^<]|<[^|]|<\|[^"]|<\|"[^|])*/
 gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
 
@@ -86,14 +147,21 @@ conversation: closed_turn* open_model_turn?
 
 closed_turn: system_turn | user_turn | closed_model_turn
 
-system_turn: "<|turn>system\n" opaque_body "<turn|>\n"
-user_turn:   "<|turn>user\n"   opaque_body "<turn|>\n"
+# A turn is the tag plus its ROLE, not one fused literal. The role is a
+# production, so an unexpected role is a grammar question rather than a missing
+# string nobody thought to add.
+turn_open: turn_open_tag turn_role "\n"
+turn_role: "system" | "user" | "model"
+turn_close: turn_close_tag "\n"
+
+system_turn: turn_open_tag "system" "\n" opaque_body turn_close
+user_turn:   turn_open_tag "user"   "\n" opaque_body turn_close
 
 # A model turn that completed. It may end at <turn|> or, when it left tool calls
 # outstanding, at a bare <|tool_response> -- both are required literals, not an
 # optional closer (see POLICIES.md#closing-tokens-are-required).
-closed_model_turn: "<|turn>model\n" model_body model_turn_close
-model_turn_close: "<turn|>\n" | tool_response_block+
+closed_model_turn: turn_open_tag "model" "\n" model_body model_turn_close
+model_turn_close: turn_close | tool_response_block+
 
 # The final, UNCLOSED model turn: where generation resumes. Walking it is what
 # carries already-emitted content and reasoning into the output message.
@@ -112,7 +180,7 @@ model_turn_close: "<turn|>\n" | tool_response_block+
 # in POLICIES.md#closing-tokens-are-required. Making think_block's closer
 # optional instead would let the sampler skip it during generation, which is the
 # failure that policy exists to prevent.
-open_model_turn: "<|turn>model\n" open_model_body
+open_model_turn: turn_open_tag "model" "\n" open_model_body
 open_model_body: open_thought | model_body
 
 # A thought still in progress: opener required, body captured as reasoning, no
@@ -123,12 +191,14 @@ open_model_body: open_thought | model_body
 # `open_reasoning` would parse and then emit no reasoning event at all. Its
 # non-greedy body has no following sibling here, so it runs to end of input --
 # which is right, because an unfinished thought is the last thing in the prompt.
-open_thought: "<|channel>thought\n" reasoning
+open_thought: channel_open "\n" reasoning
 
 # Same shape as the generation entry, so the same decoder tags fire.
-model_body: think_or_stray? content (think_block content)* tool_calls?
+model_body: channel_block? content (channel_block content)* tool_calls?
 
-tool_response_block: "<|tool_response>response:" func_name gemma4_dict "<tool_response|>"
+# Same open/directive/colon/payload/close shape as tool_call.
+tool_response_block: tool_response_open_tag tool_response_directive ":" func_name gemma4_dict tool_response_close_tag
+tool_response_directive: "response"
 
 # System and user bodies are not extracted -- nothing downstream reads them --
 # so they stay opaque rather than inventing structure the decoder would ignore.
