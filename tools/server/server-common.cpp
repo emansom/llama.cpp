@@ -919,7 +919,7 @@ json oaicompat_chat_params_parse(
             throw std::runtime_error("unreachable");
         }
         if (tool_choice != "auto") {
-            throw std::runtime_error("tool_choice param requires --jinja flag");
+            throw std::runtime_error("tool_choice is not supported by this chat format");
         }
     }
 

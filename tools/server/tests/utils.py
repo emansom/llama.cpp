@@ -239,8 +239,6 @@ class ServerProcess:
             server_args.append("--no-ui")
         if self.no_models_autoload:
             server_args.append("--no-models-autoload")
-        if self.jinja:
-            server_args.append("--jinja")
         else:
             server_args.append("--no-jinja")
         if self.reasoning_format is not None:

@@ -66,7 +66,8 @@ class common_chat_gemma4_transformer : public common_chat_format_transformer {
 
 extern const common_chat_format_state_rules gemma4_state_rules;
 
-// Render the Gemma 4 prompt. Mirrors `models/templates/google-gemma-4-31B-it.jinja`
+// Render the Gemma 4 prompt. Mirrors the canonical gemma-4-12B-it template (see docs/fork/ARCHITECTURE.md#normative-sources),
+// not the older vendored models/templates/google-gemma-4-31B-it.jinja
 // byte-for-byte. The template is the most intricate of the migrated formats:
 //   * System block emitted when tools, system message, or `enable_thinking`.
 //   * TypeScript-style schema with `<|"|>...<|"|>` Gemma string markers.

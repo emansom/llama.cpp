@@ -40,7 +40,6 @@ def create_server():
 ])
 def test_reasoning(template_name: str, reasoning: Literal['on', 'off', 'auto'] | None, expected_end: str, tools: list[dict]):
     global server
-    server.jinja = True
     server.reasoning = reasoning
     server.chat_template_file = f'../../../models/templates/{template_name}.jinja'
     server.start()
@@ -64,7 +63,6 @@ def test_reasoning(template_name: str, reasoning: Literal['on', 'off', 'auto'] |
 ])
 def test_date_inside_prompt(template_name: str, format: str, tools: list[dict]):
     global server
-    server.jinja = True
     server.chat_template_file = f'../../../models/templates/{template_name}.jinja'
     server.start()
 
@@ -87,7 +85,6 @@ def test_date_inside_prompt(template_name: str, format: str, tools: list[dict]):
 ])
 def test_add_generation_prompt(template_name: str, expected_generation_prompt: str, add_generation_prompt: bool):
     global server
-    server.jinja = True
     server.chat_template_file = f'../../../models/templates/{template_name}.jinja'
     server.start()
 

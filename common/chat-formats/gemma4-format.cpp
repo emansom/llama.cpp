@@ -317,7 +317,8 @@ const common_chat_format_state_rules gemma4_state_rules = {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Gemma 4 prompt writer
-// Mirrors models/templates/google-gemma-4-31B-it.jinja. The Jinja template
+// Mirrors the CANONICAL gemma-4-12B-it template (Google Gemma Eng., 2026-07-09),
+// NOT the older vendored models/templates/google-gemma-4-31B-it.jinja. The template
 // uses elaborate macros (format_argument, format_parameters,
 // format_function_declaration, format_tool_response_block, strip_thinking)
 // plus a per-message loop with continuation detection and forward-scan of

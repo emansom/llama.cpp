@@ -963,7 +963,7 @@ static void common_params_print_completion(common_params_context & ctx_arg) {
     printf("            return 0\n");
     printf("            ;;\n");
     printf("        --chat-template-file)\n");
-    printf("            COMPREPLY=( $(compgen -f -X '!*.jinja' -- \"$cur\") $(compgen -d -- \"$cur\") )\n");
+    printf("            COMPREPLY=( $(compgen -d -- \"$cur\") )\n");
     printf("            return 0\n");
     printf("            ;;\n");
     printf("        *)\n");
@@ -3532,11 +3532,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
     add_opt(common_arg(
-        {"--chat-template"}, "JINJA_TEMPLATE",
+        {"--chat-template"}, "TEMPLATE",
         string_format(
-            "set custom jinja chat template (default: template taken from model's metadata)\n"
+            "set the chat template source recorded in metadata (default: from the model)\n"
             "if suffix/prefix are specified, template will be disabled\n"
-            "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
             "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
         ),
         [](common_params & params, const std::string & value) {
@@ -3544,11 +3543,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
     add_opt(common_arg(
-        {"--chat-template-file"}, "JINJA_TEMPLATE_FILE",
+        {"--chat-template-file"}, "TEMPLATE_FILE",
         string_format(
-            "set custom jinja chat template file (default: template taken from model's metadata)\n"
+            "set the chat template source from a file (default: from the model)\n"
             "if suffix/prefix are specified, template will be disabled\n"
-            "only commonly used templates are accepted (unless --jinja is set before this flag):\n"
             "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
         ),
         [](common_params & params, const std::string & value) {
@@ -3568,7 +3566,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},
         string_format(
-            "force a pure content parser, even if a Jinja template is specified; model will output everything "
+            "force a pure content parser; model will output everything "
             "in the content section, including any reasoning and/or tool calls (default: disabled)"
         ),
         [](common_params & params, bool value) {

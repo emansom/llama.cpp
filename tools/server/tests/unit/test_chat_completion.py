@@ -11,7 +11,7 @@ def create_server():
 
 
 @pytest.mark.parametrize(
-    "model,system_prompt,user_prompt,max_tokens,re_content,n_prompt,n_predicted,finish_reason,jinja,chat_template",
+    "model,system_prompt,user_prompt,max_tokens,re_content,n_prompt,n_predicted,finish_reason,chat_template",
     [
         (None, "Book", "Hey", 8, "But she couldn't", 69, 8, "length", False, None),
         (None, "Book", "Hey", 8, "But she couldn't", 69, 8, "length", True, None),
@@ -25,9 +25,8 @@ def create_server():
         (None, "Book", [{"type": "text", "text": "What is"}, {"type": "text", "text": "the best book"}], 8, "Whillicter", 79, 8, "length", True, None),
     ]
 )
-def test_chat_completion(model, system_prompt, user_prompt, max_tokens, re_content, n_prompt, n_predicted, finish_reason, jinja, chat_template):
+def test_chat_completion(model, system_prompt, user_prompt, max_tokens, re_content, n_prompt, n_predicted, finish_reason, chat_template):
     global server
-    server.jinja = jinja
     server.chat_template = chat_template
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
@@ -162,7 +161,6 @@ def test_chat_template():
 ])
 def test_chat_template_assistant_prefill(prefill, re_prefill):
     global server
-    server.jinja = True
     server.chat_template_file = "../../../models/templates/meta-llama-Llama-3.1-8B-Instruct.jinja"
     server.debug = True  # to get the "__verbose" object in the response
     server.start()
@@ -183,7 +181,6 @@ def test_chat_template_continue_final_message_vllm_compat():
     """continue_final_message is the vLLM/transformers explicit alias for the prefill_assistant heuristic.
     Both must produce the same prompt."""
     global server
-    server.jinja = True
     server.chat_template_file = "../../../models/templates/meta-llama-Llama-3.1-8B-Instruct.jinja"
     server.debug = True
     server.start()
@@ -265,13 +262,12 @@ def test_completion_with_response_format(response_format: dict, n_predicted: int
         assert "error" in res.body
 
 
-@pytest.mark.parametrize("jinja,json_schema,n_predicted,re_content", [
+@pytest.mark.parametrize("json_schema,n_predicted,re_content", [
     (False, {"const": "42"}, 6, "\"42\""),
     (True, {"const": "42"}, 6, "\"42\""),
 ])
-def test_completion_with_json_schema(jinja: bool, json_schema: dict, n_predicted: int, re_content: str):
+def test_completion_with_json_schema(json_schema: dict, n_predicted: int, re_content: str):
     global server
-    server.jinja = jinja
     server.debug = True
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
@@ -287,13 +283,12 @@ def test_completion_with_json_schema(jinja: bool, json_schema: dict, n_predicted
     assert match_regex(re_content, choice["message"]["content"]), f'Expected {re_content}, got {choice["message"]["content"]}'
 
 
-@pytest.mark.parametrize("jinja,grammar,n_predicted,re_content", [
+@pytest.mark.parametrize("grammar,n_predicted,re_content", [
     (False, 'root ::= "a"{5,5}', 6, "a{5,5}"),
     (True, 'root ::= "a"{5,5}', 6, "a{5,5}"),
 ])
-def test_completion_with_grammar(jinja: bool, grammar: str, n_predicted: int, re_content: str):
+def test_completion_with_grammar(grammar: str, n_predicted: int, re_content: str):
     global server
-    server.jinja = jinja
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
         "max_tokens": n_predicted,

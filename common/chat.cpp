@@ -857,12 +857,12 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
     bool        add_eos   = false;
     if (model) {
         const auto * vocab     = llama_model_get_vocab(model);
-        const auto   get_token = [&](llama_token token, const char * name, const char * jinja_variable_name) {
+        const auto   get_token = [&](llama_token token, const char * name, const char * template_variable_name) {
             if (token == LLAMA_TOKEN_NULL) {
-                if (default_template_src.find(jinja_variable_name) != std::string::npos ||
-                    template_tool_use_src.find(jinja_variable_name) != std::string::npos) {
+                if (default_template_src.find(template_variable_name) != std::string::npos ||
+                    template_tool_use_src.find(template_variable_name) != std::string::npos) {
                     LOG_WRN(
-                        "common_chat_templates_init: warning: vocab does not have a %s token, jinja template won't "
+                        "common_chat_templates_init: warning: vocab does not have a %s token, the renderer won't "
                           "work as intended.\n",
                         name);
                 }
@@ -884,7 +884,6 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
     } catch (const std::exception & e) {
         LOG_ERR("%s: error: %s\n", __func__, e.what());
         LOG_ERR("%s: failed to initialize chat template\n", __func__);
-        LOG_ERR("%s: please consider disabling jinja via --no-jinja, or using another chat template\n", __func__);
         throw e;
     }
     if (!template_tool_use_src.empty()) {
@@ -1551,7 +1550,7 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
     return common_chat_params_init_gemma4(tmpl, params);
 }
 
-static common_chat_params common_chat_templates_apply_jinja(const struct common_chat_templates *        tmpls,
+static common_chat_params common_chat_templates_apply_impl(const struct common_chat_templates *        tmpls,
                                                             const struct common_chat_templates_inputs & inputs) {
     autoparser::generation_params params;
     params.tools = common_chat_tools_to_json_oaicompat(inputs.tools);
@@ -1726,7 +1725,7 @@ static common_chat_params common_chat_templates_apply_legacy(const struct common
     if (res < 0) {
         // if the custom "tmpl" is not supported, we throw an error
         // this is a bit redundant (for good), since we're not sure if user validated the custom template with llama_chat_verify_template()
-        throw std::runtime_error("this custom template is not supported, try using --jinja");
+        throw std::runtime_error("unsupported chat template; this build serves Gemma 4 only (see FORK.md)");
     }
 
     // if it turns out that our buffer is too small, we resize it
@@ -1738,7 +1737,7 @@ static common_chat_params common_chat_templates_apply_legacy(const struct common
 
     // for safety, we check the result again
     if (res < 0 || (size_t) res > buf.size()) {
-        throw std::runtime_error("failed to apply chat template, try using --jinja");
+        throw std::runtime_error("failed to render the chat prompt (see FORK.md)");
     }
 
     common_chat_params params;
@@ -1756,7 +1755,7 @@ common_chat_params common_chat_templates_apply(const struct common_chat_template
     GGML_ASSERT(tmpls != nullptr);
     // One path. There is no template engine to select between any more; the
     // format plugin's renderer builds the prompt. See FORK.md.
-    return common_chat_templates_apply_jinja(tmpls, inputs);
+    return common_chat_templates_apply_impl(tmpls, inputs);
 }
 
 common_chat_msg common_chat_parse(const std::string &               input,

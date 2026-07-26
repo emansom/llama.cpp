@@ -263,7 +263,6 @@ def test_anthropic_count_tokens_no_max_tokens():
 
 def test_anthropic_tool_use_basic():
     """Test basic tool use"""
-    server.jinja = True
     server.start()
 
     res = server.make_request("POST", "/v1/messages", data={
@@ -316,7 +315,6 @@ def test_anthropic_tool_result():
     fail with a 500 error: "unsupported content[].type" because tool_result
     blocks would remain in the user message content array.
     """
-    server.jinja = True
     server.start()
 
     res = server.make_request("POST", "/v1/messages", data={
@@ -364,7 +362,6 @@ def test_anthropic_tool_result_with_text():
     messages: a user message with text, followed by tool messages.
     Without proper handling, this would fail with 500: "unsupported content[].type"
     """
-    server.jinja = True
     server.start()
 
     res = server.make_request("POST", "/v1/messages", data={
@@ -410,7 +407,6 @@ def test_anthropic_tool_result_with_image():
     silently dropped. With a non-multimodal model, the converted image
     triggers a clear error message instead of being ignored.
     """
-    server.jinja = True
     server.start()
 
     # Small 1x1 red PNG image in base64 (same as vision tests)
@@ -463,7 +459,6 @@ def test_anthropic_tool_result_with_image():
 
 def test_anthropic_tool_result_error():
     """Test tool result with error flag"""
-    server.jinja = True
     server.start()
 
     res = server.make_request("POST", "/v1/messages", data={
@@ -502,7 +497,6 @@ def test_anthropic_tool_result_error():
 
 def test_anthropic_tool_streaming():
     """Test streaming with tool use"""
-    server.jinja = True
     server.start()
 
     res = server.make_stream_request("POST", "/v1/messages", data={
@@ -739,7 +733,6 @@ def test_anthropic_empty_messages():
 
 def test_anthropic_streaming_content_block_indices():
     """Test that content block indices are correct in streaming"""
-    server.jinja = True
     server.start()
 
     # Request that might produce both text and tool use
@@ -786,7 +779,6 @@ def test_anthropic_streaming_content_block_indices():
 
 def test_anthropic_thinking():
     """Test extended thinking parameter"""
-    server.jinja = True
     server.start()
 
     res = server.make_request("POST", "/v1/messages", data={
@@ -876,7 +868,6 @@ def test_anthropic_vs_openai_different_response_format():
 def test_anthropic_thinking_history_in_count_tokens():
     """Test that interleaved thinking blocks in conversation history are not dropped during conversion."""
     global server
-    server.jinja = True
     server.chat_template_file = '../../../models/templates/Qwen-Qwen3-0.6B.jinja'
     server.start()
 
@@ -945,7 +936,6 @@ def test_anthropic_thinking_history_in_count_tokens():
 def test_anthropic_thinking_history_in_template():
     """Test that reasoning_content from converted interleaved thinking blocks renders in the prompt."""
     global server
-    server.jinja = True
     server.chat_template_file = '../../../models/templates/Qwen-Qwen3-0.6B.jinja'
     server.start()
 
@@ -1012,7 +1002,6 @@ def test_anthropic_thinking_with_reasoning_model(stream):
     server.model_hf_repo = "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
     server.model_hf_file = "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"
     server.reasoning_format = "deepseek"
-    server.jinja = True
     server.n_ctx = 8192
     server.n_predict = 1024
     server.server_port = 8084

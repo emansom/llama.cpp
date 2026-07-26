@@ -249,7 +249,6 @@ def do_test_completion_with_required_tool_tiny(server: ServerProcess, tool: dict
 def test_completion_with_required_tool_real_model(tool: dict, argument_key: str | None, hf_repo: str, template_override: str | Tuple[str, str | None] | None, stream: CompletionMode):
     global server
     n_predict = 512
-    server.jinja = True
     server.n_ctx = 8192
     server.n_predict = n_predict
     server.model_hf_repo = hf_repo
@@ -313,7 +312,6 @@ def do_test_completion_without_tool_call(server: ServerProcess, n_predict: int, 
 def test_completion_without_tool_call_fast(template_name: str, n_predict: int, tools: list[dict], tool_choice: str | None, stream: CompletionMode):
     global server
     server.n_predict = n_predict
-    server.jinja = True
     server.chat_template_file = f'../../../models/templates/{template_name}.jinja'
     server.start()
     do_test_completion_without_tool_call(server, n_predict, tools, tool_choice, stream=stream == CompletionMode.STREAMED)
@@ -335,7 +333,6 @@ def test_completion_without_tool_call_fast(template_name: str, n_predict: int, t
 def test_completion_without_tool_call_slow(template_name: str, n_predict: int, tools: list[dict], tool_choice: str | None, stream: CompletionMode):
     global server
     server.n_predict = n_predict
-    server.jinja = True
     server.chat_template_file = f'../../../models/templates/{template_name}.jinja'
     server.start(timeout_seconds=TIMEOUT_START_SLOW)
     do_test_completion_without_tool_call(server, n_predict, tools, tool_choice, stream=stream == CompletionMode.STREAMED)
@@ -386,7 +383,6 @@ def test_completion_without_tool_call_slow(template_name: str, n_predict: int, t
 def test_weather(hf_repo: str, template_override: str | Tuple[str, str | None] | None, stream: CompletionMode):
     global server
     n_predict = 512
-    server.jinja = True
     server.n_ctx = 8192
     server.n_predict = n_predict
     server.model_hf_repo = hf_repo
@@ -445,7 +441,6 @@ def do_test_weather(server: ServerProcess, **kwargs):
 ])
 def test_calc_result(result_override: str | None, n_predict: int, hf_repo: str, template_override: str | Tuple[str, str | None] | None, stream: CompletionMode):
     global server
-    server.jinja = True
     server.n_ctx = 8192 * 2
     server.n_predict = n_predict
     server.model_hf_repo = hf_repo
@@ -533,7 +528,6 @@ def do_test_calc_result(server: ServerProcess, result_override: str | None, n_pr
 def test_thoughts(n_predict: int, reasoning_format: Literal['deepseek', 'none'] | None, expect_content: str | None, expect_reasoning_content: str | None, hf_repo: str, template_override: str | Tuple[str, str | None] | None, stream: CompletionMode):
     global server
     server.reasoning_format = reasoning_format
-    server.jinja = True
     server.n_ctx = 8192 * 2
     server.n_predict = n_predict
     server.model_hf_repo = hf_repo
@@ -606,7 +600,6 @@ def test_thoughts(n_predict: int, reasoning_format: Literal['deepseek', 'none'] 
 def test_hello_world(hf_repo: str, template_override: str | Tuple[str, str | None] | None, stream: CompletionMode):
     global server
     n_predict = 512 # High because of DeepSeek R1
-    server.jinja = True
     server.n_ctx = 8192
     server.n_predict = n_predict
     server.model_hf_repo = hf_repo
