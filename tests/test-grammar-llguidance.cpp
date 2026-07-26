@@ -2535,6 +2535,140 @@ static int compile_only(const char * path) {
     return 0;
 }
 
+// The renderer must not emit a BOS the tokenizer is going to add.
+//
+// This has to be asserted with a REAL bos token, which is why it did not exist
+// before: every other test in the tree constructs templates with
+// `bos_token_override = ""`, so none of them has ever had a BOS to duplicate. The
+// defect was therefore invisible offline and showed up as one
+// `check_double_bos_eos` warning per request in a server log -- two BOS tokens at
+// the front of every prompt, shifting every position after them.
+//
+// `add_bos` mirrors `llama_vocab_get_add_bos()`, and the server tokenizes the
+// rendered prompt with add_special=true. So the rule is: the renderer emits BOS
+// only when the tokenizer will not.
+static void test_gemma4_bos_not_doubled() {
+    const std::string bos = "<bos>";
+
+    // Driven at the RENDERER, not through common_chat_templates_apply: that
+    // function derives add_bos from the templates object, which in turn reads it
+    // off a vocab. Going through it would mean loading two models that differ
+    // only in `add_bos`, to test four lines. The renderer is where the decision
+    // is made and where its inputs are directly expressible.
+    auto rendered_with = [&](bool add_bos) {
+        common_chat_render_params params;
+        params.messages = json::array({
+            json{ { "role", "user" }, { "content", "hi" } },
+        });
+        params.add_generation_prompt = true;
+        params.add_bos               = add_bos;
+        return common_chat_gemma4_render(params, bos).prompt;
+    };
+
+    const auto tokenizer_adds = rendered_with(true);
+    if (tokenizer_adds.compare(0, bos.size(), bos) == 0) {
+        fprintf(stderr, "    FAIL: renderer emitted a BOS the tokenizer will also add\n      %s\n",
+                tokenizer_adds.substr(0, 40).c_str());
+        assert(false);
+    }
+
+    // The other half matters too: a vocab that does NOT add BOS must still get
+    // one, or the prompt is missing it entirely.
+    const auto renderer_adds = rendered_with(false);
+    if (renderer_adds.compare(0, bos.size(), bos) != 0) {
+        fprintf(stderr, "    FAIL: no BOS from either side\n      %s\n",
+                renderer_adds.substr(0, 40).c_str());
+        assert(false);
+    }
+
+    fprintf(stderr, "\n    add_bos=true  -> '%s...'\n", tokenizer_adds.substr(0, 16).c_str());
+    fprintf(stderr, "    add_bos=false -> '%s...'\n", renderer_adds.substr(0, 16).c_str());
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E BOS emitted exactly once, whoever emits it\n");
+}
+
+// Format resolution: request > config > declared metadata, and nothing else.
+//
+// This was verified by hand -- start a server four ways and read the log line --
+// which is exactly the kind of check that stops being run. It is in-process here
+// because `common_chat_format_resolve` takes the model and reports its own source
+// string, so every precedence claim is an assertion rather than a log grep.
+//
+// The two ctest registrations of this binary supply the two model shapes for
+// free: llama-bpe declares an architecture with no plugin, the Gemma 4 GGUF
+// declares one with a plugin. So `registered_arch` selects which half of the
+// metadata behaviour to assert, and both halves run on every CI pass.
+//
+// The request tier is NOT here: it lives in the server's parameter parsing, and
+// is covered end-to-end in tools/server/tests/unit/test_chat_format.py.
+static void test_chat_format_resolution(const llama_model * model, bool registered_arch) {
+    fprintf(stderr, "\n  chat-format resolution (%s architecture):\n",
+            registered_arch ? "registered" : "unregistered");
+
+    // ── config tier ──────────────────────────────────────────────────────────
+    {
+        std::string source;
+        const auto  name = common_chat_format_resolve(model, "gemma4", &source);
+        assert(name == "gemma4");
+        assert(source == "--chat-format");
+        fprintf(stderr, "    --chat-format gemma4              -> '%s' from %s\n", name.c_str(), source.c_str());
+    }
+
+    // Config BEATS metadata, and this is the assertion that proves it rather than
+    // merely being consistent with it: the model on hand declares an
+    // architecture, so if metadata were consulted first this would resolve
+    // happily. It must instead throw, and blame --chat-format.
+    {
+        bool threw = false;
+        try {
+            common_chat_format_resolve(model, "definitely-not-a-format", nullptr);
+        } catch (const std::exception & e) {
+            threw = true;
+            const std::string msg = e.what();
+            assert(msg.find("definitely-not-a-format") != std::string::npos);
+            assert(msg.find("--chat-format") != std::string::npos);
+            // Naming what IS available is half the value of the error.
+            assert(msg.find("gemma4") != std::string::npos);
+            fprintf(stderr, "    --chat-format <unknown>           -> throws, blames --chat-format\n");
+        }
+        assert(threw);
+    }
+
+    // ── metadata tier ────────────────────────────────────────────────────────
+    if (registered_arch) {
+        std::string source;
+        const auto  name = common_chat_format_resolve(model, "", &source);
+        assert(name == "gemma4");
+        assert(source == "GGUF general.architecture");
+        fprintf(stderr, "    no --chat-format                  -> '%s' from %s\n", name.c_str(), source.c_str());
+    } else {
+        // A model this build cannot serve fails NAMING the architecture it
+        // declared -- the difference between "unsupported model" and "half-works".
+        bool threw = false;
+        try {
+            common_chat_format_resolve(model, "", nullptr);
+        } catch (const std::exception & e) {
+            threw = true;
+            const std::string msg = e.what();
+            assert(msg.find("GGUF general.architecture") != std::string::npos);
+            fprintf(stderr, "    no --chat-format, no plugin       -> throws, blames the GGUF\n");
+        }
+        assert(threw);
+    }
+
+    // ── nothing to resolve from ──────────────────────────────────────────────
+    // Not an error: common_chat_verify_template legitimately reaches here without
+    // a model. The error belongs where a format is actually needed.
+    {
+        std::string source;
+        const auto  name = common_chat_format_resolve(nullptr, "", &source);
+        assert(name.empty());
+        assert(source == "unresolved");
+        fprintf(stderr, "    no model, no --chat-format        -> unresolved, no throw\n");
+    }
+
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E chat-format resolution: config > metadata, both attributed\n");
+}
+
 int main(int argc, const char ** argv) {
     fprintf(stdout, "Running llguidance integration tests...\n");
 
@@ -2632,7 +2766,9 @@ int main(int argc, const char ** argv) {
         test_gemma4_fsm_conformance(argv[2]);
         test_gemma4_user_grammar();
         test_gemma4_response_schema_whitespace();
+        test_gemma4_bos_not_doubled();
         test_gemma4_entry_selection();
+        test_chat_format_resolution(model, /* registered_arch = */ true);
         test_gemma4_contract_check_catches_drift(argv[2]);
         llama_free(ctx);
         llama_model_free(model);
@@ -2645,6 +2781,10 @@ int main(int argc, const char ** argv) {
     test_special_chars();
     test_quantifiers();
     test_json_schema();
+
+    // llama-bpe declares `llama`, which has no plugin -- so this run is what
+    // covers the unsupported-model half of resolution.
+    test_chat_format_resolution(model, /* registered_arch = */ false);
 
     test_sampler_chain();
 

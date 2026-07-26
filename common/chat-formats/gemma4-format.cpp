@@ -930,8 +930,27 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const common_chat_render_p
     gemma4_reject_control_tokens(inputs.messages, "");
     gemma4_reject_control_tokens(inputs.tools, "tools");
 
-    // 1. BOS token.
-    out << bos_token;
+    // 1. BOS token -- but ONLY when the tokenizer will not add one itself.
+    //
+    // `add_bos` is `llama_vocab_get_add_bos()`, true for every Gemma 4 GGUF. The
+    // server tokenizes this prompt with add_special=true, so emitting the token
+    // here as well put TWO BOS tokens at the front of every single request.
+    // Measured on the same E2B weights: stock logs no double-BOS warning, this
+    // logged one per request.
+    //
+    // Upstream reaches the same place by another route -- it binds an EMPTY
+    // bos_token for Minja, so the canonical template's `{{- bos_token -}}`
+    // expands to nothing. Verified rather than assumed: stock's /apply-template
+    // output starts at `<|turn>system`, no BOS, despite the template asking for
+    // one. This renderer takes the token directly, so the decision has to be made
+    // here, and `add_bos` was already carried on render params for it.
+    //
+    // The offline suite could not have caught this: every test constructs
+    // templates with `bos_token_override = ""`, so no test has ever had a BOS to
+    // duplicate. It surfaced in a server log.
+    if (!inputs.add_bos) {
+        out << bos_token;
+    }
 
     // 2. System block: emitted when enable_thinking, tools, or first message system/developer.
     const bool has_tools = inputs.tools.is_array() && !inputs.tools.empty();
