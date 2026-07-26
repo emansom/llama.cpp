@@ -390,6 +390,52 @@ Verified by `test-chat.cpp` — streaming prefixes are accumulated via
 `compute_diffs` and compared against each prefix's full parse. Failures surface
 as `Error comparing accumulated message to current`.
 
+## The empty-thought prefill
+
+On a thinking-off turn the renderer emits `<|channel>thought\n<channel|>` — a
+thought opened and immediately closed — so the model goes straight to the answer.
+Google shipped this in the `gemma-4-12B-it` template to "suppress 'ghost' thought
+channels that may appear even when thinking is deactivated", and never backported
+it to the E2B/E4B repos. The renderer emits it for **every** Gemma 4 variant,
+because the fix describes the architecture rather than one checkpoint.
+
+`--no-chat-thought-prefill` turns it off. That switch is not a hedge: it exists so
+this A/B can be run against the renderer, and so a variant that genuinely differs
+could opt out.
+
+Measured on E2B, thinking off, a two-property schema, N=100 per arm — same binary,
+same seeds, one flag apart:
+
+| | failures | avg completion tokens |
+|---|---|---|
+| prefill **on** (shipped) | 1/100 | **25** |
+| prefill **off** | 4/100 | **136** |
+
+The failure counts are too close to carry weight on their own (4 vs 1 of 100).
+The token cost is not — **5.4×** — and the mechanism is directly observable.
+Sampling the off arm, 4 of 20 calls opened a real thought channel (~1300
+characters, 326–376 tokens) on a request that asked for no thinking:
+
+```
+seed  tokens  thought?
+   5     326  YES (1272 chars)
+  11     332  YES (1323 chars)
+  14     360  YES (1352 chars)
+  15     376  YES (1453 chars)
+```
+
+With the prefill on, the prompt ends at `IN_CONTENT`, whose entry rules carry no
+`channel_block` at all — so the ghost channel is not unlikely, it is
+unrepresentable. The prefill and the FSM entry table are the same guarantee
+expressed twice, which is why the entry table earns its keep.
+
+**Historical note on the numbers.** The Jinja-era measurement was 10/100 failures
+(avg 435 tokens) against 0/100 (avg 24). Failures are far lower on both arms now
+because a *different* defect dominated them: llguidance's `%json` allowed
+unbounded whitespace, and 12% of calls looped on it regardless of the prefill.
+With that fixed (`whitespace_flexible: false`) what remains is the prefill's real
+effect, which was always about wasted tokens rather than outright failures.
+
 ## How a new format is added
 
 1. Write `grammars/chat/<name>.lark` and its GBNF companion. Cover the

@@ -47,6 +47,8 @@ struct common_chat_render_params {
     bool                                  is_inference  = true;
     bool                                  add_inference = false;
     bool                                  mark_input    = true;  // mark input strings when rendering
+    // See common_params::chat_thought_prefill.
+    bool                                  thought_prefill = true;
 
     bool has_continuation() const {
         return continue_final_message != COMMON_CHAT_CONTINUATION_NONE && !continue_msg.empty();

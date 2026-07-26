@@ -1207,9 +1207,15 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const common_chat_render_p
         prev_message_type != PREV_TOOL_CALL) {
         out << "<|turn>model\n";
         entry = common_chat_format_state::IN_GENERATION_PROMPT;
-        if (!inputs.enable_thinking) {
+        if (!inputs.enable_thinking && inputs.thought_prefill) {
             // The empty-thought prefill opens AND closes a thought, so the model
             // resumes in content -- see the prefill note in this file.
+            //
+            // Switchable, and ON for every Gemma 4 variant. The switch is not a
+            // hedge: it exists so the A/B that justifies the default can be run
+            // against this renderer at all, and so a variant that genuinely
+            // differs could opt out. Turning it off is measurably worse -- see
+            // ARCHITECTURE.md for the numbers.
             out << "<|channel>thought\n<channel|>";
             entry = common_chat_format_state::IN_CONTENT;
         }

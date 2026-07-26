@@ -3561,6 +3561,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
+        {"--chat-thought-prefill"},
+        {"--no-chat-thought-prefill"},
+        "emit the empty-thought prefill on a thinking-off turn (default: enabled).\n"
+        "Gemma 4 emits a runaway 'ghost' thought channel on a thinking-off\n"
+        "structured call without it; the prefill opens and immediately closes a\n"
+        "thought so the model goes straight to the answer. Disabling it is\n"
+        "measurably worse and exists so the A/B can be run -- see\n"
+        "docs/fork/ARCHITECTURE.md.",
+        [](common_params & params, bool value) {
+            params.chat_thought_prefill = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CHAT_THOUGHT_PREFILL"));
+    add_opt(common_arg(
         {"--chat-format"}, "NAME",
         "chat format plugin serving this model (renderer, validator, tracker, grammar).\n"
         "absent: the model's declared general.architecture. A request may name a\n"

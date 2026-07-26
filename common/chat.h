@@ -310,6 +310,8 @@ struct common_chat_templates_inputs {
     bool                                  add_bos = false;
     bool                                  add_eos = false;
     bool                                  force_pure_content = false;
+    // See common_params::chat_thought_prefill.
+    bool                                  thought_prefill    = true;
 };
 
 struct common_chat_params {

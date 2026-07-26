@@ -2106,6 +2106,7 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
     params.reasoning_format      = inputs.reasoning_format;
     params.enable_thinking       = inputs.enable_thinking;
     params.preserve_thinking     = inputs.preserve_thinking;
+    params.thought_prefill       = inputs.thought_prefill;
     params.grammar               = inputs.grammar;
     params.now                   = inputs.now;
     params.add_generation_prompt = inputs.add_generation_prompt;

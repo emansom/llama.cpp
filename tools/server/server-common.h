@@ -300,6 +300,8 @@ struct server_chat_params {
     std::string reasoning_budget_message;
     std::string media_path;
     bool force_pure_content = false;
+    // See common_params::chat_thought_prefill.
+    bool thought_prefill = true;
 };
 
 // used by /completions endpoint

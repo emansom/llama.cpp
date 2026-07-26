@@ -634,6 +634,11 @@ struct common_params {
     // model's declared general.architecture. This is how a format is selected --
     // never from template text. See docs/fork/POLICIES.md#nothing-is-inferred.
     std::string chat_format;
+    // Emit the empty-thought prefill on a thinking-off turn. ON for every Gemma 4
+    // variant, which is the measured-correct default; the switch exists so a
+    // variant that genuinely differs can opt out, and so the A/B that justifies
+    // the default can be run at all. See docs/fork/ARCHITECTURE.md.
+    bool chat_thought_prefill = true;
 
     // server CORS params
     std::string cors_origins = "*";
