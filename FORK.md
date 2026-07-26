@@ -180,3 +180,41 @@ eventual contribution is a **pluggable value-syntax for
 `json-schema-to-grammar`** — precisely what `TODO @aldehir` asks for — which
 would let Gemma 4 get per-tool schemas with no special-casing and make most of
 this fork's grammar work unnecessary for everyone.
+
+### Report upstream once this settles
+
+Three findings that are not Gemma-4-specific and belong to their projects, not
+here. Deliberately parked until the fork stops moving — filing a bug against a
+moving reproducer wastes the maintainer's time as much as our own.
+
+**1. llguidance panics on `[lazy]`** (guidance-ai/llguidance). The documented
+lazy-lexeme idiom aborts the process. Three lines, no model specifics:
+
+```lark
+%llguidance {}
+reasoning[lazy]: /(.|\n)*/
+start: "<|c>" reasoning "<c|>"
+```
+
+matching `<|c>think<c|>` gives `assertion failed: !state.has_lowest_match()` in
+`parser/src/panic_utils.rs`. It reproduces with any vocabulary and whatever
+follows the lazy rule, including nothing. Worth reporting even though this fork
+no longer needs the option — the markers became special tokens instead, and the
+whole question went away.
+
+**2. Added-but-not-special tokens are invisible to llguidance**
+(ggml-org/llama.cpp, `common/llguidance.cpp`). The bridge marked a token special
+by prefixing `\xff` when detokenizing with `special=false` rendered nothing,
+which catches `CONTROL` and misses `USER_DEFINED`. Both come from the
+tokenizer's added-tokens list — the flag only records whether the entry was
+marked special — so a grammar could not name half of Gemma 4's markers:
+`unknown special token: "<|channel>"`. Any model whose markers are added rather
+than control tokens has this. The fix here is two lines and reads a declared
+attribute; it should apply as-is.
+
+**3. llguidance's own test grammars do not survive a large vocabulary**
+(ggml-org/llama.cpp, `tests/test-grammar-llguidance.cpp`). Run against Gemma 4's
+262k-token vocabulary the `+` quantifier case dies with `Too many items (limit
+50000; mask); try avoiding single-byte/short lexemes`. That is a property of
+those single-byte test grammars rather than of this fork, and it is why the
+Gemma 4 case runs as a separate invocation with its own weights.
