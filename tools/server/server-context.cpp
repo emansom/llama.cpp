@@ -1448,15 +1448,22 @@ private:
             try {
                 chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
 
-                SRV_TRC("%s: chat template, example_format: '%s'\n", __func__,
-                    common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
+                // An embedding model has no chat: it serves /v1/embeddings and never
+                // renders a prompt. Both probes below APPLY the template, which now
+                // forces chat-format resolution and a grammar lookup -- so on a model
+                // that has no business having either they abort startup. That is what
+                // broke the Granite embedder once format resolution became mandatory.
+                if (!params_base.embedding) {
+                    SRV_TRC("%s: chat template, example_format: '%s'\n", __func__,
+                        common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
 
-                // thinking is enabled if:
-                // 1. It's not explicitly disabled via --reasoning off
-                // 2. The chat template supports it
-                const bool template_supports_thinking = params_base.use_jinja && common_chat_templates_support_enable_thinking(chat_templates.get());
-                enable_thinking = params_base.enable_reasoning != 0 && template_supports_thinking;
-                SRV_TRC("%s: chat template, thinking = %d\n", __func__, enable_thinking);
+                    // thinking is enabled if:
+                    // 1. It's not explicitly disabled via --reasoning off
+                    // 2. The chat format supports it
+                    const bool supports_thinking = common_chat_templates_support_enable_thinking(chat_templates.get());
+                    enable_thinking = params_base.enable_reasoning != 0 && supports_thinking;
+                    SRV_TRC("%s: chat template, thinking = %d\n", __func__, enable_thinking);
+                }
             } catch (const std::exception & e) {
                 SRV_ERR("%s: chat template parsing error: %s\n", __func__, e.what());
                 SRV_ERR("%s: please consider disabling jinja via --no-jinja, or use a custom chat template via --chat-template\n", __func__);

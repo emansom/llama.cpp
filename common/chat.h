@@ -62,6 +62,9 @@ struct chat_template_caps {
     bool supports_object_arguments = true;
     bool supports_string_content   = true;
     bool supports_typed_content    = true;
+    // Gemma 4 keeps thoughts across an active tool-calling turn (Google's Rule 2),
+    // so preserve_reasoning is supported. See docs/fork/ARCHITECTURE.md.
+    bool supports_preserve_reasoning = true;
 
     std::map<std::string, bool> to_map() const {
         return {
@@ -71,6 +74,7 @@ struct chat_template_caps {
             { "supports_object_arguments", supports_object_arguments },
             { "supports_string_content",   supports_string_content   },
             { "supports_typed_content",    supports_typed_content    },
+            { "supports_preserve_reasoning", supports_preserve_reasoning },
         };
     }
 };
