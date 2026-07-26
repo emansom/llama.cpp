@@ -219,7 +219,6 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     )
 endif()
 
-llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
 llama_build_and_test(test-log.cpp)
 llama_build_and_test(
     test-peg-parser.cpp

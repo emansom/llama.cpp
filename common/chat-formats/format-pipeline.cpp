@@ -46,11 +46,8 @@ void common_chat_format_pipeline::run(const common_peg_ast_arena & arena,
 // held to the standard docs/fork/ARCHITECTURE.md sets for Gemma 4, and keeping
 // them would have made the format plugin interface aspirational instead of real.
 //
-// Returning an empty pipeline (.valid() == false) makes the chat.cpp dispatcher
-// fall back to the legacy common_chat_peg_mapper. That path is unreachable in a
-// correctly configured server -- format resolution rejects anything that is not
-// a registered plugin before generation starts -- and it is retained only for
-// the auto-parser used by tests/test-chat-auto-parser.cpp.
+// An empty pipeline (.valid() == false) is a hard error at the call site: there
+// is no fallback extractor. A format either has a pipeline or is not served.
 common_chat_format_pipeline common_chat_make_format_pipeline(
     common_chat_format      format,
     common_chat_msg &       msg,

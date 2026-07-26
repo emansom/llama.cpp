@@ -634,7 +634,7 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar) {
         std::string normalized_name = rdef.name;
         for (char & c : normalized_name) { if (c == '_') c = '-'; }
 
-        // Apply semantic tags based on conventional rule names (drives common_chat_peg_mapper)
+        // Apply semantic tags based on conventional rule names
         const std::string & n = normalized_name;
         if (n == "tool-call") {
             body = builder.tag("tool", body);

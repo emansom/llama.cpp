@@ -1774,13 +1774,15 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             pipeline.run(ctx.ast, result);
             return;
         }
-        std::unique_ptr<common_chat_peg_mapper> mapper;
-        if (params.format == COMMON_CHAT_FORMAT_PEG_GEMMA4) {
-            mapper = std::make_unique<common_chat_peg_gemma4_mapper>(msg);
-        } else {
-            mapper = std::make_unique<common_chat_peg_mapper>(msg);
-        }
-        mapper->from_ast(ctx.ast, result);
+        // No fallback. A format either has a pipeline or is not served.
+        //
+        // The legacy mapper used to sit here, and it is exactly why the FSM ran
+        // as dead code without anyone noticing: when the pipeline dispatch went
+        // missing, extraction quietly kept working on the mapper instead of
+        // failing. Removing it makes that class of silent bypass impossible.
+        throw std::runtime_error(
+            std::string("no extraction pipeline for chat format ") +
+            common_chat_format_name(params.format) + " (see FORK.md)");
     };
 
     if (result.fail()) {
