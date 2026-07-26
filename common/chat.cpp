@@ -1148,29 +1148,18 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     const auto rendered    = common_chat_gemma4_render(inputs, tmpl.bos_token());
     data.prompt            = rendered.prompt;
     data.entry_state       = rendered.entry_state;
-    data.entry_content     = rendered.entry_content;
-    data.entry_reasoning   = rendered.entry_reasoning;
 
-    // Walk the rendered prompt through the format's `conversation` rule. This is
-    // one traversal doing two jobs that were never really separate: it VALIDATES
-    // the input (a conversation the model was not designed to receive fails
-    // here), and it leaves the tracker holding where the prompt ends -- so the
-    // state is established by walking, not summarised by the renderer.
+
+    // Hand extraction the prompt and a parser rooted at the `conversation` rule.
+    // The SAME pipeline walks the prompt and then the generation, so validation
+    // of the input and establishment of the FSM state are one traversal -- and
+    // whatever the open assistant turn already contains lands in the output
+    // message on the way through, rather than being summarised here.
     {
         const auto conv_grammar = common_chat_grammar_require("gemma4");
-        try {
-            const auto conv_arena = chat_grammar_to_peg(conv_grammar, "conversation");
-            common_chat_msg          probe;
-            common_chat_parser_params conv_params;
-            conv_params.format              = COMMON_CHAT_FORMAT_PEG_GEMMA4;
-            conv_params.grammar_file_parser = true;
-            conv_params.parser              = conv_arena;
-            (void) common_chat_peg_parse(conv_arena, data.prompt, /* is_partial = */ true, conv_params);
-        } catch (const std::exception & e) {
-            throw std::runtime_error(std::string("rendered prompt failed conversation validation: ") + e.what());
-        }
+        data.rendered_prompt     = data.prompt;
+        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation");
     }
-    data.generation_prompt.clear();  // not part of this format's contract
 
     data.message_delimiters = {
         { COMMON_CHAT_ROLE_USER,      "<|turn>user"  },
@@ -1791,15 +1780,22 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     // files were ported but nothing called the factory, so the FSM this fork is
     // built around was dead code and extraction silently ran on the mapper.
     auto extract_message = [&](common_chat_msg & msg) {
-        // Seed the output message with what the turn already contains, so a
-        // continuation completes the caller's partial message instead of
-        // returning only the newly generated tail.
-        msg.content           = params.entry_content;
-        msg.reasoning_content = params.entry_reasoning;
-
         auto pipeline = common_chat_make_format_pipeline(params.format, msg, is_partial, params.reasoning_format);
         if (pipeline.valid()) {
-            pipeline.seed_entry(params.entry_state);
+            // ONE tracker across BOTH parses. The pipeline owns the tracker,
+            // decoder, transformer and presenter, so running it over the prompt
+            // and then over the generation is a single continuous walk: the
+            // tracker carries its state forward, and anything the open assistant
+            // turn already contains lands in `msg` on the way through.
+            //
+            // This is what removes the last derived artefact. Nothing summarises
+            // the entry state or the prefilled content for the FSM any more --
+            // it walks the conversation and knows.
+            if (!params.rendered_prompt.empty() && !params.conversation_parser.empty()) {
+                common_peg_parse_context pctx(params.rendered_prompt, flags);
+                auto presult = params.conversation_parser.parse(pctx);
+                pipeline.run(pctx.ast, presult);
+            }
             pipeline.run(ctx.ast, result);
             return;
         }
