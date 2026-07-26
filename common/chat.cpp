@@ -2,10 +2,14 @@
 
 #include "chat-auto-parser-helpers.h"
 #include "chat-auto-parser.h"
+#include "chat-formats/format-pipeline.h"
+#include "chat-formats/gemma4-format.h"
 #include "chat-peg-parser.h"
 #include "common.h"
+#include "gbnf-to-peg.h"
 #include "ggml.h"
 #include "json-schema-to-grammar.h"
+#include "lark-to-peg.h"
 #include "log.h"
 
 #include "jinja/value.h"
@@ -20,6 +24,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 
@@ -27,10 +33,93 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 using json = nlohmann::ordered_json;
+
+// ---------------------------------------------------------------------------
+// Chat grammar registry
+// ---------------------------------------------------------------------------
+// Grammar files (*.lark, *.gbnf) are read from disk once at startup and cached
+// in process memory. Format init functions call common_chat_grammar_get() to
+// retrieve the grammar for their format key.
+//
+// This replaces deriving a grammar from the chat template's text. Format
+// selection is by name only -- see docs/fork/POLICIES.md#nothing-is-inferred.
+// ---------------------------------------------------------------------------
+
+static std::unordered_map<std::string, std::string> s_chat_grammar_registry;
+
+void common_chat_grammar_init(const std::string & grammars_dir) {
+    s_chat_grammar_registry.clear();
+
+    if (grammars_dir.empty()) {
+        return;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(grammars_dir, ec)) {
+        LOG_WRN("Chat grammar directory not found: %s\n", grammars_dir.c_str());
+        return;
+    }
+
+    for (const auto & entry : std::filesystem::directory_iterator(grammars_dir, ec)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const auto & p   = entry.path();
+        const auto   ext = p.extension().string();
+        if (ext != ".lark" && ext != ".gbnf") {
+            continue;
+        }
+
+        std::ifstream f(p);
+        if (!f.is_open()) {
+            LOG_WRN("Failed to open grammar file: %s\n", p.string().c_str());
+            continue;
+        }
+        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+        // Key = "<stem><ext>", e.g. "gemma4.lark", "gemma4.gbnf"
+        std::string key = p.stem().string() + ext;
+        s_chat_grammar_registry[key] = std::move(content);
+    }
+
+    LOG_INF("Loaded %zu chat grammar file(s) from %s\n",
+            s_chat_grammar_registry.size(), grammars_dir.c_str());
+}
+
+std::string common_chat_grammar_get(const std::string & model_key) {
+    // Lark when llguidance is compiled in, GBNF otherwise.
+#ifdef LLAMA_USE_LLGUIDANCE
+    const std::string key = model_key + ".lark";
+#else
+    const std::string key = model_key + ".gbnf";
+#endif
+    auto it = s_chat_grammar_registry.find(key);
+    if (it == s_chat_grammar_registry.end()) {
+        return {};
+    }
+    return it->second;
+}
+
+// Registry lookup that refuses to degrade. An empty grammar is not a mild
+// fallback: it means the sampler runs with NO constraint at all, which silently
+// defeats the entire point of a grammar-file-driven format. Upstream's failure
+// mode here was a single LOG_WRN followed by data.grammar = "" at 30+ call
+// sites. Fail loudly instead.
+static std::string common_chat_grammar_require(const std::string & model_key) {
+    auto grammar = common_chat_grammar_get(model_key);
+    if (grammar.empty()) {
+        throw std::runtime_error(
+            "chat grammar '" + model_key + "' not found in the grammar registry. "
+            "Set --chat-grammars-dir to the directory holding the .lark/.gbnf files "
+            "(default: " + std::string(DEFAULT_CHAT_GRAMMARS_DIR) + ").");
+    }
+    return grammar;
+}
 
 static std::string format_time(const std::chrono::system_clock::time_point & now, const std::string & format) {
     auto               time       = std::chrono::system_clock::to_time_t(now);
@@ -1271,6 +1360,159 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
     return data;
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Grammar-file-driven chat parsing
+// ──────────────────────────────────────────────────────────────────────────────
+// A format's grammar lives in a file (grammars/chat/<key>.lark or .gbnf) rather
+// than in hand-written PEG builder lambdas. The same grammar drives BOTH
+// sampling (llguidance masks tokens from it) and extraction (it is transpiled to
+// a PEG arena), so the two cannot drift apart.
+//
+// Placeholders in the grammar template are filled per request:
+//   {{TOOL_SCHEMA}}     -> the tool argument schemas
+//   {{RESPONSE_SCHEMA}} -> the request's response_format schema
+// ──────────────────────────────────────────────────────────────────────────────
+
+static bool is_lark_grammar(const std::string & grammar) {
+    return grammar.find("%llguidance") != std::string::npos;
+}
+
+// Build a `%json {schema}` expression for llguidance from the tool schemas.
+//
+// KNOWN DEFECT, tracked: this emits a single `oneOf` across ALL tools, so a call
+// naming tool A may legally carry tool B's arguments. Upstream's hand-written
+// PEG builds a per-tool alternative (p.rule("tool-" + name, ...)) and does
+// correlate them. The fix is a per-tool alternation pairing each name literal
+// with its own schema; see docs/fork/ARCHITECTURE.md. Do not treat the current
+// behaviour as intended.
+static std::string build_lark_tool_schema(const json & tools) {
+    if (!tools.is_array() || tools.empty()) {
+        return "%json {}";
+    }
+    json one_of = json::array();
+    foreach_function(tools, [&](const json & tool) {
+        const auto & function = tool.at("function");
+        if (function.contains("parameters") && function.at("parameters").is_object()) {
+            one_of.push_back(function.at("parameters"));
+        } else {
+            one_of.push_back(json::object());
+        }
+    });
+    if (one_of.size() == 1) {
+        return "%json " + one_of[0].dump();
+    }
+    return "%json {\"oneOf\": " + one_of.dump() + "}";
+}
+
+// GBNF equivalent: generate a JSON-schema-constrained rule per tool and join
+// them as alternatives. Same oneOf-style correlation defect as the Lark path.
+static std::string build_gbnf_tool_schema(const json & tools) {
+    if (!tools.is_array() || tools.empty()) {
+        return "([^]*)";
+    }
+    std::vector<std::string> schemas;
+    foreach_function(tools, [&](const json & tool) {
+        const auto & function = tool.at("function");
+        auto schema = function.contains("parameters") ? function.at("parameters") : json::object();
+        std::string gbnf = build_grammar([&](const common_grammar_builder & builder) {
+            builder.resolve_refs(schema);
+            builder.add_schema("root", schema);
+        });
+        // The generated GBNF starts with 'root ::= ...'; take the body only.
+        for (auto & line : string_split<std::string>(gbnf, '\n')) {
+            if (line.substr(0, 9) == "root ::= ") {
+                schemas.push_back("(" + line.substr(9) + ")");
+                break;
+            }
+        }
+    });
+    if (schemas.empty()) {
+        return "([^]*)";
+    }
+    if (schemas.size() == 1) {
+        return schemas[0];
+    }
+    std::string result = schemas[0];
+    for (size_t i = 1; i < schemas.size(); i++) {
+        result += " | " + schemas[i];
+    }
+    return result;
+}
+
+// Replace EVERY occurrence, not just the first. Chat grammars repeat the same
+// placeholder in several rules (once for the tool-call body, once inside an
+// optional response-format alternative); a single-substring replace would leave
+// the second occurrence literal in the rendered grammar.
+static std::string replace_all(const std::string & str,
+                               const std::string & placeholder,
+                               const std::string & replacement) {
+    std::string result;
+    result.reserve(str.size());
+    size_t start = 0;
+    size_t pos;
+    while ((pos = str.find(placeholder, start)) != std::string::npos) {
+        result.append(str, start, pos - start);
+        result.append(replacement);
+        start = pos + placeholder.size();
+    }
+    result.append(str, start, str.size() - start);
+    return result;
+}
+
+static std::string inject_tool_schema(const std::string & grammar_template, const json & tools) {
+    const std::string placeholder = "{{TOOL_SCHEMA}}";
+    if (grammar_template.find(placeholder) == std::string::npos) {
+        return grammar_template;
+    }
+    std::string schema = is_lark_grammar(grammar_template)
+        ? build_lark_tool_schema(tools)
+        : build_gbnf_tool_schema(tools);
+    return replace_all(grammar_template, placeholder, schema);
+}
+
+static std::string inject_response_schema(const std::string & grammar_template, const json & json_schema) {
+    const std::string placeholder = "{{RESPONSE_SCHEMA}}";
+    if (grammar_template.find(placeholder) == std::string::npos) {
+        return grammar_template;
+    }
+    std::string schema;
+    if (is_lark_grammar(grammar_template)) {
+        schema = "%json " + json_schema.dump();
+    } else {
+        std::string gbnf = build_grammar([&](const common_grammar_builder & builder) {
+            auto s = json_schema;
+            builder.resolve_refs(s);
+            builder.add_schema("root", s);
+        });
+        for (auto & line : string_split<std::string>(gbnf, '\n')) {
+            if (line.substr(0, 9) == "root ::= ") {
+                schema = line.substr(9);
+                break;
+            }
+        }
+        if (schema.empty()) {
+            schema = "([^]*)";
+        }
+    }
+    return replace_all(grammar_template, placeholder, schema);
+}
+
+// Transpile a grammar template to a PEG arena for EXTRACTION.
+//
+// The placeholders become generic JSON matchers here on purpose: the precise
+// schema constraint was already enforced at sampling time by llguidance/GBNF,
+// and re-imposing it during extraction would reject output the sampler had
+// legitimately produced.
+static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template) {
+    std::string base = grammar_template;
+    const bool  lark = is_lark_grammar(base);
+
+    base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
+    base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
+
+    return lark ? common_lark_to_peg(base) : common_gbnf_to_peg(base);
+}
+
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
                                                          const autoparser::generation_params & inputs) {
     common_chat_params data;
@@ -1321,114 +1563,39 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
 
-    auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
-        auto start = p.rule("start", p.optional(p.literal("<|turn>model\n")));
+    // The grammar comes from grammars/chat/gemma4.lark (or .gbnf), not from
+    // hand-written PEG builder lambdas. One artefact drives BOTH sampling and
+    // extraction, so the two cannot drift apart -- which is the whole point of
+    // the FSM<->grammar contract in docs/fork/ARCHITECTURE.md.
+    //
+    // grammar_lazy is false and there are no triggers: the format grammar covers
+    // the entire output from token 1 (content, reasoning, tool calls), rather
+    // than only switching on once a "<|tool_call>" trigger word is seen. Lazy
+    // triggering leaves everything before the trigger unconstrained.
+    {
+        const auto sampling_base = common_chat_grammar_require("gemma4");
+        const auto parser_base   = extract_reasoning
+            ? sampling_base
+            : common_chat_grammar_require("gemma4-no-reasoning");
 
-        if (extract_reasoning) {
-            p.rule("thought", p.literal("<|channel>thought") + p.space() + p.reasoning(p.until("<channel|>")) + p.literal("<channel|>"));
-        } else {
-            p.rule("thought", p.content(p.literal("<|channel>thought") + p.space() + p.until("<channel|>") + p.literal("<channel|>")));
-        }
-
-        auto consume_empty_channels = p.gbnf(p.zero_or_more(p.literal("<|channel>") + p.negate(p.literal("thought"))), "");
-        auto thought = (p.peek(p.literal("<|channel>")) + consume_empty_channels + p.ref("thought")) | p.negate(p.literal("<|channel>"));
-
+        std::string sampling_grammar = sampling_base;
         if (has_response_format) {
-            auto response_format = p.literal("```json") <<
-                p.content(p.schema(p.json(), "response-format-schema", inputs.json_schema)) <<
-                p.literal("```");
-            return start + p.optional(thought) + response_format;
+            sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }
 
-        if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
-            // Gemma4 tool calling syntax
-            // Rules should match traversal logic in gemma4_to_json()
-            p.rule("gemma4-string-content", p.until("<|\"|>"));
-            p.rule("gemma4-string", p.literal("<|\"|>") + p.ref("gemma4-string-content") + p.literal("<|\"|>"));
-            p.rule("gemma4-bool", p.json_bool());
-            p.rule("gemma4-null", p.json_null());
-            p.rule("gemma4-number", p.json_number());
-            p.rule("gemma4-dict-key", p.rule("gemma4-dict-key-name", p.chars("[^:}]", 1, -1)) + p.literal(":"));
-            p.rule("gemma4-dict-kv", p.ref("gemma4-dict-key") + p.space() + p.ref("gemma4-value"));
-            p.rule("gemma4-dict", [&]() {
-                auto ws = p.space();
-                auto member = p.ref("gemma4-dict-kv");
-                auto members = p.sequence({member, p.zero_or_more(p.sequence({p.literal(","), ws, member}))});
-                return p.sequence({
-                    p.literal("{"), ws,
-                    p.choice({p.literal("}"), p.sequence({members, ws, p.literal("}")})})
-                });
-            });
-            p.rule("gemma4-array", [&]() {
-                auto ws = p.space();
-                auto value = p.ref("gemma4-value");
-                auto elements = p.sequence({value, p.zero_or_more(p.sequence({p.literal(","), ws, value}))});
-                return p.sequence({
-                    p.literal("["), ws,
-                    p.choice({p.literal("]"), p.sequence({elements, ws, p.literal("]")})})
-                });
-            });
-            p.rule("gemma4-value", [&]() {
-                return p.choice({
-                    p.ref("gemma4-string"), p.ref("gemma4-dict"), p.ref("gemma4-array"),
-                    p.ref("gemma4-number"), p.ref("gemma4-bool"), p.ref("gemma4-null")
-                });
-            });
+        // NOTE: inject_tool_schema() is deliberately not called yet -- gemma4.lark
+        // carries no {{TOOL_SCHEMA}} placeholder, so tool arguments are currently
+        // constrained only to a generic dict, exactly as upstream leaves them.
+        // That is the gap this fork exists to close; see FORK.md.
 
-            auto tool_choice = p.choice();
+        data.grammar             = sampling_grammar;
+        data.parser              = chat_grammar_to_peg(parser_base).save();
+        data.grammar_file_parser = true;
+        data.grammar_lazy        = false;
+        data.grammar_triggers    = {};
+        data.reasoning_format    = inputs.reasoning_format;
 
-            foreach_function(inputs.tools, [&](const json & tool) {
-                const auto & function = tool.at("function");
-                std::string  name     = function.at("name");
-                // TODO @aldehir : need to extend json-schema-to-grammar to produce more than JSON rules
-                // const auto & params   = function.at("parameters");
-
-                tool_choice |= p.rule("tool-" + name, p.tool(p.sequence({
-                    p.tool_open(p.tool_name(p.literal(name)) + p.peek(p.literal("{"))),
-                    p.tool_args(p.ref("gemma4-dict")),
-                })));
-            });
-
-            auto tool_call = p.trigger_rule("tool-call", p.repeat(
-                "<|tool_call>call:" + tool_choice + "<tool_call|>",
-                /* min = */ inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED ? 1 : 0,
-                /* max = */ inputs.parallel_tool_calls ? -1 : 1
-            ));
-
-            auto scan_to_toolcall = p.rule("scan-to-toolcall", p.until("<|tool_call>"));
-            auto content = p.rule("content", p.content(p.until_one_of({"<|channel>", "<channel|>", "<|tool_call>"})));
-            auto message = p.rule("message", thought + content);
-            return start + p.zero_or_more(message) + scan_to_toolcall + tool_call;
-        }
-
-        // Gemma 4 may emit an extra <|channel>thought\n<channel|> at the end of the content. It may
-        // also emit a single trailing <channel|> token. Consume all complete reasoning blocks and
-        // then stop at the first unmatched <channel|> token.
-        auto content = p.rule("content", p.content(p.until_one_of({"<|channel>", "<channel|>"})));
-        auto message = p.rule("message", thought + content);
-        return start + p.one_or_more(message);
-    });
-
-    data.parser = parser.save();
-
-    if (include_grammar) {
-        data.grammar_lazy = !(has_response_format || (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED));
-        data.grammar      = build_grammar([&](const common_grammar_builder & builder) {
-            foreach_function(inputs.tools, [&](const json & tool) {
-                const auto & function = tool.at("function");
-                auto         schema   = function.at("parameters");
-                builder.resolve_refs(schema);
-            });
-            if (has_response_format) {
-                auto schema = inputs.json_schema;
-                builder.resolve_refs(schema);
-            }
-            parser.build_grammar(builder, data.grammar_lazy);
-        });
-
-        data.grammar_triggers = {
-            { COMMON_GRAMMAR_TRIGGER_TYPE_WORD, "<|tool_call>" },
-        };
+        (void) include_grammar;  // grammar is always present for this format now
     }
 
     return data;

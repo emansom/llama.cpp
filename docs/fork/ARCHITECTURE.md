@@ -181,6 +181,39 @@ that also drives input validation needs conversation-scope states —
 `AWAITING_TOOL_RESPONSE`, `IN_GENERATION_PROMPT` — plus per-call identity so
 parallel tool calls don't all collapse into one `IN_TOOL_CALL`.
 
+### The generation prompt should seed the FSM, not be re-parsed as text
+
+`generation_prompt` is the assistant-turn opener: the bytes appended after the
+rendered conversation to cue generation. For Gemma 4 that is `<|turn>model\n`,
+plus the empty-thought prefill `<|channel>thought\n<channel|>` when thinking is
+off, plus any prefilled `reasoning_content` on a continuation. It is **not** GGUF
+metadata and **not** the system prompt, and it is recomputed **per request** —
+it depends on whether the previous turn closed with `<turn|>\n`, whether a tool
+call is dangling, and whether thinking is enabled.
+
+Upstream feeds it to the parser as a **text prefix** (`common/chat.cpp`):
+
+```cpp
+const std::string effective_input = params.generation_prompt.empty()
+    ? input : params.generation_prompt + input;
+```
+
+so the grammar's `start` rule can match the opener. That is a text-level stand-in
+for state initialization, and it costs twice: the parser re-scans bytes the model
+never emitted, and the grammar must keep the opener **optional**
+(`p.optional(p.literal("<|turn>model\n"))`) to cope with both cases — strictly
+weaker than knowing which case holds, and a violation in spirit of
+`POLICIES.md#closing-tokens-are-required` applied to openers.
+
+**The right shape:** the renderer emits the prompt *and* reports the state it
+leaves the model in — `IN_GENERATION_PROMPT`, transitioning to `IN_REASONING`
+when a thought was prefilled and `IN_CONTENT` otherwise. Extraction then starts
+from that state with no text prefix, and the opener becomes a required literal.
+
+`grammar_file_parser = true` already blanks `generation_prompt` in the parser
+params, so grammar-file formats do not receive the prefix today. Nothing yet
+replaces it with a state seed; that is the remaining half of the change.
+
 ## FSM↔grammar contract
 
 This is what lets the C++ tracker and llguidance's internal state agree:

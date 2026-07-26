@@ -280,6 +280,14 @@ struct common_chat_params {
     std::vector<std::string>            additional_stops;
     std::string                         parser;
     common_chat_msg_delimiters          message_delimiters;
+    // When true, generation_prompt is NOT prepended to the effective input in
+    // common_chat_peg_parse. Grammar-file-driven parsers consume the model's raw
+    // output directly and do not need the prefix.
+    bool                                grammar_file_parser  = false;
+    // Carried through from common_chat_templates_inputs.reasoning_format so a
+    // per-format pipeline can branch on whether the caller wants reasoning
+    // extracted (AUTO/DEEPSEEK) or folded into content (NONE).
+    common_reasoning_format             reasoning_format     = COMMON_REASONING_FORMAT_NONE;
 };
 
 // per-message parsing syntax
@@ -295,10 +303,16 @@ struct common_chat_parser_params {
     bool                    echo                 = false;  // Include assistant prefilled msg in output
     bool                    debug                = false;  // Enable debug output for PEG parser
     common_peg_arena        parser               = {};
+    bool                    grammar_file_parser  = false;  // mirrors common_chat_params::grammar_file_parser
+    std::string             override_grammar;              // Lark or GBNF override; used instead of the serialized parser
     common_chat_parser_params() = default;
     common_chat_parser_params(const common_chat_params & chat_params) {
-        format  = chat_params.format;
-        generation_prompt = chat_params.generation_prompt;
+        format              = chat_params.format;
+        grammar_file_parser = chat_params.grammar_file_parser;
+        reasoning_format    = chat_params.reasoning_format;
+        // Grammar-file parsers consume raw model output and must not be handed
+        // the generation_prompt prefix.
+        generation_prompt   = chat_params.grammar_file_parser ? std::string{} : chat_params.generation_prompt;
     }
 };
 
@@ -359,6 +373,25 @@ common_chat_continuation common_chat_continuation_parse(const nlohmann::ordered_
 nlohmann::ordered_json common_chat_msgs_to_json_oaicompat(const std::vector<common_chat_msg> & msgs, bool concat_typed_text = false);
 
 nlohmann::ordered_json common_chat_tools_to_json_oaicompat(const std::vector<common_chat_tool> & tools);
+
+// Default install location for chat grammar files. Overridable with
+// --chat-grammars-dir / LLAMA_ARG_CHAT_GRAMMARS_DIR.
+#define DEFAULT_CHAT_GRAMMARS_DIR "/usr/share/llama.cpp/grammars/chat"
+
+// Chat grammar registry: loads chat grammar files from a directory at startup.
+// Files are named <format-key>.lark and <format-key>.gbnf (e.g. "gemma4.lark");
+// the .lark variant is used when built with LLAMA_USE_LLGUIDANCE, .gbnf otherwise.
+//
+// Call common_chat_grammar_init() once at startup, before any chat template
+// processing. The registry lives in process memory and is read on every request,
+// so grammar files are never re-read from disk mid-run.
+//
+// common_chat_grammar_get() returns an empty string on a registry miss. Callers
+// MUST treat that as fatal rather than proceeding: an empty grammar means no
+// sampling constraint at all, which silently defeats the entire point of a
+// grammar-file-driven format. See docs/fork/POLICIES.md#nothing-is-inferred.
+void        common_chat_grammar_init(const std::string & grammars_dir);
+std::string common_chat_grammar_get(const std::string & model_key);
 
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
