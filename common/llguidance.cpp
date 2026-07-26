@@ -184,7 +184,13 @@ static LlgTokenizer * llama_sampler_llg_new_tokenizer(const llama_vocab * vocab)
         // free-text rule had to carry a hand-built exclusion to avoid eating
         // one -- the thing that made this grammar hard to write correctly.
         //
-        // This reads a DECLARED attribute, not the token's spelling; nothing is
+        // This pair of attributes IS the tokenizer's added-tokens list. Conversion
+        // splits that list in two -- an added token becomes CONTROL when it is
+        // marked special and USER_DEFINED when it is not -- and llama.cpp exposes
+        // no single "was this an added token" predicate, so the union is how the
+        // question gets asked.
+        //
+        // Reading declared attributes, never the token's spelling; nothing is
         // inferred from what the text looks like.
         const bool declared_special =
             llama_vocab_is_control(vocab, token) ||
