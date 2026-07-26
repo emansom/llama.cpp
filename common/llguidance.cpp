@@ -12,6 +12,13 @@ struct llama_sampler_llg {
     std::string         grammar_data;
     LlgTokenizer *      tokenizer;
     LlgMatcher *        grammar;
+    // Set once the matcher has died and this sampler has stopped constraining
+    // anything. `grammar == nullptr` alone cannot distinguish "no grammar was
+    // ever requested" from "a grammar was requested and is now silently gone",
+    // and those two need very different reactions.
+    bool                failed_open;
+    // Generation step, so the per-token trace lines up with the output.
+    int                 step;
 };
 
 static LlgMatcher * llama_sampler_llg_new(LlgTokenizer * tokenizer, const char * grammar_kind,
@@ -40,6 +47,7 @@ static void llama_sampler_llg_accept_impl(llama_sampler * smpl, llama_token toke
     auto * ctx = (llama_sampler_llg *) smpl->ctx;
     if (ctx->grammar) {
         llg_matcher_consume_token(ctx->grammar, token);
+        ctx->step++;
     }
 }
 
@@ -51,19 +59,58 @@ static void llama_sampler_llg_apply(llama_sampler * smpl, llama_token_data_array
             if (llg_matcher_compute_mask(ctx->grammar) == 0) {
                 mask = llg_matcher_get_mask(ctx->grammar);
             } else {
+                // FAIL-OPEN. The matcher is dropped here and every later apply()
+                // is a no-op, so from this token on the model samples with NO
+                // constraint whatsoever -- and the only trace of it was one
+                // LOG_ERR line, easily lost in a busy log. A silently
+                // unconstrained sampler is the single most consequential thing
+                // that can go wrong in a grammar-driven format, so say so in
+                // terms that cannot be mistaken for a transient hiccup.
                 LOG_ERR("llg error: %s\n", llg_matcher_get_error(ctx->grammar));
+                LOG_ERR("%s", "llguidance: constraint DROPPED at this token; the rest of this "
+                              "generation is UNCONSTRAINED. Output may not conform to the "
+                              "requested grammar or tool schema.\n");
                 llg_free_matcher(ctx->grammar);
-                ctx->grammar = nullptr;
+                ctx->grammar     = nullptr;
+                ctx->failed_open = true;
                 return;
             }
         }
 
+        size_t allowed = 0;
         for (size_t i = 0; i < cur_p->size; ++i) {
             auto token = cur_p->data[i].id;
             if ((mask[token / 32] & (1 << (token % 32))) == 0) {
                 cur_p->data[i].logit = -INFINITY;
+            } else {
+                allowed++;
             }
         }
+
+        // The per-token trace: what the grammar actually did at this step.
+        //
+        // This is the only place the mask is observable from a running server.
+        // Response-level `logprobs` cannot substitute for it: `post_sampling_probs`
+        // reports the distribution after the whole chain has collapsed onto the
+        // selected token, and the pre-sampling view shows the model's preference
+        // rather than what was legal.
+        //
+        // TWO PATHS, and conflating them makes the trace lie. common_sampler_sample
+        // runs the chain FIRST and then applies this sampler to a ONE-ELEMENT array
+        // holding the already-sampled token -- grammar-based rejection sampling. So
+        // a size-1 call is a yes/no check on that token, and "1/1 allowed" there
+        // means "accepted", not "the grammar left one legal token". Only when that
+        // check REJECTS does the caller re-sample with the full mask applied first,
+        // which is the size-N call where the count is a real mask width.
+        if (cur_p->size == 1) {
+            LOG_DBG("llguidance: step %d | check token %6d -> %s\n", ctx->step,
+                    cur_p->data[0].id, allowed == 1 ? "ok" : "REJECTED, re-sampling under mask");
+        } else {
+            LOG_DBG("llguidance: step %d | mask allows %zu of %zu tokens%s\n", ctx->step, allowed,
+                    cur_p->size, allowed == 1 ? "  (FORCED: no choice)" : "");
+        }
+    } else if (ctx->failed_open) {
+        LOG_DBG("%s", "llguidance: sampling UNCONSTRAINED (constraint was dropped earlier)\n");
     }
 }
 
@@ -72,6 +119,10 @@ static void llama_sampler_llg_reset(llama_sampler * smpl) {
     if (ctx->grammar) {
         llg_matcher_reset(ctx->grammar);
     }
+    // `failed_open` is deliberately NOT cleared: a dropped matcher is gone for
+    // the life of this sampler, so resetting the step counter must not make the
+    // sampler look constrained again.
+    ctx->step = 0;
 }
 
 static llama_sampler * llama_sampler_llg_clone(const llama_sampler * smpl) {
@@ -89,6 +140,10 @@ static llama_sampler * llama_sampler_llg_clone(const llama_sampler * smpl) {
             result_ctx->grammar      = llg_clone_matcher(ctx->grammar);
             result_ctx->tokenizer    = llg_clone_tokenizer(ctx->tokenizer);
         }
+        // Carried so a clone of a dropped constraint still reports itself as
+        // unconstrained rather than as "no grammar requested".
+        result_ctx->failed_open = ctx->failed_open;
+        result_ctx->step        = ctx->step;
     }
 
     return result;
@@ -261,10 +316,21 @@ llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab, const char * g
             /* .grammar_data = */ grammar_data,
             /* .tokenizer    = */ tokenizer,
             /* .grammar      = */ llama_sampler_llg_new(tokenizer, grammar_kind, grammar_data),
+            /* .failed_open  = */ false,
+            /* .step         = */ 0,
         };
         if (ctx->grammar) {
             GGML_ASSERT(((size_t) llama_vocab_n_tokens(vocab) + 31) / 32 * 4 ==
                         llg_matcher_get_mask_byte_size(ctx->grammar));
+            LOG_DBG("llguidance: matcher built for a %s grammar (%zu bytes); constraint ACTIVE\n",
+                    grammar_kind, ctx->grammar_data.size());
+        } else {
+            // The grammar was ASKED for and could not be built. Every apply() is
+            // now a no-op, so the whole generation runs unconstrained.
+            ctx->failed_open = true;
+            LOG_ERR("%s", "llguidance: grammar failed to build; this generation will be "
+                          "UNCONSTRAINED. Output may not conform to the requested grammar "
+                          "or tool schema.\n");
         }
     } else {
         *ctx = {
@@ -273,6 +339,10 @@ llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab, const char * g
             /* .grammar_data = */ {},
             /* .tokenizer    = */ nullptr,
             /* .grammar      = */ nullptr,
+            // No grammar was requested. Unconstrained is correct here, so this
+            // is NOT failed_open and must not warn.
+            /* .failed_open  = */ false,
+            /* .step         = */ 0,
         };
     }
 
