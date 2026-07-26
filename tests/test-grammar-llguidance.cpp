@@ -1381,6 +1381,221 @@ static void test_gemma4_tool_schema() {
          });
 }
 
+// What llguidance ACTUALLY permitted, token by token.
+//
+// Every other test here is black-box: it asks whether a finished string is
+// accepted. That cannot distinguish "the sampler steered the model through the
+// format" from "the model happened to produce something valid" -- and it cannot
+// see a grammar that failed to compile and is therefore constraining nothing,
+// which is this project's recurring failure mode.
+//
+// So this walks a generation the way the sampler does: at each position, apply
+// the grammar to a flat logit array, count how many of the 262k tokens survive,
+// and record whether ordinary prose was among them. `n_allowed == 1` means the
+// step was FORCED -- the model had no choice at all.
+struct mask_step {
+    llama_token              accepted;
+    std::string              piece;
+    size_t                   n_allowed;
+    bool                     text_allowed;  // could the model have written prose instead?
+    std::vector<std::string> allowed;       // the whole legal set, when it is small
+};
+
+// Above this, the set is a free-text run and listing it is noise.
+static constexpr size_t kSmallMaskLimit = 8;
+
+static std::vector<mask_step> walk_mask(const std::string &              input,
+                                        llama_sampler *                  grammar,
+                                        const std::vector<llama_token> & text_probes,
+                                        bool *                           eos_allowed_at_end) {
+    llama_sampler_reset(grammar);
+    // parse_special=true: this stands in for tokens a model emitted, not for a
+    // spelling a user typed. See the note on match_string.
+    auto      tokens  = common_tokenize(vocab, input, false, true);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    std::vector<llama_token_data> cur;
+    cur.reserve(n_vocab);
+    for (llama_token t = 0; t < n_vocab; t++) {
+        cur.emplace_back(llama_token_data{ t, 0.0f, 0.0f });
+    }
+    llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+
+    std::vector<mask_step> out;
+    for (auto tok : tokens) {
+        for (llama_token t = 0; t < n_vocab; t++) {
+            cur[t].logit = 0.0f;
+        }
+        llama_sampler_apply(grammar, &arr);
+
+        mask_step s;
+        s.accepted     = tok;
+        s.n_allowed    = 0;
+        s.text_allowed = false;
+        for (llama_token t = 0; t < n_vocab; t++) {
+            if (cur[t].logit >= 0.0f) {
+                s.n_allowed++;
+            }
+        }
+        for (auto p : text_probes) {
+            if (cur[p].logit >= 0.0f) {
+                s.text_allowed = true;
+                break;
+            }
+        }
+        if (s.n_allowed <= kSmallMaskLimit) {
+            for (llama_token t = 0; t < n_vocab; t++) {
+                if (cur[t].logit < 0.0f) {
+                    continue;
+                }
+                char    tb[256];
+                int32_t tl = llama_detokenize(vocab, &t, 1, tb, sizeof(tb), false, true);
+                s.allowed.emplace_back(tb, tl > 0 ? (size_t) tl : 0);
+            }
+            std::sort(s.allowed.begin(), s.allowed.end());
+        }
+        char    buf[256];
+        int32_t len = llama_detokenize(vocab, &tok, 1, buf, sizeof(buf), false, true);
+        s.piece.assign(buf, len > 0 ? (size_t) len : 0);
+        out.push_back(s);
+
+        llama_sampler_accept(grammar, tok);
+    }
+
+    if (eos_allowed_at_end != nullptr) {
+        for (llama_token t = 0; t < n_vocab; t++) {
+            cur[t].logit = 0.0f;
+        }
+        llama_sampler_apply(grammar, &arr);
+        auto eos = llama_vocab_eot(vocab);
+        if (eos == LLAMA_TOKEN_NULL) {
+            eos = llama_vocab_eos(vocab);
+        }
+        *eos_allowed_at_end = cur[eos].logit >= 0.0f;
+    }
+    return out;
+}
+
+// The FSM contract, asserted at the token level.
+//
+// One tool is declared (`get_time`, required string `city`) with
+// tool_choice=required, so the whole turn is determined except for the argument
+// text. Every structural position is checked for the property that matters
+// there: that prose was masked out, and that the step was forced where only one
+// continuation is legal.
+static void test_gemma4_mask_walk() {
+    common_chat_tool get_time{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the current time in a city",
+        /* .parameters = */ R"({
+            "type": "object",
+            "properties": { "city": { "type": "string", "description": "City name" } },
+            "required": ["city"]
+        })",
+    };
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "what time is it in London?";
+
+    common_chat_templates_inputs inputs;
+    inputs.messages              = { user };
+    inputs.tools                 = { get_time };
+    inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    inputs.add_generation_prompt = true;
+    inputs.enable_thinking       = false;
+
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto params = common_chat_templates_apply(tmpls.get(), inputs);
+    assert(!params.grammar.empty());
+
+    auto * grammar = llama_sampler_init_llg(vocab, "lark", params.grammar.c_str());
+    assert(grammar != nullptr);
+
+    // Probes for "could this have been ordinary prose instead?". Common English
+    // pieces; if any survives the mask, the model was free to write text.
+    std::vector<llama_token> text_probes;
+    for (const char * w : { "The", " the", "Hello", " I", "Sure", " a" }) {
+        auto ids = common_tokenize(vocab, w, false, false);
+        if (!ids.empty()) {
+            text_probes.push_back(ids[0]);
+        }
+    }
+    assert(!text_probes.empty());
+
+    const std::string generation =
+        "<|tool_call>call:get_time{city:<|\"|>London<|\"|>}<tool_call|><|tool_response>";
+
+    bool eos_at_end = false;
+    auto steps      = walk_mask(generation, grammar, text_probes, &eos_at_end);
+    assert(!steps.empty());
+
+    fprintf(stderr, "\n  llguidance mask walk (tool_choice=required, 1 tool declared):\n");
+    fprintf(stderr, "    %-4s %-18s %9s %7s %7s  %s\n",
+            "step", "emitted", "allowed", "forced", "prose?", "legal set (when small)");
+    for (size_t i = 0; i < steps.size(); i++) {
+        const auto & s = steps[i];
+        std::string  shown;
+        for (char c : s.piece) {
+            shown += (c == '\n') ? '.' : c;
+        }
+        std::string legal;
+        for (const auto & a : s.allowed) {
+            legal += (legal.empty() ? "" : " | ") + a;
+        }
+        fprintf(stderr, "    %-4zu %-18s %9zu %7s %7s  %s\n", i, shown.c_str(), s.n_allowed,
+                s.n_allowed == 1 ? "YES" : "", s.text_allowed ? "OPEN" : "masked", legal.c_str());
+    }
+    fprintf(stderr, "    EOS allowed at end: %s\n", eos_at_end ? "yes" : "NO");
+
+    // 1. The turn cannot begin with prose. tool_choice=required removed the
+    //    content branch, so the very first token is already constrained -- to a
+    //    call, or to opening a thought first (`channel_block?`).
+    assert(!steps[0].text_allowed);
+    assert((steps[0].allowed == std::vector<std::string>{ "<|channel>", "<|tool_call>" }));
+
+    // 2. Nowhere in a tool call is prose legal EXCEPT inside the string argument,
+    //    whose body is deliberately unrestricted (a city name is arbitrary text).
+    //    Locate that span by the delimiter token so the assertion does not depend
+    //    on a hardcoded step index.
+    const llama_token str_delim = common_tokenize(vocab, "<|\"|>", false, true).at(0);
+    bool              in_string = false;
+    size_t            prose_outside_string = 0;
+    for (const auto & s : steps) {
+        if (s.accepted == str_delim) {
+            in_string = !in_string;
+            continue;
+        }
+        if (!in_string && s.text_allowed) {
+            prose_outside_string++;
+        }
+    }
+    assert(prose_outside_string == 0);
+
+    // 3. Closing the call is FORCED -- one legal token, no choice.
+    const size_t n = steps.size();
+    assert(steps[n - 2].piece == "<tool_call|>");
+    assert(steps[n - 2].n_allowed == 1);
+
+    // 4. After a call closes, the FSM offers exactly two continuations: another
+    //    call, or the hand-over. Nothing else -- no prose, no `<turn|>`, no
+    //    second thought.
+    //
+    //    This is where an assertion of `n_allowed == 1` was first written, and the
+    //    walk corrected it: `tool_calls: tool_call+` means parallel calls are
+    //    legal, so two is the right answer and one would have been a grammar that
+    //    forbids them. Reading the mask is what told the difference; a
+    //    conformance run never would have.
+    assert(steps[n - 1].piece == "<|tool_response>");
+    assert((steps[n - 1].allowed == std::vector<std::string>{ "<|tool_call>", "<|tool_response>" }));
+
+    // 5. And the turn may end at the hand-over -- but only there.
+    assert(eos_at_end);
+
+    llama_sampler_free(grammar);
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E mask walk\n");
+}
+
 // Isolation harness: compile ONE grammar file and report. Driven by an env var
 // so a grammar can be bisected from the shell without recompiling C++.
 //   LLG_GRAMMAR_FILE=/path/to.lark ./test-grammar-llguidance <vocab>
@@ -1500,6 +1715,7 @@ int main(int argc, const char ** argv) {
     if (argc == 3) {
         test_gemma4_chat_grammar(argv[2]);
         test_gemma4_tool_schema();
+        test_gemma4_mask_walk();
         llama_free(ctx);
         llama_model_free(model);
         fprintf(stdout, "All tests passed.\n");
