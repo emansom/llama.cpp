@@ -36,40 +36,41 @@
 # The three tool-family tags share one shape -- open, directive, colon, payload,
 # close -- which the old literals hid completely.
 
-# The DELIMITERS are the vocabulary. `<|` and `|>` carry the meaning -- opening
-# and closing -- independently of which tag they wrap, exactly as `<` and `/>`
-# do in XML. A tag is therefore delimiter + name + delimiter, not one fused
-# string, and the name is a token the grammar can reason about.
+# Each tag is a SPECIAL TOKEN -- llguidance's `<something>` syntax -- because that
+# is what it is: one entry in Gemma 4's vocabulary. Checked against the model's
+# own tokenizer:
 #
-#   open  <|NAME>   =  TAG_L NAME TAG_GT
-#   close <NAME|>   =  TAG_LT NAME TAG_R
-#   self  <|NAME|>  =  TAG_L NAME TAG_R
+#   <|turn>  105   <turn|>  106     <|tool>          46   <tool|>          47
+#   <|channel> 100 <channel|> 101   <|tool_call>     48   <tool_call|>     49
+#   <|think|>   98 <|"|>       52   <|tool_response> 50   <tool_response|> 51
 #
-# Fusing them ("<|channel>") hid that `<|channel>thought` is a tag plus a
-# channel kind, and made every tag an unrelated magic string that content had
-# to be taught about one at a time.
-TAG_L:  "<|"
-TAG_R:  "|>"
-TAG_LT: "<"
-TAG_GT: ">"
+# These were previously built from delimiter + name + delimiter
+# (`TAG_L "channel" TAG_GT`) to keep `<|` and `|>` meaningful in their own right.
+# That described the format correctly and the TOKEN STREAM wrongly: the model
+# cannot emit `<|` alone, so there was nothing there for a grammar to reason
+# about. The shape still holds -- `<|NAME>` opens, `<NAME|>` closes, `<|NAME|>` is
+# self-delimiting -- it simply is not something the sampler can see inside of.
+#
+# Atomicity is also what makes every text body below a plain regex: a regex cannot
+# produce a special token, so a body is bounded by whichever marker follows it,
+# with no exclusion to hand-build and keep in step with this list.
+turn_open_tag:            <|turn>
+turn_close_tag:           <turn|>
+channel_open_tag:         <|channel>
+channel_close_tag:        <channel|>
+tool_call_open_tag:       <|tool_call>
+tool_call_close_tag:      <tool_call|>
+tool_response_open_tag:   <|tool_response>
+tool_response_close_tag:  <tool_response|>
+tool_decl_open_tag:       <|tool>
+tool_decl_close_tag:      <tool|>
 
-turn_open_tag:            TAG_L "turn" TAG_GT
-turn_close_tag:           TAG_LT "turn" TAG_R
-channel_open_tag:         TAG_L "channel" TAG_GT
-channel_close_tag:        TAG_LT "channel" TAG_R
-tool_call_open_tag:       TAG_L "tool_call" TAG_GT
-tool_call_close_tag:      TAG_LT "tool_call" TAG_R
-tool_response_open_tag:   TAG_L "tool_response" TAG_GT
-tool_response_close_tag:  TAG_LT "tool_response" TAG_R
-tool_decl_open_tag:       TAG_L "tool" TAG_GT
-tool_decl_close_tag:      TAG_LT "tool" TAG_R
-
-# Self-delimiting tags: <|NAME|>, the third tag form. The string delimiter's name
-# is `"`, so it is not a bespoke marker; being symmetric is why the format cannot
-# escape it -- see ARCHITECTURE.md. The think marker announces that the model may
-# use its thought channel this turn.
-str_delim_tag:  TAG_L "\"" TAG_R
-think_tag:      TAG_L "think" TAG_R
+# The self-delimiting form. The string delimiter's name is `"`, so it is not a
+# bespoke marker; being symmetric is why the format cannot escape it -- see
+# ARCHITECTURE.md. The think marker announces that the model may use its thought
+# channel this turn.
+str_delim_tag:  <|"|>
+think_tag:      <|think|>
 
 # Plain text bodies are LAZY LEXEMES, not tag-exclusion regexes.
 #
@@ -140,49 +141,20 @@ channel_block: channel_open channel_body channel_close_tag
 channel_open: channel_open_tag channel_kind
 channel_kind: "thought"
 channel_body: reasoning
-# A thought body. It must stop at `<channel|>`, and the only construct that
-# achieves that here is a regex which cannot begin consuming `<` at all.
+# Both bodies are unrestricted runs of characters, and need no exclusion at all:
+# the markers that end them are special tokens, which a regex cannot produce. The
+# sampler simply cannot carry a body past the marker, whatever the body contains.
+# So a thought or an answer may hold `<`, `<html>`, backticks -- anything.
 #
-# Three alternatives were measured and rejected:
-#   * `/(.|\n)*?/` -- llguidance ignores laziness in a plain regex and lexes it
-#     greedily, so the body swallowed its own closer and the block never ended.
-#   * `reasoning[lazy]` -- the documented idiom, and it PANICS this version of
-#     llguidance outright: `assertion failed: !state.has_lowest_match()`.
-#     Reduced to a three-line reproducer; see docs/fork/POLICIES.md.
-#   * `reasoning[suffix=...]` -- works, but consumes the closer INTO this lexeme,
-#     which would delete `channel_close_tag` as a production. The PEG extractor
-#     takes its stop-delimiter from exactly that production, so the two sides
-#     would stop agreeing about where a thought ends.
-#
-# The cost is that a thought cannot contain `<`. Accepted: it is the model's
-# scratchpad, the alternative forms are broken or panic, and the answer text
-# (`content` below) has no such restriction.
-#
-# The redundant group is load-bearing for the OTHER consumer. lark-to-peg maps a
-# pattern starting with `(` to an until-the-next-delimiter run, and decodes a
-# bare `[^<]*` into a plain character class instead. The character class is
-# greedy and never reports a PARTIAL match, so a half-streamed thought looked
-# complete and the no-reasoning transformer emitted `<|channel>thought<channel|>`
-# with an empty body, then re-emitted it with the body filled in -- a
-# non-monotonic content stream, which the streaming diff rejects.
-reasoning: /([^<])*/
-
-# `content` cannot use `lazy`, because it is NOT always followed by anything --
-# it may end the turn. llguidance is explicit about that case: "`foo[lazy]:
-# /.*/` will match only the empty string" when the regex does not end at a
-# delimiter (docs/syntax.md). Measured: with `content[lazy]`, a plain
-# "Hello, world!" answer matched nothing at all.
-#
-# So content is assembled by the PARSER from small lexemes instead of being one
-# big lexeme that has to know where to stop. Each piece is chosen so the lexer
-# can never over-munch into a tag: `SAFE_TEXT` cannot begin with `<`, and
-# `LT_TEXT` is exactly two characters and cannot match `<|`. The Earley parser
-# joins them, which is where alternation belongs -- a single terminal has no
-# backtracking and dead-ends the moment it consumes a tag's first byte.
-SAFE_TEXT:     /[^<`]+/
-LT_TEXT:       /<[^|]/
-BACKTICK_TEXT: /`[^`]|``[^`]/
-content: (SAFE_TEXT | LT_TEXT | BACKTICK_TEXT)*
+# Everything previously tried here was working around markers being ordinary
+# bytes: negative lookahead (llguidance rejects look-around outright), a
+# lookahead-free exclusion (its lexer is maximal-munch with no backtracking, so a
+# body that could consume even a PREFIX of a marker committed and dead-ended), the
+# documented `[lazy]` option (panics: `assertion failed:
+# !state.has_lowest_match()`), and a hand-built set of short lexemes for the parser
+# to join. All symptom, one cause.
+reasoning: /(.|\n)*/
+content: /(.|\n)*/
 
 tool_calls: tool_call+
 # Open, directive, colon, payload, close -- the shape shared by the whole
@@ -201,19 +173,14 @@ gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA
 # no way to escape it: see ARCHITECTURE.md.
 gemma4_string: str_delim_tag gemma4_str_content str_delim_tag
 
-# Assembled by the parser from small lexemes, for the same reason `content` is:
-# as a single terminal (`([^<]|<[^|]|<\|[^"]|<\|"[^|])*`) it could begin
-# consuming `<|"` -- a prefix of its own closing delimiter -- and llguidance's
-# lexer, which is maximal-munch with no backtracking, then committed to that path
-# and dead-ended on every quoted argument. `STR_LT` is two characters and cannot
-# match `<|`, so the closer is unreachable from inside the string.
+# Unrestricted, like the other text bodies: `<|"|>` is one token (id 52), so a
+# string argument cannot run past its own closing delimiter whatever it contains.
+# Which also means a tool argument may hold `<` and angle-bracketed markup.
 #
-# Still named `gemma4_str_content`: the decoder finds it by normalized rule name
-# when rebuilding JSON (gemma4_to_json), and lowercase-with-underscores
-# normalizes to the same `gemma4-str-content` the uppercase terminal did.
-STR_SAFE: /[^<]+/
-STR_LT:   /<[^|]/
-gemma4_str_content: (STR_SAFE | STR_LT)*
+# Lowercase rather than a terminal because the decoder finds it by normalized rule
+# name when rebuilding JSON (gemma4_to_json); underscores normalize to the same
+# `gemma4-str-content` the uppercase spelling produced.
+gemma4_str_content: /(.|\n)*/
 gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
 
 GEMMA4_NUMBER: /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/

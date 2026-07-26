@@ -164,7 +164,34 @@ static LlgTokenizer * llama_sampler_llg_new_tokenizer(const llama_vocab * vocab)
 
         llama_token token = i;
         auto        dp    = (char *) token_bytes + offset;
-        auto        size  = llama_detokenize(vocab, &token, 1, dp, max_token, false, false);
+
+        // A token is opaque to llguidance -- addressable by name in a grammar,
+        // and impossible for a regex to produce -- when its bytes carry the
+        // '\xff' marker below.
+        //
+        // Detokenizing with special=false was the only test for that, which
+        // catches CONTROL tokens (they render as nothing) and misses
+        // USER_DEFINED ones, because those render their literal text. The
+        // distinction is not meaningful here: both are entries the tokenizer's
+        // added-tokens list DECLARES, neither is producible as ordinary text,
+        // and a grammar needs to name both.
+        //
+        // Gemma 4 is squarely in the gap. `<|turn>` is CONTROL and worked;
+        // `<|channel>`, `<channel|>`, `<|tool_call>`, `<tool_call|>`,
+        // `<tool_response|>` and `<|"|>` are USER_DEFINED and did not, so
+        // referring to them in a grammar failed with `unknown special token:
+        // "<|channel>"`. Left as plain bytes they are also forgeable, so every
+        // free-text rule had to carry a hand-built exclusion to avoid eating
+        // one -- the thing that made this grammar hard to write correctly.
+        //
+        // This reads a DECLARED attribute, not the token's spelling; nothing is
+        // inferred from what the text looks like.
+        const bool declared_special =
+            llama_vocab_is_control(vocab, token) ||
+            (llama_vocab_get_attr(vocab, token) & LLAMA_TOKEN_ATTR_USER_DEFINED) != 0;
+
+        auto size = declared_special ? 0
+                                     : llama_detokenize(vocab, &token, 1, dp, max_token, false, false);
         if (size < 0) {
             GGML_ABORT("llama_detokenize failed\n");
         }
