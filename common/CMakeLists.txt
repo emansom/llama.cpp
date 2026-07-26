@@ -63,6 +63,18 @@ add_library(${TARGET}
     chat-diff-analyzer.cpp
     chat-peg-parser.cpp
     chat-peg-parser.h
+    chat-formats/decoded-event.h
+    chat-formats/format-tracker.h
+    chat-formats/format-decoder.h
+    chat-formats/format-transformer.h
+    chat-formats/format-presenter.h
+    chat-formats/format-presenter.cpp
+    chat-formats/format-pipeline.h
+    chat-formats/format-pipeline.cpp
+    chat-formats/format-state-registry.h
+    chat-formats/format-state-registry.cpp
+    chat-formats/gemma4-format.h
+    chat-formats/gemma4-format.cpp
     chat.cpp
     chat.h
     common.cpp
@@ -80,7 +92,11 @@ add_library(${TARGET}
     http.h
     imatrix-loader.cpp
     imatrix-loader.h
+    gbnf-to-peg.cpp
+    gbnf-to-peg.h
     json-schema-to-grammar.cpp
+    lark-to-peg.cpp
+    lark-to-peg.h
     llguidance.cpp
     log.cpp
     log.h

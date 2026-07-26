@@ -1,0 +1,67 @@
+%llguidance {}
+
+# Gemma 4 chat grammar (Lark / llguidance)
+#
+# Two named entries:
+#   - `start` (default) — assistant-turn continuation; sampler entry. The model
+#     emits an optional `<|channel>thought ...<channel|>` reasoning block, then
+#     content, then either tool calls (`<|tool_call>call:NAME{args}<tool_call|>`)
+#     or a `\`\`\`json` response_format block.
+#   - `conversation` — full conversation wire shape; selected via arena
+#     set_root() by the bidirectional walker.
+#
+# Conversation wire shape (per google-gemma-4-31B-it.jinja):
+#   <|turn>system\n<system_body>[<|tool>...<tool|>]+<turn|>\n   (system + tool defs)
+#   <|turn>user\n<user_body><turn|>\n
+#   <|turn>model\n<assistant_body>[<|tool_call>...<tool_call|>]<turn|>\n
+#                                  ^-- assistant body may contain <|channel>thought
+#                                      <|tool_response>response:NAME{...}<tool_response|>
+#   <|turn>model\n[<|channel>thought\n<channel|>]                     (generation prompt)
+#
+# {{RESPONSE_SCHEMA}} replaced at runtime with %json {schema}.
+
+start: think_or_stray? content (think_block content)* (tool_calls | response_format | trailing_channel_marker | )
+
+# --- Assistant turn continuation (sampler entry) -------------------------------
+think_or_stray: think_block | stray_open
+content: /([^<`]|<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)|`(?!``)|``(?!`))*/
+think_block: "<|channel>thought" reasoning "<channel|>"
+reasoning: /(.|\n)*?/
+# Some Gemma 4 fixtures emit a stray '<|channel>' (without 'thought') at the
+# start of the body. Match and discard it.
+stray_open: "<|channel>"
+# Some Gemma 4 fixtures emit trailing '<channel|>' after the body. Match
+# and discard it so the strict closing-tokens-required policy still
+# applies but the stray bytes don't surface as content.
+trailing_channel_marker: "<channel|>"
+
+tool_calls: tool_call+
+tool_call: "<|tool_call>call:" func_name gemma4_dict "<tool_call|>"
+func_name: FUNC_NAME
+FUNC_NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+
+gemma4_dict: "{" (gemma4_kv ("," gemma4_kv)*)? "}"
+gemma4_kv: gemma4_dict_key ":" gemma4_value
+gemma4_dict_key: /[^:{}]+/
+gemma4_value: gemma4_string | gemma4_dict | gemma4_array | GEMMA4_NUMBER | GEMMA4_BOOL | "null"
+gemma4_string: "<|\"|>" GEMMA4_STR_CONTENT "<|\"|>"
+GEMMA4_STR_CONTENT: /([^<]|<[^|]|<\|[^"]|<\|"[^|])*/
+gemma4_array: "[" (gemma4_value ("," gemma4_value)*)? "]"
+
+GEMMA4_NUMBER: /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
+GEMMA4_BOOL: "true" | "false"
+
+response_format: "```json\n" response_content "\n```"
+response_content: {{RESPONSE_SCHEMA}}
+
+# --- Full-conversation walker entry --------------------------------------------
+conversation: turn+ assistant_open?
+turn: "<|turn>" role_name "\n" turn_body_text "<turn|>\n"
+role_name: "system" | "user" | "model"
+assistant_open: "<|turn>model\n" thought_open_marker?
+thought_open_marker: "<|channel>thought\n<channel|>"
+
+# Body of a wrapped turn — anything that isn't the start of <turn|>.
+turn_body_text: /([^<]|<(?!turn\|>))*/
+
+%ignore /[ \t\n\r]/
