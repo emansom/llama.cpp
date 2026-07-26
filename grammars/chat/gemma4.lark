@@ -24,7 +24,23 @@ start: think_or_stray? content (think_block content)* (tool_calls | response_for
 
 # --- Assistant turn continuation (sampler entry) -------------------------------
 think_or_stray: think_block | stray_open
-content: /([^<`]|<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)|`(?!``)|``(?!`))*/
+# Content is any run of text containing NO TAG.
+#
+# `<|` always begins a tag (open `<|NAME>` or self-delimiting `<|NAME|>`), and
+# `<NAME|>` is a close tag, so both are excluded generically -- not by listing
+# the tags someone remembered. A `<` that begins neither is ordinary text.
+#
+# This replaces a chain of per-tag negative lookaheads
+# (`<(?!\|tool_call>)(?!channel\|>)(?!\|channel>thought)(?!\|channel>)`), which
+# was permissive in the wrong direction: any tag not on that list fell through
+# and was captured as content instead of failing. Now an unrecognised tag ends
+# content and matches no production, which is a parse error -- the strictness
+# the format is supposed to give. Adding a tag no longer means remembering to
+# update this rule. See docs/fork/ARCHITECTURE.md.
+#
+# The backtick clauses are unrelated: they keep ``` from being swallowed so the
+# response_format block can match.
+content: /([^<`]|<(?!\|)(?![a-zA-Z_][a-zA-Z0-9_]*\|>)|`(?!``)|``(?!`))*/
 think_block: "<|channel>thought" reasoning "<channel|>"
 reasoning: /(.|\n)*?/
 # Some Gemma 4 fixtures emit a stray '<|channel>' (without 'thought') at the
