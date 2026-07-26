@@ -1146,8 +1146,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // invalidated the next one's end-of-turn test, and a double-render diff
     // could not isolate the tail under continuation.
     const auto rendered    = common_chat_gemma4_render(inputs, tmpl.bos_token());
-    data.prompt            = rendered.prompt;
-    data.entry_state       = rendered.entry_state;
+    data.chat_prompt       = { rendered.prompt, rendered.entry_state };
+    data.prompt            = data.chat_prompt.text;
 
 
     // Hand extraction the prompt and a parser rooted at the `conversation` rule.
@@ -1157,8 +1157,8 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // message on the way through, rather than being summarised here.
     {
         const auto conv_grammar = common_chat_grammar_require("gemma4");
-        data.rendered_prompt     = data.prompt;
-        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation");
+        data.prompt_validator    = common_chat_prompt_validator(
+            chat_grammar_to_peg(conv_grammar, "conversation"));
     }
 
     data.message_delimiters = {
@@ -1649,8 +1649,8 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
         // Same rule as the main path: the plugin reports both values, nothing
         // here derives one from the other.
         const auto rendered            = common_chat_gemma4_render(params_copy, tmpl.bos_token());
-        data.prompt                    = rendered.prompt;
-        data.entry_state               = rendered.entry_state;
+        data.chat_prompt               = { rendered.prompt, rendered.entry_state };
+        data.prompt                    = data.chat_prompt.text;
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
@@ -1803,56 +1803,10 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // This is what removes the last derived artefact. Nothing summarises
             // the entry state or the prefilled content for the FSM any more --
             // it walks the conversation and knows.
-            if (!params.rendered_prompt.empty() && !params.conversation_parser.empty()) {
-                // A rendered prompt is a PREFIX of a conversation -- it stops
-                // where generation begins -- so the last turn is legitimately
-                // incomplete. Both flags are needed to say that:
-                //
-                //   STREAMING makes a repetition report NEED_MORE at EOF instead
-                //   of quietly ending, so the incomplete turn's partial nodes
-                //   still reach the decoder.
-                //
-                //   LENIENT makes running OUT of input a partial match rather
-                //   than a failure (peg-parser literal/EOF). Despite the name it
-                //   does not loosen what is accepted: a byte that does not match
-                //   still fails. It is the difference between "no more input" and
-                //   "wrong input", and only the second is malformed.
-                //
-                // Validation therefore still bites: a bad byte fails the parse,
-                // and a parse that stops early is caught by the end-of-input
-                // check below.
-                common_peg_parse_flags cflags = COMMON_PEG_PARSE_FLAG_STREAMING | COMMON_PEG_PARSE_FLAG_LENIENT;
-                if (params.debug) {
-                    cflags |= COMMON_PEG_PARSE_FLAG_DEBUG;
-                }
-                common_peg_parse_context pctx(params.rendered_prompt, cflags);
-                auto presult = params.conversation_parser.parse(pctx);
-                // Every byte must be accounted for. Checked here rather than by
-                // anchoring the grammar at end-of-input, because "wants more
-                // input" is a success for a prefix and the anchor cannot express
-                // that. Without the check a rule like `closed_turn*` reports
-                // success having read nothing at all -- validation that validates
-                // nothing.
-                if (presult.fail() || presult.end != params.rendered_prompt.size()) {
-                    throw std::runtime_error(
-                        "rendered prompt failed `conversation` validation at offset " +
-                        std::to_string(presult.end) + ": " +
-                        params.rendered_prompt.substr(presult.end, 80));
-                }
-                // Set GEMMA4_DUMP_WALK to inspect this walk: it prints the
-                // rendered prompt, the conversation AST, and what the pipeline
-                // emitted from it. Kept behind an env var because it is the only
-                // way to see whether the walk produced decoder events at all.
-                if (getenv("GEMMA4_DUMP_WALK")) {
-                    fprintf(stderr, "\n=== WALK prompt ===\n%s\n=== WALK AST ===\n%s\n",
-                            params.rendered_prompt.c_str(), pctx.ast.dump().c_str());
-                }
-                pipeline.run(pctx.ast, presult);
-                if (getenv("GEMMA4_DUMP_WALK")) {
-                    fprintf(stderr, "=== WALK emitted: content=[%s] reasoning=[%s] ===\n",
-                            msg.content.c_str(), msg.reasoning_content.c_str());
-                }
-            }
+            // Input has its own type and its own parser; how a prompt is
+            // validated and walked belongs there, not inline in the middle of
+            // parsing model OUTPUT. See chat-formats/prompt.h.
+            params.prompt_validator.walk(params.chat_prompt, pipeline, msg, params.debug);
             pipeline.run(ctx.ast, result);
             return;
         }

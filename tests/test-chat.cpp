@@ -2416,7 +2416,7 @@ static void test_template_generation_prompt() {
         assert_contains(params.prompt, system_msg.content);
         assert_contains(params.prompt, message_user.content);
         assert_ends_with(params.prompt, expected_tail);
-        assert_equals(static_cast<int>(expected_entry), static_cast<int>(params.entry_state));
+        assert_equals(static_cast<int>(expected_entry), static_cast<int>(params.chat_prompt.entry_state));
     };
 
 
