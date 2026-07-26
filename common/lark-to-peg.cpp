@@ -35,6 +35,7 @@ enum class LarkTok {
     COMMA,
     LBRACK,
     RBRACK,
+    SPECIAL_TOKEN,
 };
 
 struct LarkToken {
@@ -179,6 +180,33 @@ struct LarkLexer {
                 case '[': tokens.push_back({LarkTok::LBRACK, "[",  tok_line, tok_col}); advance(); continue;
                 case ']': tokens.push_back({LarkTok::RBRACK, "]",  tok_line, tok_col}); advance(); continue;
                 default: break;
+            }
+
+            // Special token: `<something>`, llguidance's syntax for a single
+            // token of the model's vocabulary (lexer.rs: `<[^<>\s]+>`).
+            //
+            // To the SAMPLER this is atomic and unforgeable -- a regex cannot
+            // produce it -- which is what lets a plain `/(.|\n)*/` body be
+            // bounded by the marker that follows it. To this transpiler it is
+            // simply the literal text of that token, because the PEG parser reads
+            // bytes rather than tokens.
+            //
+            // Gemma 4's markers really are single tokens (`<|channel>` is id 100,
+            // `<|"|>` is 52), so this is the honest spelling. Writing them as
+            // quoted strings instead made them ordinary bytes, and every text
+            // body then needed a hand-built exclusion to avoid eating them.
+            if (c == '<') {
+                size_t close = src.find('>', pos + 1);
+                bool   ok    = close != std::string::npos;
+                for (size_t k = pos + 1; ok && k < close; k++) {
+                    const char sc = src[k];
+                    if (sc == '<' || sc == ' ' || sc == '\t' || sc == '\n' || sc == '\r') { ok = false; }
+                }
+                if (ok && close > pos + 1) {
+                    tokens.push_back({LarkTok::SPECIAL_TOKEN, src.substr(pos, close - pos + 1), tok_line, tok_col});
+                    while (pos <= close) { advance(); }
+                    continue;
+                }
             }
 
             if (c == '.') {
@@ -347,6 +375,14 @@ struct LarkParser {
         if (tok.type == LarkTok::STRING) {
             consume();
             if (tok.value.empty()) return builder.eps();
+            return builder.literal(tok.value);
+        }
+
+        // A special token matches exactly its own text. The sampler treats it as
+        // one indivisible token of the vocabulary; here it is the bytes that
+        // token stands for. See the lexer note.
+        if (tok.type == LarkTok::SPECIAL_TOKEN) {
+            consume();
             return builder.literal(tok.value);
         }
 
