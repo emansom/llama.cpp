@@ -1259,6 +1259,41 @@ static std::string inject_user_grammar(const std::string & grammar_template, boo
                        have_user_grammar ? "@response_grammar" : "content");
 }
 
+// Whether a turn may open a tool call at all.
+//
+// This is a property of the REQUEST -- did it declare tools, and did it allow
+// them to be used -- so it cannot live in the grammar file as a fixed
+// alternative. With tools the placeholder becomes `tool_call_request |`; without
+// them it becomes nothing, and `<|tool_call>` leaves the mask entirely.
+//
+// Unconditional was a hole: `{{TOOL_SCHEMA}}` degrades to any-name/any-args when
+// no tools are declared, so a plain chat request could emit a call to a function
+// nobody offered. The trailing `|` belongs to the placeholder because the empty
+// substitution has to remove the alternative, not leave an empty one behind --
+// `( | x)` matches the empty string and would make the whole group optional.
+static std::string inject_tool_call_alt(const std::string & grammar_template, bool tools_available) {
+    return replace_all(grammar_template, "{{TOOL_CALL_ALT}}",
+                       tools_available ? "tool_call_request |" : "");
+}
+
+// Additional thought channels after the first.
+//
+// EMPTY for sampling: the documented ordering has one thought channel per model
+// turn, and permitting more was an unbounded loop -- `content` matches empty, so
+// `<|channel>thought<channel|>` with nothing in it was legal and repeatable
+// forever. Measured live, once the tool branch stopped being available as an
+// escape hatch, the model fell straight into it and ran to max_tokens.
+//
+// PRESENT for extraction, because the two directions answer different questions:
+// what may the model emit, versus what might it have emitted. A prefilled or
+// replayed turn can carry a second channel, and a parser that refuses it drops
+// the thought into content instead -- caught by test-chat, which is what this
+// split exists for.
+static std::string inject_extra_channels(const std::string & grammar_template, bool allow) {
+    return replace_all(grammar_template, "{{EXTRA_CHANNELS}}",
+                       allow ? "(channel_block content)*" : "");
+}
+
 // One llguidance grammar LIST: the format grammar, plus the caller's under the
 // name the format grammar references.
 //
@@ -1334,6 +1369,12 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     // here could only reject legitimate output -- and the subgrammar reference
     // it is replaced with means nothing to the PEG transpiler anyway.
     base = replace_all(base, "{{USER_GRAMMAR}}", lark ? "content" : "([^]*)");
+    // Extraction ALWAYS keeps the tool-call alternative, whatever the request
+    // declared. It reads back what the sampler produced, and a call the model
+    // made has to be parseable -- withholding the branch here would drop it on
+    // the floor instead. Same reasoning as withholding the tool schema.
+    base = replace_all(base, "{{TOOL_CALL_ALT}}", lark ? "tool_call_request |" : "");
+    base = replace_all(base, "{{EXTRA_CHANNELS}}", lark ? "(channel_block content)*" : "");
 
     return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
 }
@@ -1549,6 +1590,13 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // same precedence order, below tool_choice and above the JSON schema:
         // asking for BOTH a schema and a grammar is contradictory, and the
         // grammar is the more specific of the two.
+        //
+        // Note this is precedence between ANSWER SHAPES only. Declaring tools no
+        // longer competes with either: every entry carries the tool-call
+        // alternative when the request offered tools (inject_tool_call_alt), so
+        // "call one of these, or else answer like THIS" is one grammar rather
+        // than a choice between two demands. Only tool_choice=required still
+        // wins outright, because it removes the "or else" by definition.
         auto demand = COMMON_CHAT_GEMMA4_ENTRY_ANY;
         if (has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED) {
             demand = COMMON_CHAT_GEMMA4_ENTRY_TOOL_CALL;
@@ -1594,6 +1642,13 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // request without tools is unaffected.
         sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
         sampling_grammar = inject_user_grammar(sampling_grammar, has_user_grammar);
+        // The tool-call branch exists only for a request that offered tools AND
+        // allowed them to be called. `tool_choice: "none"` means exactly "do not
+        // call", so it drops the branch the same way declaring no tools does --
+        // enforced in the grammar rather than asked for in a prompt.
+        sampling_grammar = inject_tool_call_alt(
+            sampling_grammar, has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
+        sampling_grammar = inject_extra_channels(sampling_grammar, /* allow = */ false);
         // Last, because it stops being a Lark grammar here and becomes an
         // llguidance grammar LIST. Every substitution above operates on Lark
         // text and would have to be JSON-aware otherwise.

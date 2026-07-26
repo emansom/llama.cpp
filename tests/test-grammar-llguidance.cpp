@@ -1212,6 +1212,11 @@ static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
     // compiled as a bare Lark string; test_gemma4_user_grammar covers that
     // through the production path.
     substitute("{{USER_GRAMMAR}}", "content");
+    // Tools declared: the cases below include tool calls, which are only
+    // representable when the request offered tools. test_gemma4_fsm_conformance
+    // is where the no-tools form is walked.
+    substitute("{{TOOL_CALL_ALT}}", "tool_call_request |");
+    substitute("{{EXTRA_CHANNELS}}", "");
 
     // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
     // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the
@@ -1667,12 +1672,15 @@ struct fsm_case {
     const char *                label;
     std::string                 generation;
     std::vector<fsm_checkpoint> checkpoints;
+    // Did the request declare tools? Decides whether the tool-call alternative
+    // is in the grammar at all -- which is the difference between "the model
+    // chose not to call" and "the model could not".
+    bool                        tools = false;
 };
 
 // Compile a grammar rooted at one entry rule, with the per-request placeholders
-// filled the way production fills them for a request with no tools and no
-// caller grammar.
-static std::string gemma4_grammar_at(const std::string & base, const std::string & root) {
+// filled the way production fills them.
+static std::string gemma4_grammar_at(const std::string & base, const std::string & root, bool tools) {
     auto sub = [](std::string s, const std::string & ph, const std::string & with) {
         for (size_t at = s.find(ph); at != std::string::npos; at = s.find(ph, at + with.size())) {
             s.replace(at, ph.size(), with);
@@ -1683,13 +1691,16 @@ static std::string gemma4_grammar_at(const std::string & base, const std::string
     g = sub(g, "{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
     g = sub(g, "{{RESPONSE_SCHEMA}}", "%json {\"type\": \"object\"}");
     g = sub(g, "{{USER_GRAMMAR}}", "content");
+    g = sub(g, "{{TOOL_CALL_ALT}}", tools ? "tool_call_request |" : "");
+    // Sampling gets one thought channel per turn; the repetition is the parser's.
+    g = sub(g, "{{EXTRA_CHANNELS}}", "");
     return common_chat_grammar_set_entry(g, root);
 }
 
 static void run_fsm_case(const std::string & base, const fsm_case & tc,
                          const std::vector<std::pair<std::string, llama_token>> & markers,
                          const std::vector<llama_token> & text_probes) {
-    const std::string grammar = gemma4_grammar_at(base, tc.entry_root);
+    const std::string grammar = gemma4_grammar_at(base, tc.entry_root, tc.tools);
     auto *            smpl    = llama_sampler_init_llg(vocab, "lark", grammar.c_str());
     // Null here means the grammar did not compile. That used to be survivable --
     // the sampler came back non-null and constrained nothing -- so this assert
@@ -1700,7 +1711,8 @@ static void run_fsm_case(const std::string & base, const fsm_case & tc,
     auto       steps = walk_mask(tc.generation, smpl, text_probes, nullptr, markers);
     assert(steps.size() == all.size());
 
-    fprintf(stderr, "\n  %s  (start: %s)\n", tc.label, tc.entry_root);
+    fprintf(stderr, "\n  %s  (start: %s, tools %s)\n", tc.label, tc.entry_root,
+            tc.tools ? "declared" : "none");
     for (const auto & cp : tc.checkpoints) {
         const std::string & prefix = cp.after;
         const auto          pre    = common_tokenize(vocab, prefix, false, true);
@@ -1764,7 +1776,7 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
     const std::vector<fsm_case> cases = {
         // ── INITIAL / IN_GENERATION_PROMPT / IN_CONTENT, no demand ────────────
         {
-            "turn_start", "fresh model turn, no demand",
+            "turn_start", "fresh model turn, tools declared",
             TH_OPEN + "\nthinking" + TH_CLOSE + "Hello." + "<turn|>",
             {
                 // A turn may open with a thought, open with a call, answer
@@ -1780,14 +1792,40 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 // and NOT a tool call -- the ordering puts the call after
                 // `<channel|>`, never inside the channel.
                 { TH_OPEN, { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>", "<|tool_response>" }, 1 },
-                // Back in content after the thought closes.
+                // Back in content after the thought closes -- and a SECOND
+                // thought is not on the menu. One channel per generated turn is
+                // what the documented ordering has, and permitting more was an
+                // unbounded loop the model fell into live.
                 { TH_OPEN + "\nthinking" + TH_CLOSE,
-                  { "<|tool_call>", "<turn|>", "<|channel>" },
-                  { "<channel|>", "<tool_call|>", "<|tool_response>", "<|turn>" }, 1 },
+                  { "<|tool_call>", "<turn|>" },
+                  { "<|channel>", "<channel|>", "<tool_call|>", "<|tool_response>", "<|turn>" }, 1 },
                 // And the model can end its own turn from content.
                 { TH_OPEN + "\nthinking" + TH_CLOSE + "Hello.",
-                  { "<turn|>", "<|tool_call>" }, { "<channel|>", "<tool_call|>", "<|turn>" }, 1 },
+                  { "<turn|>", "<|tool_call>" },
+                  { "<|channel>", "<channel|>", "<tool_call|>", "<|turn>" }, 1 },
             },
+            /* tools = */ true,
+        },
+        // ── the same turn, with NO tools declared ─────────────────────────────
+        //
+        // The one that was wrong. `{{TOOL_SCHEMA}}` degrades to any-name/any-args
+        // when nothing was declared, so leaving the alternative in let a plain
+        // chat request open a call to a function that does not exist. It is not
+        // enough that the model usually would not: the mask has to make it
+        // unrepresentable, and every OTHER marker must stay exactly as it was.
+        {
+            "turn_start", "fresh model turn, NO tools declared",
+            TH_OPEN + "\nthinking" + TH_CLOSE + "Hello." + "<turn|>",
+            {
+                { "", { "<|channel>", "<turn|>" },
+                      { "<|tool_call>", "<channel|>", "<tool_call|>", "<|tool_response>" }, 1 },
+                { TH_OPEN, { "<channel|>" }, { "<|tool_call>", "<|channel>", "<turn|>" }, 1 },
+                { TH_OPEN + "\nthinking" + TH_CLOSE,
+                  { "<turn|>" }, { "<|tool_call>", "<|channel>", "<channel|>" }, 1 },
+                { TH_OPEN + "\nthinking" + TH_CLOSE + "Hello.",
+                  { "<turn|>" }, { "<|tool_call>", "<|channel>", "<channel|>" }, 1 },
+            },
+            /* tools = */ false,
         },
         // ── the tool-call ordering, exactly as documented ─────────────────────
         {
@@ -1809,6 +1847,7 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 { CALL + "get_time{city:<|\"|>London<|\"|>}" + CALL_END,
                   { "<|tool_call>", "<|tool_response>" }, { "<turn|>", "<|channel>", "<tool_call|>" }, 0 },
             },
+            /* tools = */ true,
         },
         // ── IN_REASONING: generation resumes inside a thought already opened ──
         {
@@ -1820,9 +1859,10 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 // is unrepresentable.
                 { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>", "<|tool_response>" }, 1 },
                 { "still thinking", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
-                { "still thinking" + TH_CLOSE, { "<turn|>", "<|tool_call>", "<|channel>" },
-                  { "<channel|>", "<|turn>" }, 1 },
+                { "still thinking" + TH_CLOSE, { "<turn|>", "<|tool_call>" },
+                  { "<|channel>", "<channel|>", "<|turn>" }, 1 },
             },
+            /* tools = */ true,
         },
         // ── tool_choice: "required" ───────────────────────────────────────────
         {
@@ -1836,16 +1876,29 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 { TH_OPEN + "\npicking" + TH_CLOSE, { "<|tool_call>" },
                   { "<turn|>", "<|channel>", "<|tool_response>" }, 0 },
             },
+            /* tools = */ true,
         },
         // ── response_format: json_schema ──────────────────────────────────────
         {
-            "turn_start_response_format", "a schema demand cannot be answered in prose",
+            "turn_start_response_format", "a schema demand, no tools to call instead",
             "```json\n{}\n```",
             {
                 // The fence, or a thought first. Not prose, which is the whole
                 // difference between a demand and a suggestion.
                 { "", { "<|channel>" }, { "<turn|>", "<|tool_call>", "<channel|>" }, 0 },
             },
+            /* tools = */ false,
+        },
+        {
+            "turn_start_response_format", "a schema demand, or a tool call instead",
+            CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                // Both branches live, and prose still is not one of them. The
+                // tool alternative does not weaken the demand: it is bounded, so
+                // "answer in the schema" has not degraded to "eventually".
+                { "", { "<|channel>", "<|tool_call>" }, { "<turn|>", "<channel|>" }, 0 },
+            },
+            /* tools = */ true,
         },
         // ── response_format: a caller's own grammar ───────────────────────────
         {
@@ -1857,6 +1910,21 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
             {
                 { "", { "<|channel>", "<turn|>" }, { "<channel|>", "<|tool_call>", "<|tool_response>" }, 1 },
             },
+            /* tools = */ false,
+        },
+        {
+            "turn_start_user_grammar", "either call a tool, or answer in the grammar",
+            CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                // THE case this alternative exists for -- an agent stage saying
+                // "here are your tools, and if you are not going to use one, the
+                // answer looks like THIS".
+                { "", { "<|channel>", "<|tool_call>" }, { "<channel|>", "<tool_call|>" }, 1 },
+                // Having opened a call, the grammar's branch is gone: it is a
+                // choice, not a concatenation.
+                { "<|tool_call>", { }, { "<turn|>", "<|channel>", "<tool_call|>" }, 0 },
+            },
+            /* tools = */ true,
         },
         // ── and every demand again from the OTHER state ───────────────────────
         // The resume entries are where getting this wrong is invisible: the
@@ -1870,6 +1938,7 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 // Thought closed, and the only way on is the call.
                 { "deciding" + TH_CLOSE, { "<|tool_call>" }, { "<turn|>", "<|channel>", "<channel|>" }, 0 },
             },
+            /* tools = */ true,
         },
         {
             "resume_reasoning_response_format", "resumed mid-thought, still owes a schema",
@@ -1878,6 +1947,7 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
                 { "deciding" + TH_CLOSE, { }, { "<turn|>", "<|tool_call>", "<|channel>", "<channel|>" }, 0 },
             },
+            /* tools = */ false,
         },
         {
             "resume_reasoning_user_grammar", "resumed mid-thought, then the caller's grammar",
@@ -1886,6 +1956,17 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
                 { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
                 { "deciding" + TH_CLOSE, { "<turn|>" }, { "<channel|>", "<|tool_call>" }, 1 },
             },
+            /* tools = */ false,
+        },
+        {
+            "resume_reasoning_user_grammar", "resumed mid-thought, tool call still available",
+            "deciding" + TH_CLOSE + CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                { "", { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" }, 1 },
+                // Thought closed: call a tool, or answer in the grammar. Both.
+                { "deciding" + TH_CLOSE, { "<turn|>", "<|tool_call>" }, { "<channel|>" }, 1 },
+            },
+            /* tools = */ true,
         },
     };
 
@@ -2177,6 +2258,8 @@ static void test_gemma4_contract_check_catches_drift(const std::string & grammar
     base = sub(base, "{{TOOL_SCHEMA}}", "tool_call_directive \":\" func_name gemma4_dict?");
     base = sub(base, "{{RESPONSE_SCHEMA}}", "__JSON_VALUE__");
     base = sub(base, "{{USER_GRAMMAR}}", "content");
+    base = sub(base, "{{TOOL_CALL_ALT}}", "tool_call_request |");
+    base = sub(base, "{{EXTRA_CHANNELS}}", "(channel_block content)*");
 
     // Intact: the contract holds. (common_chat_grammar_init already asserted
     // this at startup; repeating it here is what makes the negative case below

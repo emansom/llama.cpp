@@ -155,20 +155,61 @@ def main():
     # constraints with tools"), and has to: there the two are separate samplers
     # over one token stream, and two grammars whose languages do not nest can
     # intersect to nothing -- every logit -INF, with no diagnostic.
-    case("lark_grammar + tools composes (stock rejects this)",
+    #
+    # Here both are branches of one grammar, so the turn may go either way --
+    # which is the point. WHICH branch the model takes is its own judgement and
+    # not something to assert; what must hold is that whichever it took is
+    # well-formed, and that nothing outside the two is reachable.
+    print("\n=== tools + grammar: both branches are live ===")
+    status, d = post({**BASEBODY, "tools": [GET_TIME], "tool_choice": "auto",
+                      "response_format": {"type": "lark_grammar", "lark_grammar": yes_no_lark},
+                      "messages": [{"role": "user", "content": "Is the sky blue?"}]})
+    ok = False
+    if status == 200:
+        ch = d["choices"][0]
+        calls = ch["message"].get("tool_calls") or []
+        content = ch["message"].get("content") or ""
+        print(f"  finish_reason: {ch['finish_reason']}  content: {content!r}  "
+              f"calls: {[c['function']['name'] for c in calls]}")
+        took_tool = [c["function"]["name"] for c in calls] == ["get_time"]
+        took_grammar = not calls and re.fullmatch(r"yes|no", content) is not None
+        ok = (took_tool or took_grammar) and ch["finish_reason"] != "length"
+        print(f"  branch taken: {'tool call' if took_tool else 'grammar' if took_grammar else 'NEITHER'}")
+    else:
+        print(f"  http {status}: {json.dumps(d)[:200]}")
+    print(f"  {'PASS' if ok else 'FAIL'}")
+    results.append(ok)
+
+    case("tools + grammar: a question only the tool answers",
          {**BASEBODY, "tools": [GET_TIME], "tool_choice": "auto",
           "response_format": {"type": "lark_grammar", "lark_grammar": yes_no_lark},
-          "messages": [{"role": "user", "content": "Is the sky blue?"}]},
-         content_re=r"yes|no", expect_calls=[])
+          "messages": [{"role": "user", "content": "What time is it in Oslo right now?"}]},
+         expect_calls=["get_time"])
 
-    # Precedence is stated, not a silent drop of one of the two: a turn cannot be
-    # required to both call a tool and answer in a grammar, and the call is the
-    # more specific instruction.
-    case("tool_choice=required wins over a caller grammar",
+    # tool_choice=required still removes the alternative by definition.
+    case("tool_choice=required leaves only the call",
          {**BASEBODY, "tools": [GET_TIME], "tool_choice": "required",
           "response_format": {"type": "lark_grammar", "lark_grammar": yes_no_lark},
           "messages": [{"role": "user", "content": "What time is it in Oslo?"}]},
          expect_calls=["get_time"])
+
+    # ── and a turn offered NO tools cannot invent one ────────────────────────
+    # `{{TOOL_SCHEMA}}` degrades to any-name/any-args with nothing declared, so
+    # leaving the tool branch in unconditionally let a plain chat request emit a
+    # call to a function that does not exist. Asked as hard as a prompt can ask.
+    case("no tools declared: a call is unrepresentable, not just unlikely",
+         {**BASEBODY, "max_tokens": 128,
+          "messages": [{"role": "user", "content":
+                        "You have a function called get_time(city). Call it for Oslo now. "
+                        "Emit the tool call and nothing else."}]},
+         expect_calls=[])
+
+    # tool_choice=none means "do not call", and drops the branch the same way.
+    case("tool_choice=none drops the branch even with tools declared",
+         {**BASEBODY, "tools": [GET_TIME], "tool_choice": "none", "max_tokens": 128,
+          "messages": [{"role": "user", "content":
+                        "Call get_time for Oslo. Emit the tool call and nothing else."}]},
+         expect_calls=[])
 
     # ── a grammar that cannot be honoured must be an ERROR ───────────────────
     # Not prose. llguidance answers a grammar it cannot build by constraining

@@ -136,7 +136,66 @@ turn_start: channel_block? turn_tail
 # Everything a model turn can contain after its opening thought. Shared by both
 # generation entries so they cannot drift: `turn_start` and `resume_reasoning` differ
 # ONLY in where the model picks up, never in what it may say next.
-turn_tail: content (channel_block content)* (tool_call_request | response_format turn_close_tag? | turn_close_tag?)
+#
+# ONE thought channel per GENERATED turn, which is what the documented ordering
+# has: `<|turn>model -> <|channel>thought -> <channel|> -> ... -> <turn|>`. The
+# opener is `turn_start`'s `channel_block?`; sampling may not open another.
+#
+# `{{EXTRA_CHANNELS}}` is how that differs between the two directions. It is
+# empty for SAMPLING and `(channel_block content)*` for EXTRACTION, because those
+# answer different questions -- what may the model emit, versus what might it
+# have emitted. Re-imposing the sampler's bound on the parser could only reject
+# output that was legitimately produced, which is the same reason extraction gets
+# the permissive entry root and no tool schema.
+#
+# It used to be that repetition on BOTH sides, and on the sampling side it was an
+# unbounded loop. `content` matches empty, so `<|channel>thought<channel|>` with
+# an empty body was legal, and so was doing it again, forever. Measured live on
+# the 12B the moment the tool branch stopped being an available escape hatch --
+# asked to call a function that had not been declared, with nothing else the
+# grammar would accept:
+#
+#   <|channel>thought.<channel|><|channel>thought.<channel|><|channel>thought...
+#   finish_reason: length
+#
+# The same shape as the three runaways before it: something unbounded sitting
+# where the turn needed to make progress. A second thought mid-turn is not part
+# of the single-pass ordering anyway -- the post-tool-response re-opener begins a
+# NEW generation pass, entered at `resume_reasoning` with the opener already in
+# the prompt. `model_body` keeps the repetition unconditionally for the same
+# reason the parse side does: a REPLAYED turn really can hold several channels,
+# separated by tool responses.
+#
+# NOTE, not fixed here: entry_state IN_CONTENT shares `turn_start`, so after the
+# thinking-off prefill (which puts an opened-and-closed thought in the PROMPT)
+# the model may still open one more via `channel_block?`. Bounded -- one extra
+# block, then no further repetition -- so it is not the runaway. Separating it
+# needs its own entry rule per demand and its own conformance cases.
+turn_tail: content {{EXTRA_CHANNELS}} ({{TOOL_CALL_ALT}} response_format turn_close_tag? | turn_close_tag?)
+
+# `{{TOOL_CALL_ALT}}` is the tool-call alternative, and it is a PLACEHOLDER
+# because whether a turn may call a tool is a property of the REQUEST, not of the
+# format. It becomes `tool_call_request |` when the request declared tools with
+# tool_choice other than "none", and NOTHING when it did not -- so a turn that was
+# offered no tools cannot open a call at all.
+#
+# It was unconditional, and that was a hole rather than a nicety. `{{TOOL_SCHEMA}}`
+# falls back to `tool_call_directive ":" func_name gemma4_dict?` with no tools
+# declared -- any name, any arguments -- so a PLAIN CHAT REQUEST could emit a
+# fabricated call to a function that was never offered. Measured by the mask walk
+# on a request with no tools:
+#
+#   after ""   prose=OPEN   markers: <turn|> <|channel> <|tool_call>
+#
+# `<|tool_call>` had no business being in that set. Now it is absent, and the
+# unconstrained fallback is reachable only from `conversation` -- the validator's
+# entry, where a call the model already made has to be parseable whatever it
+# named.
+#
+# The trailing `|` lives INSIDE the placeholder on purpose: substituting empty
+# has to leave `(response_format ... | turn_close_tag?)`, not
+# `( | response_format ...)`, which would add an empty alternative and quietly
+# make the whole group optional.
 
 # `<turn|>` is how the model CLOSES ITS OWN TURN, and leaving it out of the
 # generation entries was a real, measured failure -- not a theoretical gap.
@@ -206,8 +265,14 @@ turn_start_tool_call: channel_block? tool_call_request
 # Unbounded content next to a required continuation is the recurring shape of
 # this bug -- it produced the tool_choice=required emoji runaway and the missing
 # <turn|> runaway too. A required thing must be the ONLY thing that follows.
-turn_start_response_format: channel_block? response_format turn_close_tag?
-resume_reasoning_response_format: reasoning channel_close_tag response_format turn_close_tag?
+#
+# The tool-call alternative rides alongside, on the same `{{TOOL_CALL_ALT}}`
+# terms as everywhere else: with tools declared the turn may call one INSTEAD of
+# emitting the block, and with none it may not. That does not weaken the demand
+# -- both branches are bounded, and neither is `content` -- it just means "answer
+# in this schema" and "use a tool" are not mutually exclusive requests.
+turn_start_response_format: channel_block? ({{TOOL_CALL_ALT}} response_format turn_close_tag?)
+resume_reasoning_response_format: reasoning channel_close_tag ({{TOOL_CALL_ALT}} response_format turn_close_tag?)
 
 # The caller's OWN grammar, as `response_format: {"type": "lark_grammar"}` or
 # `{"type": "gbnf_grammar"}` (GBNF is converted to Lark first -- llguidance reads
@@ -231,16 +296,20 @@ resume_reasoning_response_format: reasoning channel_close_tag response_format tu
 # answer text itself, so it stands where content would. Same discipline as the
 # two entries above -- no `content` beside it, or "must" degrades to "may".
 #
-# KNOWN LIMITATION: there is no tool-call alternative here, so a turn cannot be
-# "either call a tool or answer in this grammar". `tools` may still be sent
-# alongside (the fork allows the combination stock rejects outright), but
-# precedence decides: tool_choice=required makes it a calling turn, otherwise the
-# grammar governs the answer. Adding the alternative needs the tool branch to
-# appear only when tools were actually declared -- otherwise a request with no
-# tools would regain the unconstrained `{{TOOL_SCHEMA}}` fallback as an escape
-# hatch out of the caller's grammar, which is worse than not offering it.
-turn_start_user_grammar: channel_block? user_content turn_close_tag?
-resume_reasoning_user_grammar: reasoning channel_close_tag user_content turn_close_tag?
+# And the same `{{TOOL_CALL_ALT}}`, which is what makes "either call a tool or
+# answer in this grammar" expressible. It is the shape an agent stage actually
+# wants: here are your tools, and if you are not going to use one, the answer
+# looks like THIS. Both branches are bounded, so neither weakens the other -- the
+# rule that a required thing must be the only thing that follows is about
+# unbounded `content`, not about having two definite alternatives.
+#
+# This needed the placeholder to exist first. Offered unconditionally, a request
+# with no tools would have got the unconstrained `{{TOOL_SCHEMA}}` fallback as an
+# escape hatch out of the caller's own grammar -- strictly worse than not
+# offering it, which is why it was left out until the branch could be made
+# conditional.
+turn_start_user_grammar: channel_block? ({{TOOL_CALL_ALT}} user_content turn_close_tag?)
+resume_reasoning_user_grammar: reasoning channel_close_tag ({{TOOL_CALL_ALT}} user_content turn_close_tag?)
 user_content: {{USER_GRAMMAR}}
 
 # The second generation entry, selected when the rendered prompt ended INSIDE an
