@@ -58,18 +58,18 @@ LiteRT-LM is `github.com/google-ai-edge/LiteRT-LM`, inventoried at `7231f65`.
 
 Fifteen conflicts exist, several *inside* LiteRT-LM itself. The governing
 principle: **accept liberally per the parser (S1), emit conservatively per the
-writer (S2/S7), and generate at the intersection (S3).** Postel, with the parser
+writer (S2), and generate at the intersection (S3).** Postel, with the parser
 as arbiter.
 
 | conflict | resolution |
 |---|---|
-| Trailing `<\|tool_response>` after the last tool call — LiteRT-LM's own Jinja never emits it; its generation grammar makes it **mandatory** (`fc_resp`) | **Mandatory.** S3 + S7 agree; the shipped template is the outlier |
+| Trailing `<\|tool_response>` after the last tool call — LiteRT-LM's own Jinja never emits it; its generation grammar makes it **mandatory** (`fc_resp`) | **Mandatory.** S3 requires it and LiteRT-LM's own shipped template is the outlier |
 | Identifier charset — S1 parser allows `.` and `-`; S3 generation grammar does not | **Parse** `[a-zA-Z_][a-zA-Z0-9_.-]*`, **emit** `[a-zA-Z_][a-zA-Z0-9_]*` for argument keys. Function *names* stay dotted: S3 emits them as a literal alternation, so MCP-style `server.tool-name` is samplable |
 | String terminator — S1 parser non-greedy, S3 generation greedy | **Non-greedy.** The parser is the arbiter |
 | NUMBER — S1 permits bare `.5` / `-.5` and forbids leading zeros; S3 differs | **Union on parse, intersection on generate** |
 | `null` argument value — LiteRT-LM's Jinja renders Python `None`; its own C++ writer emits `null` | **`null`.** The shipped template is buggy |
-| OBJECT `properties` comma — LiteRT-LM's Jinja emits malformed `{,properties:{…}}` for a description-less object | **Guard the comma** (S7's behaviour) |
-| `<\|think\|>` trailing newline; the `\n\n` separator before tool declarations; image rendering | **Follow S7**, the canonical template |
+| OBJECT `properties` comma — LiteRT-LM's Jinja emits malformed `{,properties:{…}}` for a description-less object | **Guard the comma** — the unguarded form is malformed output |
+| `<\|think\|>` trailing newline; the `\n\n` separator before tool declarations; image rendering | **Decided by the renderer**, and pinned by explicit expected bytes in its tests |
 
 ### The `<|"|>` delimiter has no escape mechanism
 
