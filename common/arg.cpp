@@ -3566,6 +3566,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
+        {"--chat-grammars-dir"}, "DIR",
+        string_format(
+            "directory holding chat grammar files (*.lark for llguidance, *.gbnf otherwise)\n"
+            "read once at startup and cached in memory (default: %s)", DEFAULT_CHAT_GRAMMARS_DIR),
+        [](common_params & params, const std::string & value) {
+            params.chat_grammars_dir = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CHAT_GRAMMARS_DIR"));
+    add_opt(common_arg(
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},
         string_format(

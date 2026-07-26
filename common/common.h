@@ -629,6 +629,7 @@ struct common_params {
     std::string public_path   = "";                                                                         // NOLINT
     std::string api_prefix    = "";                                                                         // NOLINT
     std::string chat_template = "";                                                                         // NOLINT
+    std::string chat_grammars_dir;    // directory holding chat grammar files (*.lark, *.gbnf)
     bool use_jinja = true;                                                                                  // NOLINT
 
     // server CORS params

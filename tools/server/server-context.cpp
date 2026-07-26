@@ -1483,6 +1483,13 @@ private:
                 /* force_pure_content    */ params_base.force_pure_content_parser
             };
 
+            // Load chat grammar files into the in-process registry. Read once at
+            // startup and cached; never re-read per request. Override the
+            // location with --chat-grammars-dir / LLAMA_ARG_CHAT_GRAMMARS_DIR.
+            common_chat_grammar_init(params_base.chat_grammars_dir.empty()
+                ? std::string(DEFAULT_CHAT_GRAMMARS_DIR)
+                : params_base.chat_grammars_dir);
+
             {
                 auto caps = common_chat_templates_get_caps(chat_params.tmpls.get());
                 auto it = params_base.default_template_kwargs.find("preserve_reasoning");

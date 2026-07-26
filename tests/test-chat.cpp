@@ -18,6 +18,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <filesystem>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -1127,8 +1128,20 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
     }
     assert_msg_equals(tc.expect, msg_accum, true);
 
-    // Test grammar if present in params
-    if (!parser.params_.grammar.empty()) {
+    // Test grammar if present in params.
+    //
+    // Lark grammars are skipped: they are compiled by llguidance, not by
+    // build_grammar()'s GBNF path, so feeding one in fails with
+    // "Failed to build grammar: %llguidance {}".
+    //
+    // KNOWN COVERAGE GAP: this means the Lark sampling constraint -- the one the
+    // server actually uses when built with LLAMA_LLGUIDANCE=ON -- is validated
+    // nowhere in test-chat. Only the extraction half (the PEG parse asserted
+    // above) is covered. Closing it needs a test that compiles the Lark grammar
+    // through llguidance and asserts the wire shape is accepted or rejected as
+    // expected; see docs/fork/WORKFLOWS.md#verifying-a-conformance-claim.
+    const bool is_lark = parser.params_.grammar.rfind("%llguidance", 0) == 0;
+    if (!parser.params_.grammar.empty() && !is_lark) {
         auto grammar = build_grammar(parser.params_.grammar);
         if (!grammar) {
             throw std::runtime_error("Failed to build grammar: " + parser.params_.grammar);
@@ -6345,7 +6358,33 @@ static void test_msg_diffs_compute() {
     }
 }
 
+// Grammar-file-driven formats need the registry populated before any template is
+// applied, or common_chat_grammar_require() throws. The server does this from
+// --chat-grammars-dir; tests read straight out of the source tree.
+//
+// Tries the repo root first (how test-chat already finds models/templates/*.jinja),
+// then one and two levels up so the binary also works when run from build/ or
+// build/bin/. Throwing here beats an empty registry, which would mean generating
+// with no sampling constraint at all.
+static void init_chat_grammars() {
+    for (const char * dir : { "grammars/chat", "../grammars/chat", "../../grammars/chat" }) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(dir, ec)) {
+            common_chat_grammar_init(dir);
+            return;
+        }
+    }
+    throw std::runtime_error(
+        "test-chat: could not locate grammars/chat -- run from the llama.cpp repo root");
+}
+
 int main(int argc, char ** argv) {
+    // Must run before ANY test: several tests apply a Gemma 4 template, and a
+    // grammar-file-driven format throws from common_chat_grammar_require() when
+    // the registry is empty. Initialising next to the PEG tests is too late --
+    // test_template_generation_prompt() gets there first.
+    init_chat_grammars();
+
     bool detailed_debug    = false;
     bool only_run_filtered = false;
 
