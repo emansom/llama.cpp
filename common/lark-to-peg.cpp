@@ -652,42 +652,70 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
         std::string normalized_name = rdef.name;
         for (char & c : normalized_name) { if (c == '_') c = '-'; }
 
-        // Apply semantic tags based on conventional rule names
+        // Apply semantic tags based on conventional rule names.
+        //
+        // Matched on the name's ROLE SUFFIX as well as the whole name, so a rule
+        // called `open-reasoning`, `channel-content` or `model-tool-args` carries
+        // the same tag as the bare role.
+        //
+        // Exact-match-only made the tag a property of one exact spelling:
+        // renaming a rule, or splitting one into a wrapper plus a body, silently
+        // dropped it. Since the decoder emits ONLY for tagged nodes, the result
+        // was a tree that parsed perfectly and produced no events whatsoever --
+        // a failure with no error message at any layer. Restructuring the Gemma 4
+        // grammar hit exactly this.
+        //
+        // Suffix, not substring: `-content` at the end names the role, whereas a
+        // name that merely contains "content" may be something else entirely.
         const std::string & n = normalized_name;
-        if (n == "tool-call") {
+        auto role_is = [&n](std::initializer_list<const char *> names) {
+            for (const char * nm : names) {
+                if (n == nm) {
+                    return true;
+                }
+                const std::string suffix = std::string("-") + nm;
+                if (n.size() > suffix.size() &&
+                    n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // Checked FIRST: it ends in `-content` and would otherwise be captured by
+        // the content role, losing its special handling.
+        if (n == "analysis-content") {
+            // The no-reasoning variant: the rule body is the BODY of a think
+            // block (between '[THINK]' / '[/THINK]' markers or equivalent),
+            // tagged 'content' so it surfaces in `result.content`. The per-format
+            // transformer re-injects the literal markers around the captured body
+            // so the surfaced content matches the wire shape exactly. (Tagging
+            // the wrapping rule directly would let streaming partials of the
+            // leading literal -- e.g. '[T' from a partial '[THINK]' -- leak into
+            // content as a tag-wrapped partial node, breaking diff monotonicity
+            // once the literal resolves.)
+            body = builder.tag("content", body);
+        } else if (role_is({"tool-call"})) {
             body = builder.tag("tool", body);
-        } else if (n == "tool-open") {
+        } else if (role_is({"tool-open"})) {
             body = builder.tag("tool-open", body);
-        } else if (n == "tool-close") {
+        } else if (role_is({"tool-close"})) {
             body = builder.tag("tool-close", body);
-        } else if (n == "func-name" || n == "tool-name" || n == "function-name") {
+        } else if (role_is({"func-name", "tool-name", "function-name"})) {
             body = builder.tag("tool-name", body);
-        } else if (n == "tool-id") {
+        } else if (role_is({"tool-id"})) {
             body = builder.tag("tool-id", body);
-        } else if (n == "tool-args" || n == "arguments" || n == "args") {
+        } else if (role_is({"tool-args", "arguments", "args"})) {
             body = builder.tag("tool-args", body);
-        } else if (n == "tool-arg-name" || n == "arg-name") {
+        } else if (role_is({"tool-arg-name", "arg-name"})) {
             body = builder.tag("tool-arg-name", body);
-        } else if (n == "tool-arg-value" || n == "arg-value") {
+        } else if (role_is({"tool-arg-value", "arg-value"})) {
             body = builder.tag("tool-arg-value", body);
-        } else if (n == "content" || n == "response-content") {
+        } else if (role_is({"content", "response-content"})) {
             // `response-content` is the structured response_format payload
             // (e.g. JSON between code fences) that surfaces as content.
             body = builder.tag("content", body);
-        } else if (n == "analysis-content") {
-            // `analysis-content` is the no-reasoning variant: the rule body
-            // is the BODY of a think-block (between '[THINK]' / '[/THINK]'
-            // markers or equivalent). It is tagged 'content' so the body
-            // surfaces in `result.content`. The per-format transformer is
-            // responsible for re-injecting the literal markers around the
-            // captured body so the surfaced content matches the wire shape
-            // exactly. (Tagging the wrapping rule directly would let
-            // streaming partials of the leading literal — e.g. '[T' from
-            // a partial '[THINK]' — leak into content as a tag-wrapped
-            // partial node, breaking diff monotonicity once the literal
-            // resolves.)
-            body = builder.tag("content", body);
-        } else if (n == "reasoning" || n == "thought") {
+        } else if (role_is({"reasoning", "thought"})) {
             body = builder.tag("reasoning", body);
         }
 
