@@ -1807,7 +1807,19 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
                         std::to_string(presult.end) + ": " +
                         params.rendered_prompt.substr(presult.end, 80));
                 }
+                // Set GEMMA4_DUMP_WALK to inspect this walk: it prints the
+                // rendered prompt, the conversation AST, and what the pipeline
+                // emitted from it. Kept behind an env var because it is the only
+                // way to see whether the walk produced decoder events at all.
+                if (getenv("GEMMA4_DUMP_WALK")) {
+                    fprintf(stderr, "\n=== WALK prompt ===\n%s\n=== WALK AST ===\n%s\n",
+                            params.rendered_prompt.c_str(), pctx.ast.dump().c_str());
+                }
                 pipeline.run(pctx.ast, presult);
+                if (getenv("GEMMA4_DUMP_WALK")) {
+                    fprintf(stderr, "=== WALK emitted: content=[%s] reasoning=[%s] ===\n",
+                            msg.content.c_str(), msg.reasoning_content.c_str());
+                }
             }
             pipeline.run(ctx.ast, result);
             return;
