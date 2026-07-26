@@ -228,7 +228,6 @@ std::vector<common_chat_decoded_event> common_chat_gemma4_decoder::decode(
         if (handled_ids_.count(node.id)) {
             return events;
         }
-        fprintf(stderr, "[DBG-GEMMA4 content] text=[%s] partial=%d\n", std::string(node.text).c_str(), node.is_partial);
         events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
         return events;
     }
