@@ -104,6 +104,11 @@ class ServerProcess:
     reasoning: Literal['on', 'off', 'auto'] | None = None
     chat_template: str | None = None
     chat_template_file: str | None = None
+    # The replacement for the two above: this build names a FORMAT, it does not
+    # take a template. Kept as its own field rather than folded into extra_args so
+    # a test can state "started with no --chat-format" by leaving it None, which is
+    # the metadata-tier case.
+    chat_format: str | None = None
     server_path: str | None = None
     mmproj_url: str | None = None
     media_path: str | None = None
@@ -254,6 +259,8 @@ class ServerProcess:
             server_args.extend(["--chat-template", self.chat_template])
         if self.chat_template_file:
             server_args.extend(["--chat-template-file", self.chat_template_file])
+        if self.chat_format:
+            server_args.extend(["--chat-format", self.chat_format])
         if self.mmproj_url:
             server_args.extend(["--mmproj-url", self.mmproj_url])
         if self.media_path:
