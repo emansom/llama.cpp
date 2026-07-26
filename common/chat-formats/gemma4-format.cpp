@@ -857,7 +857,7 @@ std::string format_tool_response_block(const std::string & tool_name, const orde
 
 }  // namespace
 
-common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generation_params & inputs,
+common_chat_gemma4_rendered common_chat_gemma4_render(const common_chat_render_params & inputs,
                                       const std::string & bos_token) {
     std::ostringstream out;
 

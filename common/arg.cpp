@@ -865,13 +865,9 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         params.speculative.draft.tensor_buft_overrides.push_back({nullptr, nullptr});
     }
 
-    if (!params.chat_template.empty() && !common_chat_verify_template(params.chat_template)) {
-        throw std::runtime_error(string_format(
-            "error: the supplied chat template is not supported: %s%s\n",
-            params.chat_template.c_str(),
-            ""
-        ));
-    }
+    // params.chat_template is unreachable now -- both flags that set it throw --
+    // so the verification that stood here had nothing left to verify.
+    // common_chat_verify_template went with it.
 
     return true;
 }
@@ -3531,26 +3527,37 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
+    // Both template flags REJECT rather than being silently ignored.
+    //
+    // There is no template engine left: prompts are built by a format plugin's
+    // renderer, and which plugin is chosen comes from --chat-format or declared
+    // GGUF metadata. A flag that quietly does nothing is worse than one that is
+    // gone -- the caller believes a template is in effect and it is not -- and
+    // worse than one that says what to use instead, which is what these do.
+    //
+    // Deliberately kept as recognised flags for exactly that reason: an
+    // "unrecognised argument" would not tell a migrating deployment anything.
+    // The router INI's chat-template-file lines land here.
     add_opt(common_arg(
         {"--chat-template"}, "TEMPLATE",
-        string_format(
-            "set the chat template source recorded in metadata (default: from the model)\n"
-            "if suffix/prefix are specified, template will be disabled\n"
-            "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
-        ),
-        [](common_params & params, const std::string & value) {
-            params.chat_template = value;
+        "NOT SUPPORTED -- there is no template engine in this build.\n"
+        "use --chat-format <name> to select a format plugin instead.",
+        [](common_params &, const std::string &) {
+            throw std::invalid_argument(
+                "--chat-template is not supported: this build renders prompts from a chat FORMAT "
+                "plugin, not a Jinja template. Use --chat-format <name>, or omit it and let the "
+                "model's declared general.architecture decide.");
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
     add_opt(common_arg(
         {"--chat-template-file"}, "TEMPLATE_FILE",
-        string_format(
-            "set the chat template source from a file (default: from the model)\n"
-            "if suffix/prefix are specified, template will be disabled\n"
-            "list of built-in templates:\n%s", list_builtin_chat_templates().c_str()
-        ),
-        [](common_params & params, const std::string & value) {
-            params.chat_template = read_file(value);
+        "NOT SUPPORTED -- there is no template engine in this build.\n"
+        "use --chat-format <name> to select a format plugin instead.",
+        [](common_params &, const std::string &) {
+            throw std::invalid_argument(
+                "--chat-template-file is not supported: this build renders prompts from a chat "
+                "FORMAT plugin, not a Jinja template. Use --chat-format <name>, or omit it and let "
+                "the model's declared general.architecture decide.");
         }
     ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(

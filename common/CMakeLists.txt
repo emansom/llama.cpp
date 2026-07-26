@@ -57,7 +57,7 @@ add_library(${TARGET}
     arg.cpp
     arg.h
     base64.hpp
-    chat-auto-parser.h
+    chat-render-params.h
     chat-peg-parser.cpp
     chat-peg-parser.h
     chat-formats/decoded-event.h

@@ -1,6 +1,6 @@
 #include "chat.h"
 
-#include "chat-auto-parser.h"
+#include "chat-render-params.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/gemma4-format.h"
 #include "chat-peg-parser.h"
@@ -690,31 +690,14 @@ common_chat_continuation common_chat_continuation_parse(const nlohmann::ordered_
     return COMMON_CHAT_CONTINUATION_NONE;
 }
 
-bool common_chat_verify_template(const std::string & tmpl) {
-    {
-        try {
-            common_chat_msg msg;
-            msg.role    = "user";
-            msg.content = "test";
-
-            auto tmpls = common_chat_templates_init(/* model= */ nullptr, tmpl);
-
-            common_chat_templates_inputs inputs;
-            inputs.messages = { msg };
-
-            common_chat_templates_apply(tmpls.get(), inputs);
-            return true;
-        } catch (const std::exception & e) {
-            LOG_ERR("%s: failed to apply template: %s\n", __func__, e.what());
-            return false;
-        }
-    }
-    llama_chat_message chat[] = {
-        { "user", "test" }
-    };
-    const int res = llama_chat_apply_template(tmpl.c_str(), chat, 1, true, nullptr, 0);
-    return res >= 0;
-}
+// common_chat_verify_template was here. It applied a candidate template to a
+// one-message conversation and reported whether that threw -- the validation
+// behind --chat-template. Both flags that fed it now reject outright, so there
+// is no candidate template to verify.
+//
+// Note the shape it had: an unconditional `return` inside a bare block, followed
+// by unreachable llama_chat_apply_template code. Half of it had already stopped
+// running before this fork touched it.
 
 std::string common_chat_format_single(const struct common_chat_templates * tmpls,
                                       const std::vector<common_chat_msg> & past_msg,
@@ -779,23 +762,16 @@ bool common_chat_templates_was_explicit(const struct common_chat_templates * tmp
     return tmpls->has_explicit_template;
 }
 
-// LFM2 format detection: template uses <|tool_list_start|>[...]<|tool_list_end|> around the tool list
-// and <|tool_call_start|>[...]<|tool_call_end|> around each tool call
-static bool is_lfm2_template(const std::string & src) {
-    return src.find("<|tool_list_start|>") != std::string::npos &&
-           src.find("<|tool_list_end|>")   != std::string::npos;
-}
-
 common_chat_prompt_preset common_chat_get_asr_prompt(const common_chat_templates * chat_templates) {
+    (void) chat_templates;
+    // The LFM2 branch that used to be here sniffed the template text for
+    // `<|tool_list_start|>` to swap in a different ASR prompt. LFM2 is not a
+    // format this build serves, and the probe was the last of its kind outside
+    // the two template patches below -- all of them reading a template's TEXT to
+    // decide behaviour, which is what --chat-format replaced.
     common_chat_prompt_preset asr_preset;
     asr_preset.system = "";
     asr_preset.user   = "Transcribe audio to text";
-
-    if (chat_templates && chat_templates->template_default && is_lfm2_template(chat_templates->template_default->source())) {
-        asr_preset.system = "Perform ASR.";
-        asr_preset.user   = "";
-    }
-
     return asr_preset;
 }
 
@@ -847,28 +823,12 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
         }
     }
 
-    // TODO @ngxson : this is a temporary hack to prevent chat template from throwing an error
-    // Ref: https://github.com/ggml-org/llama.cpp/pull/15230#issuecomment-3173959633
-    if (default_template_src.find("<|channel|>") != std::string::npos
-        // search for the error message and patch it
-        && default_template_src.find("in message.content or") != std::string::npos) {
-        string_replace_all(default_template_src,
-                           "{%- if \"<|channel|>analysis<|message|>\" in message.content or "
-                           "\"<|channel|>final<|message|>\" in message.content %}",
-                           "{%- if false %}");
-    }
-
-    // TODO @aldehir : this is a temporary fix, pending Minja changes
-    // Ref: https://github.com/ggml-org/llama.cpp/pull/17713#issuecomment-3631342664
-    if (default_template_src.find("[TOOL_CALLS]") != std::string::npos
-        // search for the error message and patch it
-        && default_template_src.find("if (message['content'] is none or") != std::string::npos) {
-        string_replace_all(default_template_src,
-                           "{%- if (message['content'] is none or message['content'] == '' or "
-                           "message['content']|length == 0) and (message['tool_calls'] is not defined or "
-                           "message['tool_calls'] is none or message['tool_calls']|length == 0) %}",
-                           "{%- if false %}");
-    }
+    // Two upstream patches lived here, rewriting a GPT-OSS template's `<|channel|>`
+    // test and a Mistral template's `[TOOL_CALLS]` guard so that Minja would not
+    // throw on them. Both edited the template SOURCE, by searching it for the
+    // text that broke. Nothing renders a template in this build, so there is
+    // nothing to keep working around: `src` survives only as an opaque string
+    // reported by /props.
 
     std::string token_bos = bos_token_override;
     std::string token_eos = eos_token_override;
@@ -876,21 +836,23 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
     bool        add_eos   = false;
     if (model) {
         const auto * vocab     = llama_model_get_vocab(model);
-        const auto   get_token = [&](llama_token token, const char * name, const char * template_variable_name) {
+        // The warning used to fire only when the template's TEXT mentioned
+        // `bos_token` / `eos_token` -- the last of the src.find() probes, and the
+        // subtlest, because it read as a sensible relevance check rather than as
+        // inference. A renderer that never sees a template cannot be asked what
+        // it references, and Gemma 4's renderer takes the BOS token directly, so
+        // a missing one matters whatever any template says.
+        const auto   get_token = [&](llama_token token, const char * name) {
             if (token == LLAMA_TOKEN_NULL) {
-                if (default_template_src.find(template_variable_name) != std::string::npos ||
-                    template_tool_use_src.find(template_variable_name) != std::string::npos) {
-                    LOG_WRN(
-                        "common_chat_templates_init: warning: vocab does not have a %s token, the renderer won't "
-                          "work as intended.\n",
+                LOG_WRN("common_chat_templates_init: warning: vocab has no %s token; the renderer "
+                        "will not work as intended.\n",
                         name);
-                }
                 return std::string();
             }
             return common_token_to_piece(vocab, token, true);
         };
-        token_bos = get_token(llama_vocab_bos(vocab), "BOS", "bos_token");
-        token_eos = get_token(llama_vocab_eos(vocab), "EOS", "eos_token");
+        token_bos = get_token(llama_vocab_bos(vocab), "BOS");
+        token_eos = get_token(llama_vocab_eos(vocab), "EOS");
         add_bos   = llama_vocab_get_add_bos(vocab);
         add_eos   = llama_vocab_get_add_eos(vocab);
     }
@@ -1480,7 +1442,7 @@ std::string common_chat_grammar_set_entry(const std::string & grammar, const std
 }
 
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
-                                                         const autoparser::generation_params & inputs) {
+                                                         const common_chat_render_params & inputs) {
     common_chat_params data;
 
     // Rendered in C++, not by Jinja. The renderer, the validator (the
@@ -2020,7 +1982,7 @@ static json common_chat_extra_context() {
 // silently changed how a model was parsed, which is the opposite of what a
 // format declaration should do.
 using common_chat_format_init_fn =
-    common_chat_params (*)(const common_chat_template &, const autoparser::generation_params &);
+    common_chat_params (*)(const common_chat_template &, const common_chat_render_params &);
 
 static const std::map<std::string, common_chat_format_init_fn> & chat_format_registry() {
     static const std::map<std::string, common_chat_format_init_fn> registry = {
@@ -2091,22 +2053,19 @@ std::string common_chat_format_resolve(const struct llama_model * model,
 
 static common_chat_params common_chat_templates_apply_impl(const struct common_chat_templates *        tmpls,
                                                             const struct common_chat_templates_inputs & inputs) {
-    autoparser::generation_params params;
+    common_chat_render_params params;
     params.tools = common_chat_tools_to_json_oaicompat(inputs.tools);
     const auto & tmpl =
         params.tools.is_array() && tmpls->template_tool_use ? *tmpls->template_tool_use : *tmpls->template_default;
-    const auto & src             = tmpl.source();
+    // No `src` here any more: nothing in this function reads the template's TEXT.
+    // That is the whole of the Jinja removal in one line -- rendering, format
+    // selection and every per-family workaround used to start by searching it.
     const auto & caps            = tmpl.original_caps();
-    std::vector<common_chat_msg>        trimmed_messages;
-    const std::vector<common_chat_msg> * messages_to_render = &inputs.messages;
-    if (src.find("You have access to the following functions in JSONSchema format") != std::string::npos) {
-        // StepFun: trim message contents (including typed content parts) before rendering,
-        // otherwise leftover whitespace drives the model into reasoning loops (issue #24181)
-        trimmed_messages   = inputs.messages;
-        workaround::trim_all_content(trimmed_messages);
-        messages_to_render = &trimmed_messages;
-    }
-    params.messages              = render_message_to_json(*messages_to_render, tmpl.original_caps());
+    // A StepFun workaround stood here, trimming message contents when the
+    // template's text contained "You have access to the following functions in
+    // JSONSchema format". StepFun is not a format this build serves, and the
+    // probe was template-text inference like the rest.
+    params.messages              = render_message_to_json(inputs.messages, tmpl.original_caps());
     params.tool_choice           = inputs.tool_choice;
     params.reasoning_format      = inputs.reasoning_format;
     params.enable_thinking       = inputs.enable_thinking;
@@ -2138,10 +2097,11 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
         }
     }
 
-    if (src.find("<|channel|>") == std::string::npos) {
-        // map developer to system for all models except for GPT-OSS
-        workaround::map_developer_role_to_system(params.messages);
-    }
+    // Unconditional now. This was gated on the template text NOT containing
+    // `<|channel|>`, i.e. "every model except GPT-OSS" expressed as a substring
+    // search. Gemma 4 has a real system turn and no `developer` role, so the
+    // mapping always applies.
+    workaround::map_developer_role_to_system(params.messages);
 
     if (!tmpl.original_caps().supports_system_role) {
         workaround::system_message_not_supported(params.messages);

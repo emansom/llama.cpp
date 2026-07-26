@@ -1,6 +1,6 @@
 #pragma once
 
-#include "chat-auto-parser.h"
+#include "chat-render-params.h"
 #include "chat-formats/format-decoder.h"
 #include "chat-formats/format-state-registry.h"
 #include "chat-formats/format-tracker.h"
@@ -142,5 +142,5 @@ struct common_chat_gemma4_rendered {
     common_chat_format_state entry_state;  // the state those bytes leave it in
 };
 
-common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generation_params & inputs,
+common_chat_gemma4_rendered common_chat_gemma4_render(const common_chat_render_params & inputs,
                                                       const std::string & bos_token);

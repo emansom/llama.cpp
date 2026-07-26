@@ -1,6 +1,6 @@
 #include "chat-peg-parser.h"
 
-#include "chat-auto-parser.h"
+#include "chat-render-params.h"
 #include "ggml.h"
 #include "peg-parser.h"
 

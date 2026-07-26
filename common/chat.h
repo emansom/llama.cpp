@@ -375,8 +375,8 @@ struct common_chat_parser_params {
     }
 };
 
-// Check if the template supplied via "--chat-template" is supported or not. Returns true if it's valid
-bool common_chat_verify_template(const std::string & tmpl);
+// common_chat_verify_template was declared here, validating "--chat-template".
+// That flag now rejects, so there is no template to validate.
 
 void common_chat_templates_free(struct common_chat_templates * tmpls);
 
@@ -493,13 +493,13 @@ std::string common_chat_grammar_set_entry(const std::string & grammar, const std
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
 
-std::string common_chat_template_direct_apply(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs);
-
-std::string common_chat_template_generation_prompt(
-    const common_chat_template &          tmpl,
-    const autoparser::generation_params & inputs);
+// common_chat_template_direct_apply / common_chat_template_generation_prompt were
+// declared here and implemented nowhere -- the last two entry points into the
+// Jinja renderer, left behind when it was deleted. A prompt is built by a format
+// plugin's renderer now (common_chat_gemma4_render); there is no other path.
+//
+// The renderer's parameter type is common_chat_render_params, in
+// chat-render-params.h.
 
 
 // specialized per-task preset
