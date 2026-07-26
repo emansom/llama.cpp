@@ -2211,6 +2211,111 @@ static std::string entry_root_of(const std::string & grammar) {
     return name;
 }
 
+// The whitespace the response-schema grammar allows between JSON tokens.
+//
+// This guards a SILENT corruption, which is why it is asserted structurally
+// rather than left to the live suite. Forbidding whitespace (`whitespace_flexible:
+// false`, which stood here once) makes the model's own top candidates after
+// `"colour":` -- ` "`, ` "#`, ` ["`, all leading with a space -- illegal, so the
+// mask falls through to a legal MERGED token (`">`, `":`, `"]`) and the extra
+// character lands inside the string where every byte is legal. The result is
+// `{"colour":">Blue"}`: schema-valid, corrupt, and invisible to every conformance
+// check there is. Measured 16/20 on a free-string schema.
+//
+// Allowing unbounded whitespace is the opposite failure -- the model emits
+// newlines forever and never reaches the comma -- so the pattern has to be
+// non-empty AND newline-free, and each clause below pins one of those.
+static void test_gemma4_response_schema_whitespace() {
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "hello";
+
+    const std::string schema = R"({"type":"object","properties":{"colour":{"type":"string"}},"required":["colour"]})";
+
+    auto grammar_for = [&](const std::string & json_schema) {
+        common_chat_templates_inputs inputs;
+        inputs.messages             = { user };
+        inputs.json_schema          = json_schema;
+        inputs.add_generation_prompt = true;
+        return common_chat_templates_apply(tmpls.get(), inputs).grammar;
+    };
+
+    // The %json RULE the composer emits, so the assertions below are about the
+    // grammar actually handed to llguidance and not about this file's idea of it.
+    //
+    // Anchored on the rule name rather than on "%json ", because the placeholder
+    // is substituted everywhere it appears -- including in gemma4.lark's own
+    // comment describing it, which therefore also ends up holding a %json line
+    // and is what an unanchored search finds first.
+    auto json_line = [](const std::string & grammar) {
+        const std::string rule = "response_content: %json ";
+        const auto        at   = grammar.find(rule);
+        if (at == std::string::npos) {
+            fprintf(stderr, "    FAIL: composed grammar carries no response_content rule\n");
+            assert(false);
+        }
+        return grammar.substr(at, grammar.find('\n', at) - at);
+    };
+
+    {
+        const auto line = json_line(grammar_for(schema));
+
+        // Not merely "some x-guidance": the specific setting that corrupts.
+        if (line.find("\"whitespace_flexible\":false") != std::string::npos ||
+            line.find("\"whitespace_flexible\": false") != std::string::npos) {
+            fprintf(stderr, "    FAIL: whitespace is forbidden outright -- see the comment above\n    %s\n",
+                    line.c_str());
+            assert(false);
+        }
+
+        const auto key = line.find("\"whitespace_pattern\":");
+        if (key == std::string::npos) {
+            fprintf(stderr, "    FAIL: no whitespace_pattern set; llguidance's default is unbounded\n    %s\n",
+                    line.c_str());
+            assert(false);
+        }
+        const auto open  = line.find('"', key + strlen("\"whitespace_pattern\":"));
+        const auto close = line.find('"', open + 1);
+        const auto pat   = line.substr(open + 1, close - open - 1);
+
+        // Non-empty: a skip that can match the empty string can be taken over and
+        // over, which is the runaway with extra steps.
+        if (pat.empty() || pat.back() == '?' || pat.back() == '*' || pat.find("{0,") != std::string::npos) {
+            fprintf(stderr, "    FAIL: whitespace pattern '%s' can match empty and loop\n", pat.c_str());
+            assert(false);
+        }
+        // Newline-free: bounding the lexeme does not bound the sequence, since the
+        // skip node repeats. Removing the newline is what actually stops it.
+        if (pat.find('\n') != std::string::npos || pat.find("\\n") != std::string::npos) {
+            fprintf(stderr, "    FAIL: whitespace pattern '%s' admits a newline to run away on\n", pat.c_str());
+            assert(false);
+        }
+        fprintf(stderr, "\n    whitespace_pattern = '%s'  (non-empty, newline-free)\n", pat.c_str());
+    }
+
+    {
+        // The documented escape hatch: a caller who states their own x-guidance
+        // keeps it. Claimed in a comment for a while before anything checked it.
+        auto caller = json::parse(schema);
+        caller["x-guidance"] = json{ { "whitespace_pattern", "[ \\t]" } };
+        const auto line = json_line(grammar_for(caller.dump()));
+        // The needle is the pattern as it appears in the DUMPED grammar, where the
+        // backslash is JSON-escaped -- searching for the C++ string finds nothing
+        // and reads as an overwrite that never happened.
+        if (line.find("[ \\\\t]") == std::string::npos) {
+            fprintf(stderr, "    FAIL: caller's own x-guidance was overwritten\n    %s\n", line.c_str());
+            assert(false);
+        }
+        fprintf(stderr, "    caller-supplied x-guidance preserved\n");
+    }
+
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response-schema whitespace: non-empty, newline-free, caller wins\n");
+}
+
 static void test_gemma4_entry_selection() {
     auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
                                    /* bos_token_override= */ "", /* eos_token_override= */ "",
@@ -2526,6 +2631,7 @@ int main(int argc, const char ** argv) {
         test_gemma4_mask_walk();
         test_gemma4_fsm_conformance(argv[2]);
         test_gemma4_user_grammar();
+        test_gemma4_response_schema_whitespace();
         test_gemma4_entry_selection();
         test_gemma4_contract_check_catches_drift(argv[2]);
         llama_free(ctx);

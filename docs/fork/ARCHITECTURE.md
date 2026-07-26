@@ -433,8 +433,41 @@ expressed twice, which is why the entry table earns its keep.
 (avg 435 tokens) against 0/100 (avg 24). Failures are far lower on both arms now
 because a *different* defect dominated them: llguidance's `%json` allowed
 unbounded whitespace, and 12% of calls looped on it regardless of the prefill.
-With that fixed (`whitespace_flexible: false`) what remains is the prefill's real
-effect, which was always about wasted tokens rather than outright failures.
+With that fixed what remains is the prefill's real effect, which was always about
+wasted tokens rather than outright failures.
+
+**The whitespace fix was itself wrong at first**, and the correction is worth
+keeping because the failure mode is invisible to the obvious metric.
+`whitespace_flexible: false` — forbid whitespace outright — stopped the runaway and
+was measured only on runaway counts. What it did to *content* went unmeasured: with
+no legal space after `"colour":`, the model's own top candidates (` "`, ` "#`,
+` ["`) are all illegal, so the mask falls through to a legal **merged** token —
+`">`, `":`, `"]` — and the extra character lands inside the string, where every byte
+is legal. The output stays 100% schema-valid and is silently corrupt
+(`{"colour":">Blue","number":42}`), at 16/20 on a free-string schema. Nothing
+truncates, so no retry catches it.
+
+The setting is now `whitespace_pattern: " "`: non-empty, so the skip cannot match
+empty and loop; newline-free, so a runaway has nothing to repeat; and exactly the
+character the model was reaching for, so no merged token is needed to satisfy the
+mask. Measured on E2B, thinking off, one seed set, across two schemas — a
+free-string one for corruption and the Canonicalizer's shape for runaway:
+
+| whitespace | clean string | runaway | avg tokens |
+| --- | --- | --- | --- |
+| `whitespace_flexible: false` | 4/20 | 0/50 | 22 |
+| default `[ \n\r\t]+` | 20/20 | 2/50 | 54 |
+| `[ \n\r\t]{1,4}` | 20/20 | 2/50 | 54 |
+| `" "` | 20/20 | 0/50 | 31 |
+
+Capping the lexeme (`{1,4}`) is not enough on its own: the skip node repeats, so
+bounding one match does not bound the sequence.
+
+The general lesson, and it applies to any future tightening of these grammars: a
+constraint the model cannot satisfy naturally does not fail loudly — it displaces
+probability mass into whatever slot is still free. When that slot is a free-form
+string, the damage is invisible to every structural check. Measure content, not
+just conformance.
 
 ## How a new format is added
 

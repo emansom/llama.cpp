@@ -1315,41 +1315,62 @@ static std::string inject_response_schema(const std::string & grammar_template, 
     }
     std::string schema;
     if (is_lark_grammar(grammar_template)) {
-        // BOUND THE WHITESPACE. llguidance's %json defaults to
-        // `whitespace_pattern: [\x20\x0A\x0D\x09]+` -- unbounded -- so between any
-        // two JSON tokens the model may emit newlines forever and the grammar is
-        // satisfied at every single step. It is the same shape as every runaway
-        // in gemma4.lark, one layer down and not ours.
+        // WHITESPACE IS EXACTLY ONE SPACE. Not the default, and -- the point of
+        // this comment -- not "none" either, which is what stood here and was a
+        // silent corruption bug.
         //
-        // Measured on E2B, thinking off, a two-property schema, N=100: 12 of 100
-        // generations ran to max_tokens, every one of them like
+        // Two failures pull in opposite directions, and only a pattern that is
+        // both NON-EMPTY and NEWLINE-FREE avoids both.
         //
-        //   {\n  "canonical": "writer of Dune"\n  \n  \n  \n  \n  ... (512 tokens)
+        // 1. RUNAWAY, if whitespace is unbounded. llguidance's %json defaults to
+        //    `[\x20\x0A\x0D\x09]+`, so between two JSON tokens the model may emit
+        //    newlines forever with the grammar satisfied at every step:
         //
-        // stuck after the first value, never reaching the comma. That is 12% of
-        // the calls Protean's Canonicalizer and CacheGate make.
+        //      {\n  "canonical": "writer of Dune"\n  \n  \n  \n  ... (512 tokens)
         //
-        // COMPACT, not merely bounded, and that was measured rather than chosen.
-        // Bounding first looked right -- let the model indent, forbid only the
-        // loop -- so `whitespace_pattern: "[ \n\r\t]{0,16}"` was tried first and
-        // did nothing: 9/50, against 12/100 for the default. A capped whitespace
-        // lexeme can still match the EMPTY string, and matching empty over and
-        // over is the same runaway with extra steps. `whitespace_flexible: false`
-        // removes the lexeme instead, which is why it works:
+        //    stuck after the first value, never reaching the comma. Capping the
+        //    lexeme does not help -- `[ \n\r\t]{1,4}` still ran away, because the
+        //    skip node REPEATS; bounding one match does not bound the sequence.
+        //    What actually stops it is having no newline to repeat.
         //
-        //     default (unbounded)                12/100 failed, avg 88 tokens
-        //     whitespace_pattern {0,16}           9/50  failed, avg 117
-        //     whitespace_flexible: false          1/50  failed, avg 29
+        // 2. CORRUPTED STRINGS, if whitespace is forbidden. This is the one the
+        //    original measurement missed, because it counted truncations and this
+        //    failure truncates nothing -- the output is 100% schema-valid, and
+        //    wrong. `whitespace_flexible: false` deletes the skip lexeme, so after
+        //    `"colour":` the model's own top candidates -- ` "`, ` "#`, ` ["`, all
+        //    leading with a space -- are all illegal. The mask falls through to a
+        //    legal MERGED token, `">` or `":` or `"]`, and the extra character
+        //    lands INSIDE the string where every byte is legal:
         //
-        // The cost is that responses come back compact rather than pretty. That
-        // is a formatting difference in a machine-read field, and it also more
-        // than halves the tokens spent getting there.
+        //      {"colour":">Blue","number":42}
+        //      {"colour":"]}```json```{}```json```{}...
+        //
+        //    Read off the logprobs at that position, not inferred. For Protean
+        //    this is the worst possible shape: the Canonicalizer's `canonical` is
+        //    a free string, so a poisoned cache key looks exactly like a good one.
+        //
+        // Measured on E2B, thinking off, one seed set, two schemas -- a free-string
+        // schema for corruption and the Canonicalizer's shape for runaway:
+        //
+        //                                  clean string   runaway   avg tokens
+        //     whitespace_flexible: false        4/20        0/50         22
+        //     default [ \n\r\t]+               20/20        2/50         54
+        //     [ \n\r\t]{1,4}                   20/20        2/50         54
+        //     " "  (this)                      20/20        0/50         31
+        //
+        // A single space is non-empty, so the skip cannot match empty and loop;
+        // it holds no newline, so the runaway has nothing to repeat; and it is
+        // the one character the model was reaching for, so no merged token is
+        // needed to satisfy the mask. The cost over forbidding whitespace is 9
+        // tokens, for output that is correct rather than plausible.
         //
         // Set only when the caller did not ask for something else -- their own
-        // x-guidance wins.
+        // x-guidance wins. That path is live: a caller's x-guidance reaches
+        // llguidance and is honoured (verified by handing it an invalid regex and
+        // getting llguidance's own compile error back as a 400).
         auto s = json_schema;
         if (s.is_object() && !s.contains("x-guidance")) {
-            s["x-guidance"] = json{ { "whitespace_flexible", false } };
+            s["x-guidance"] = json{ { "whitespace_pattern", " " } };
         }
         schema = "%json " + s.dump();
     } else {
