@@ -206,28 +206,7 @@ std::vector<common_chat_decoded_event> common_chat_gemma4_decoder::decode(
         events.push_back({K::REASONING_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
         return events;
     }
-    // 'analysis-content' rule wraps the body of a no-reasoning think block;
-    // synthesize the wire-shape markers around the body so the surfaced
-    // content matches what the model emitted byte-for-byte.
-    if (node.rule == "analysis-content") {
-        if (!node.is_partial) {
-            events.push_back({K::CONTENT_TEXT, "<|channel>thought", {}, {}, false, false});
-            events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, false});
-            events.push_back({K::CONTENT_TEXT, "<channel|>", {}, {}, false, false});
-        }
-        if (arena_) {
-            constexpr int kAnalysisDepth = 4;
-            auto inner_id = arena_->find_by_tag(node, common_chat_peg_builder::CONTENT, kAnalysisDepth);
-            if (inner_id != COMMON_PEG_INVALID_AST_ID) {
-                handled_ids_.insert(inner_id);
-            }
-        }
-        return events;
-    }
     if (tag_is(node, common_chat_peg_builder::CONTENT)) {
-        if (handled_ids_.count(node.id)) {
-            return events;
-        }
         events.push_back({K::CONTENT_TEXT, std::string(node.text), {}, {}, false, node.is_partial});
         return events;
     }
@@ -273,7 +252,42 @@ std::vector<common_chat_shaped_event> common_chat_gemma4_transformer::shape(
 
     switch (event.k) {
         case DK::REASONING_TEXT:
-            out.push_back({SK::REASONING_TEXT, event.text, event.is_partial});
+            if (reasoning_format() == COMMON_REASONING_FORMAT_NONE) {
+                // The caller does not want reasoning extracted, so the thought
+                // stays in content exactly as it came off the wire -- channel
+                // markers and all. The decoder captures only the BODY, the text
+                // between the markers, so the markers are restored here.
+                //
+                // This used to be a SECOND COMPLETE GRAMMAR,
+                // gemma4-no-reasoning.lark, whose only real difference was
+                // tagging the thought body `analysis_content` instead of
+                // `reasoning`. Two files describing one wire format is exactly
+                // the drift this fork exists to remove, and it had already
+                // happened: the copy still carried the swallow-everything
+                // `turn_body_text`, the global `%ignore` and the per-tag content
+                // lookaheads that gemma4.lark replaced, so none of the fixes made
+                // to the real grammar applied to it. Whether a thought surfaces
+                // as reasoning or as content is a presentation choice, which is
+                // this layer's job -- not a different language.
+                //
+                // Synthesizing the markers belongs here rather than in the
+                // decoder, which is where it used to live, against
+                // POLICIES.md#no-character-synthesis.
+                //
+                // Emitted only once the block is complete. A partial thought has
+                // no closing marker yet, so emitting early would either put bytes
+                // in content that the model never sent, or force a rewrite of
+                // text already streamed. Suppressing until close keeps content
+                // append-only, which the streaming diff requires. Same behaviour
+                // the decoder branch had.
+                if (!event.is_partial) {
+                    out.push_back({SK::CONTENT_TEXT,
+                                   "<|channel>thought" + event.text + "<channel|>",
+                                   false});
+                }
+            } else {
+                out.push_back({SK::REASONING_TEXT, event.text, event.is_partial});
+            }
             break;
         case DK::CONTENT_TEXT:
             out.push_back({SK::CONTENT_TEXT, event.text, event.is_partial});

@@ -1088,13 +1088,24 @@ json oaicompat_chat_params_parse(
     // Same treatment for "preserve_thinking": with no template engine left, the
     // renderer reads these as typed inputs, so the kwarg is decoded here rather
     // than passed through as a string.
-    auto preserve_thinking_kwarg = json_value(inputs.chat_template_kwargs, "preserve_thinking", std::string(""));
-    if (preserve_thinking_kwarg == "true") {
-        inputs.preserve_thinking = true;
-    } else if (preserve_thinking_kwarg == "false") {
-        inputs.preserve_thinking = false;
-    } else if (!preserve_thinking_kwarg.empty() && preserve_thinking_kwarg[0] == '"') {
-        throw std::invalid_argument("invalid type for \"preserve_thinking\" (expected boolean, got string)");
+    // TWO accepted spellings, both already public surface. "preserve_reasoning"
+    // is what --reasoning-preserve writes and matches the
+    // supports_preserve_reasoning capability; "preserve_thinking" is the
+    // variable the Gemma 4 template used, so it is what a client following the
+    // model card sends. Dropping either would silently break callers -- and
+    // reading only the latter, as this first did, left the CLI flag doing
+    // nothing at all. "preserve_thinking" is checked last so it wins when both
+    // are present, being the spelling closest to the format itself.
+    for (const char * key : { "preserve_reasoning", "preserve_thinking" }) {
+        auto kwarg = json_value(inputs.chat_template_kwargs, std::string(key), std::string(""));
+        if (kwarg == "true") {
+            inputs.preserve_thinking = true;
+        } else if (kwarg == "false") {
+            inputs.preserve_thinking = false;
+        } else if (!kwarg.empty() && kwarg[0] == '"') {
+            throw std::invalid_argument(std::string("invalid type for \"") + key +
+                                        "\" (expected boolean, got string)");
+        }
     }
 
     // Parse also the OAI "reasoning_effort": "none" specific value

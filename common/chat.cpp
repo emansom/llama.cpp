@@ -1182,7 +1182,6 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
-    auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
 
     // The grammar comes from grammars/chat/gemma4.lark (or .gbnf), not from
     // hand-written PEG builder lambdas. One artefact drives BOTH sampling and
@@ -1194,12 +1193,15 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     // than only switching on once a "<|tool_call>" trigger word is seen. Lazy
     // triggering leaves everything before the trigger unconstrained.
     {
-        const auto sampling_base = common_chat_grammar_require("gemma4");
-        const auto parser_base   = extract_reasoning
-            ? sampling_base
-            : common_chat_grammar_require("gemma4-no-reasoning");
+        // ONE grammar, for sampling and for extraction, whatever the caller wants
+        // done with reasoning. There used to be a second file selected here when
+        // reasoning_format was NONE; it described the same wire format and had
+        // drifted badly. Whether a thought is surfaced as reasoning or folded
+        // back into content is a presentation choice and lives in the
+        // transformer -- see common_chat_gemma4_transformer::shape.
+        const auto parser_base   = common_chat_grammar_require("gemma4");
 
-        std::string sampling_grammar = sampling_base;
+        std::string sampling_grammar = parser_base;
         if (has_response_format) {
             sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
         }

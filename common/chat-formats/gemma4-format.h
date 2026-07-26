@@ -51,10 +51,6 @@ class common_chat_gemma4_decoder : public common_chat_format_decoder {
     // subtree and emit its canonical JSON serialization. Strings are JSON-escaped;
     // numbers/bools/null are passed through verbatim.
     std::string gemma4_to_json(common_peg_ast_id id);
-
-    // AST IDs whose events were already emitted as part of a parent visit
-    // (e.g. the inner `tag content` of an analysis-content rule).
-    std::unordered_set<common_peg_ast_id> handled_ids_;
 };
 
 class common_chat_gemma4_transformer : public common_chat_format_transformer {

@@ -677,20 +677,13 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
             return false;
         };
 
-        // Checked FIRST: it ends in `-content` and would otherwise be captured by
-        // the content role, losing its special handling.
-        if (n == "analysis-content") {
-            // The no-reasoning variant: the rule body is the BODY of a think
-            // block (between '[THINK]' / '[/THINK]' markers or equivalent),
-            // tagged 'content' so it surfaces in `result.content`. The per-format
-            // transformer re-injects the literal markers around the captured body
-            // so the surfaced content matches the wire shape exactly. (Tagging
-            // the wrapping rule directly would let streaming partials of the
-            // leading literal -- e.g. '[T' from a partial '[THINK]' -- leak into
-            // content as a tag-wrapped partial node, breaking diff monotonicity
-            // once the literal resolves.)
-            body = builder.tag("content", body);
-        } else if (role_is({"tool-call"})) {
+        // `analysis-content` used to be handled here: a second grammar tagged a
+        // think block's body with that name so it surfaced as content instead of
+        // reasoning. No grammar defines it any more -- one grammar describes the
+        // wire format, and whether a thought surfaces as reasoning or as content
+        // is decided by the transformer, which is a presentation question rather
+        // than a different language.
+        if (role_is({"tool-call"})) {
             body = builder.tag("tool", body);
         } else if (role_is({"tool-open"})) {
             body = builder.tag("tool-open", body);
