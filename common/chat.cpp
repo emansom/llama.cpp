@@ -1315,7 +1315,43 @@ static std::string inject_response_schema(const std::string & grammar_template, 
     }
     std::string schema;
     if (is_lark_grammar(grammar_template)) {
-        schema = "%json " + json_schema.dump();
+        // BOUND THE WHITESPACE. llguidance's %json defaults to
+        // `whitespace_pattern: [\x20\x0A\x0D\x09]+` -- unbounded -- so between any
+        // two JSON tokens the model may emit newlines forever and the grammar is
+        // satisfied at every single step. It is the same shape as every runaway
+        // in gemma4.lark, one layer down and not ours.
+        //
+        // Measured on E2B, thinking off, a two-property schema, N=100: 12 of 100
+        // generations ran to max_tokens, every one of them like
+        //
+        //   {\n  "canonical": "writer of Dune"\n  \n  \n  \n  \n  ... (512 tokens)
+        //
+        // stuck after the first value, never reaching the comma. That is 12% of
+        // the calls Protean's Canonicalizer and CacheGate make.
+        //
+        // COMPACT, not merely bounded, and that was measured rather than chosen.
+        // Bounding first looked right -- let the model indent, forbid only the
+        // loop -- so `whitespace_pattern: "[ \n\r\t]{0,16}"` was tried first and
+        // did nothing: 9/50, against 12/100 for the default. A capped whitespace
+        // lexeme can still match the EMPTY string, and matching empty over and
+        // over is the same runaway with extra steps. `whitespace_flexible: false`
+        // removes the lexeme instead, which is why it works:
+        //
+        //     default (unbounded)                12/100 failed, avg 88 tokens
+        //     whitespace_pattern {0,16}           9/50  failed, avg 117
+        //     whitespace_flexible: false          1/50  failed, avg 29
+        //
+        // The cost is that responses come back compact rather than pretty. That
+        // is a formatting difference in a machine-read field, and it also more
+        // than halves the tokens spent getting there.
+        //
+        // Set only when the caller did not ask for something else -- their own
+        // x-guidance wins.
+        auto s = json_schema;
+        if (s.is_object() && !s.contains("x-guidance")) {
+            s["x-guidance"] = json{ { "whitespace_flexible", false } };
+        }
+        schema = "%json " + s.dump();
     } else {
         std::string gbnf = build_grammar([&](const common_grammar_builder & builder) {
             auto s = json_schema;
