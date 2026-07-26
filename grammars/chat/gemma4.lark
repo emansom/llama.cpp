@@ -181,7 +181,14 @@ model_turn_close: turn_close | tool_response_block+
 # optional instead would let the sampler skip it during generation, which is the
 # failure that policy exists to prevent.
 open_model_turn: turn_open_tag "model" "\n" open_model_body
-open_model_body: open_thought | model_body
+
+# ORDER MATTERS. PEG takes the first alternative that matches, and
+# `open_thought`'s reasoning body has no following sibling, so it runs to end of
+# input -- it would swallow `<channel|>` and every byte after it, leaving content
+# empty. Try the CLOSED shape first; only a genuinely unclosed thought, where
+# `model_body` cannot match because there is no `<channel|>`, reaches
+# `open_thought`.
+open_model_body: model_body | open_thought
 
 # A thought still in progress: opener required, body captured as reasoning, no
 # closer because the model has not finished thinking.
