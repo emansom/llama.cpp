@@ -154,10 +154,14 @@ static std::string read_file(const std::string & path) {
 // so a test declares WHICH FORMAT it exercises, and asserts explicit expected
 // bytes rather than parity against a template file.
 //
-// The string handed to common_chat_templates_init is retained only for /props
-// reporting; nothing branches on it since format selection is by name.
+// The format is named in the FORMAT slot, not the template slot. It used to ride
+// in as the chat-template override and get resolved by coincidence; selection is
+// now an explicit argument, so a test states which plugin it exercises.
 static common_chat_templates_ptr gemma4_templates() {
-    return common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    return common_chat_templates_ptr(
+        common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
 }
 
 static std::unique_ptr<llama_grammar> build_grammar(const std::string & grammar_str) {

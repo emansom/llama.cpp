@@ -1094,6 +1094,12 @@ json oaicompat_chat_params_parse(
     if (inputs.continue_final_message != COMMON_CHAT_CONTINUATION_NONE && inputs.add_generation_prompt) {
         throw std::invalid_argument("Cannot set both add_generation_prompt and continue_final_message to true.");
     }
+    // Which format plugin serves THIS request. Highest of the three sources;
+    // absent, the model's resolved one stands. An unregistered name throws
+    // std::invalid_argument from the registry lookup, which the server maps to a
+    // 400 -- naming a format nobody registered is a bad request.
+    inputs.chat_format = json_value(body, "chat_format", std::string());
+
     inputs.reasoning_format = opt.reasoning_format;
     if (body.contains("reasoning_format")) {
         inputs.reasoning_format = common_reasoning_format_from_name(body.at("reasoning_format").get<std::string>());
@@ -1134,6 +1140,23 @@ json oaicompat_chat_params_parse(
         inputs.enable_thinking = false;
     } else if (!enable_thinking_kwarg.empty() && enable_thinking_kwarg[0] == '"') {
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
+    }
+
+    // "thinking": a first-class spelling of the same toggle, read AFTER the
+    // kwarg so it wins when both are sent.
+    //
+    // `chat_template_kwargs.enable_thinking` keeps working unchanged and is not
+    // deprecated here -- it is what every existing client sends, including the
+    // workflow this fork serves, and §1.0 does not move surface that already
+    // works. What it is not is a good NAME: with no template engine left there
+    // are no template kwargs, and the renderer reads this as a typed input like
+    // any other. So there is a proper spelling for new callers and the old one
+    // still resolves to it.
+    if (body.contains("thinking")) {
+        if (!body.at("thinking").is_boolean()) {
+            throw std::invalid_argument("invalid type for \"thinking\" (expected boolean)");
+        }
+        inputs.enable_thinking = body.at("thinking").get<bool>();
     }
 
     // Same treatment for "preserve_thinking": with no template engine left, the

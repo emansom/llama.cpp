@@ -1335,7 +1335,9 @@ static void test_gemma4_tool_schema() {
     inputs.tools                = { get_time, ping };
     inputs.add_generation_prompt = true;
 
-    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
     auto params = common_chat_templates_apply(tmpls.get(), inputs);
     assert(!params.grammar.empty());
 
@@ -1548,7 +1550,9 @@ static void test_gemma4_mask_walk() {
     inputs.add_generation_prompt = true;
     inputs.enable_thinking       = false;
 
-    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
     auto params = common_chat_templates_apply(tmpls.get(), inputs);
     assert(!params.grammar.empty());
 
@@ -2066,7 +2070,9 @@ static void test_gemma4_user_grammar() {
     user.role    = "user";
     user.content = "is the sky blue?";
 
-    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
 
     // `thinking` decides which FSM state the prompt leaves the model in, and so
     // which entry the grammar is rooted at: on -> the prompt stops at
@@ -2206,7 +2212,9 @@ static std::string entry_root_of(const std::string & grammar) {
 }
 
 static void test_gemma4_entry_selection() {
-    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
+                                   /* bos_token_override= */ "", /* eos_token_override= */ "",
+                                   /* chat_format_override= */ "gemma4"));
 
     common_chat_msg user;
     user.role    = "user";

@@ -1461,7 +1461,10 @@ private:
                 : params_base.chat_grammars_dir);
 
             try {
-                chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
+                chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template,
+                                                            /* bos_token_override = */ "",
+                                                            /* eos_token_override = */ "",
+                                                            params_base.chat_format);
 
                 // An embedding model has no chat: it serves /v1/embeddings and never
                 // renders a prompt. Both probes below APPLY the template, which now

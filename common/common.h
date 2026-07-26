@@ -630,6 +630,10 @@ struct common_params {
     std::string api_prefix    = "";                                                                         // NOLINT
     std::string chat_template = "";                                                                         // NOLINT
     std::string chat_grammars_dir;    // directory holding chat grammar files (*.lark, *.gbnf)
+    // Which chat format plugin serves this model. Empty falls back to the
+    // model's declared general.architecture. This is how a format is selected --
+    // never from template text. See docs/fork/POLICIES.md#nothing-is-inferred.
+    std::string chat_format;
 
     // server CORS params
     std::string cors_origins = "*";

@@ -439,9 +439,17 @@ struct common_chat_templates {
     bool add_bos;
     bool add_eos;
     bool has_explicit_template;  // Model had builtin template or template overridden was specified.
+    // The format plugin this model resolved to at load: --chat-format if given,
+    // else the model's declared general.architecture. A request may still name a
+    // different one, which is why this is a default rather than the answer.
+    std::string chat_format;
     std::unique_ptr<common_chat_template> template_default;  // always set (defaults to chatml)
     std::unique_ptr<common_chat_template> template_tool_use;
 };
+
+std::string common_chat_templates_format(const struct common_chat_templates * tmpls) {
+    return tmpls == nullptr ? std::string{} : tmpls->chat_format;
+}
 
 common_chat_tool_choice common_chat_tool_choice_parse_oaicompat(const std::string & tool_choice) {
     if (tool_choice == "auto") {
@@ -807,13 +815,17 @@ std::string common_chat_templates_source(const struct common_chat_templates * tm
 common_chat_templates_ptr common_chat_templates_init(const struct llama_model * model,
                                                      const std::string &        chat_template_override,
                                                      const std::string &        bos_token_override,
-                                                     const std::string &        eos_token_override) {
+                                                     const std::string &        eos_token_override,
+                                                     const std::string &        chat_format_override) {
     std::string default_template_src;
     std::string template_tool_use_src;
 
     bool has_explicit_template = !chat_template_override.empty();
-    if (chat_template_override.empty()) {
-        GGML_ASSERT(model != nullptr);
+    // No model AND no template override is now a normal case: a caller can name
+    // a chat_format and never touch a template at all, which is what the format
+    // tests do. It used to assert, because a template was the only way to say
+    // anything about the format.
+    if (chat_template_override.empty() && model != nullptr) {
         const auto * str = llama_model_chat_template(model, /* name */ nullptr);
         if (str) {
             default_template_src  = str;
@@ -886,6 +898,26 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
     tmpls->has_explicit_template = has_explicit_template;
     tmpls->add_bos               = add_bos;
     tmpls->add_eos               = add_eos;
+
+    // Resolve the format plugin ONCE, here, and say where the answer came from.
+    //
+    // Logged rather than left implicit because format selection has been the
+    // single most confusing thing about this code path: it used to be inferred
+    // from template text, so "which format am I getting" had no answer you could
+    // read. Now there is one line at load and it names its source.
+    //
+    // Throws when the name has no plugin, which stops the server. That is the
+    // point: a model this build cannot serve should fail at load naming the
+    // architecture it declared, not half-work.
+    {
+        std::string source;
+        tmpls->chat_format = common_chat_format_resolve(model, chat_format_override, &source);
+        if (tmpls->chat_format.empty()) {
+            LOG_DBG("%s", "chat format unresolved (no --chat-format and no declared architecture)\n");
+        } else {
+            LOG_INF("chat format '%s' from %s\n", tmpls->chat_format.c_str(), source.c_str());
+        }
+    }
     try {
         tmpls->template_default = std::make_unique<common_chat_template>(default_template_src, token_bos, token_eos);
     } catch (const std::exception & e) {
@@ -1974,22 +2006,87 @@ static json common_chat_extra_context() {
     return ctx;
 }
 
-std::optional<common_chat_params> common_chat_try_specialized_template(
-        const common_chat_template &          tmpl,
-        const std::string &                   src,
-        autoparser::generation_params & params) {
-    // This fork serves Gemma 4 and nothing else, so there is nothing to detect.
-    //
-    // What used to live here was a chain of src.find("...") probes over the chat
-    // template's TEXT, which meant editing a template silently changed how a
-    // model was parsed. Format selection is by name only -- request chat_format,
-    // then --chat-format, then declared GGUF metadata. See
-    // docs/fork/POLICIES.md#nothing-is-inferred.
-    //
-    // TODO: fold this into the format-plugin registry lookup so the caller
-    // resolves a plugin by name rather than calling a Gemma-4-shaped hook.
-    (void) src;
-    return common_chat_params_init_gemma4(tmpl, params);
+// ─────────────────────────────────────────────────────────────────────────────
+// The format-plugin registry
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One entry per format, keyed by the name `chat_format` / `--chat-format` /
+// `general.architecture` all speak. Adding a format means implementing its four
+// pieces -- renderer, validator, tracker, grammar -- and adding a line here;
+// that nothing else has to change is the test of whether the interface is right.
+//
+// This replaced `common_chat_try_specialized_template`, a chain of
+// `src.find("...")` probes over the chat template's TEXT. Editing a template
+// silently changed how a model was parsed, which is the opposite of what a
+// format declaration should do.
+using common_chat_format_init_fn =
+    common_chat_params (*)(const common_chat_template &, const autoparser::generation_params &);
+
+static const std::map<std::string, common_chat_format_init_fn> & chat_format_registry() {
+    static const std::map<std::string, common_chat_format_init_fn> registry = {
+        { "gemma4", common_chat_params_init_gemma4 },
+    };
+    return registry;
+}
+
+std::vector<std::string> common_chat_format_names() {
+    std::vector<std::string> names;
+    for (const auto & [name, fn] : chat_format_registry()) {
+        (void) fn;
+        names.push_back(name);
+    }
+    return names;
+}
+
+bool common_chat_format_is_registered(const std::string & name) {
+    return chat_format_registry().count(name) != 0;
+}
+
+static std::string chat_format_known_list() {
+    return string_join(common_chat_format_names(), ", ");
+}
+
+std::string common_chat_format_resolve(const struct llama_model * model,
+                                       const std::string &        config_override,
+                                       std::string *              source_out) {
+    std::string name   = config_override;
+    std::string source = "--chat-format";
+
+    if (name.empty()) {
+        // Declared GGUF metadata. `general.architecture` IS the plugin name for
+        // Gemma 4 (measured: the 12B and E2B GGUFs both declare `gemma4`), which
+        // is what lets a stock OpenAI client talk to an unconfigured model with
+        // no extra parameters -- §1.0 rather than a shortcut.
+        source = "GGUF general.architecture";
+        if (model != nullptr) {
+            char buf[128];
+            const int32_t n = llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
+            if (n > 0) {
+                name.assign(buf, (size_t) n);
+            }
+        }
+    }
+
+    if (name.empty()) {
+        // Nothing to resolve FROM -- no override and no model (or a model
+        // declaring no architecture). Not an error here: callers that never
+        // apply a template, such as common_chat_verify_template, legitimately
+        // reach this. The error belongs where a format is actually needed, and
+        // common_chat_templates_apply raises it there with the same advice.
+        if (source_out != nullptr) {
+            *source_out = "unresolved";
+        }
+        return {};
+    }
+    if (!common_chat_format_is_registered(name)) {
+        throw std::invalid_argument("chat format '" + name + "' (from " + source +
+                                    ") has no registered plugin. Known formats: " +
+                                    chat_format_known_list());
+    }
+    if (source_out != nullptr) {
+        *source_out = source;
+    }
+    return name;
 }
 
 static common_chat_params common_chat_templates_apply_impl(const struct common_chat_templates *        tmpls,
@@ -2108,22 +2205,32 @@ static common_chat_params common_chat_templates_apply_impl(const struct common_c
         return data;
     }
 
-    if (auto result = common_chat_try_specialized_template(tmpl, src, params)) {
-        return *result;
-    }
-
-    // Unreachable: common_chat_try_specialized_template always resolves.
+    // Dispatch by NAME, through the registry.
     //
-    // What was here was the "differential autoparser" -- it applied the Jinja
-    // template several times with varied inputs, diffed the outputs, and inferred
-    // a grammar from where they differed. That is inference twice over: from a
-    // template this fork no longer renders, into a grammar nobody wrote. A format
-    // gets a hand-written grammar plus a tracker that mirrors it, or it is not
-    // supported. See docs/fork/POLICIES.md#nothing-is-inferred.
-    throw std::invalid_argument(
-        "no chat format plugin resolved for this model. This build serves Gemma 4 "
-        "only; register a format plugin (renderer, validator, tracker, grammar) to "
-        "add another. See FORK.md.");
+    // The request may name a format; otherwise the model's resolved one is used
+    // -- which came from --chat-format, or from declared GGUF metadata. Three
+    // sources, in that order, and no fourth.
+    //
+    // What was here before the registry was the "differential autoparser": it
+    // applied the Jinja template several times with varied inputs, diffed the
+    // outputs, and inferred a grammar from where they differed. Inference twice
+    // over -- from a template this fork no longer renders, into a grammar nobody
+    // wrote. A format gets a hand-written grammar plus a tracker that mirrors
+    // it, or it is not supported. See docs/fork/POLICIES.md#nothing-is-inferred.
+    const std::string format = inputs.chat_format.empty() ? tmpls->chat_format : inputs.chat_format;
+    if (format.empty()) {
+        throw std::invalid_argument(
+            "no chat format resolved for this model. Set --chat-format, or send "
+            "\"chat_format\" on the request. Known formats: " + chat_format_known_list());
+    }
+    const auto it = chat_format_registry().find(format);
+    if (it == chat_format_registry().end()) {
+        // std::invalid_argument so the server answers 400: a `chat_format` the
+        // CALLER named is a bad request, not a server fault.
+        throw std::invalid_argument("chat format '" + format + "' has no registered plugin. Known formats: " +
+                                    chat_format_known_list());
+    }
+    return it->second(tmpl, params);
 }
 
 // Legacy template route (adhoc C++ implementation of known templates), forward to llama_chat_apply_template.

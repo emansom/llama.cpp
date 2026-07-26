@@ -276,6 +276,19 @@ enum common_chat_continuation {
 
 struct common_chat_templates_inputs {
     std::vector<common_chat_msg>          messages;
+    // Which format plugin renders, validates, tracks and constrains THIS
+    // conversation. Empty means "whatever the model resolved to at load".
+    //
+    // Highest of three sources, and the only per-request one:
+    //   1. this field             -- the `chat_format` request parameter
+    //   2. --chat-format          -- per-model server configuration
+    //   3. general.architecture   -- declared GGUF metadata
+    //
+    // What separates those three from what they replaced is DECLARED versus
+    // GUESSED. A metadata key the publisher wrote is data, the same as a config
+    // value somebody wrote down; string-matching the Jinja blob in
+    // tokenizer.chat_template to infer a format is a guess, and is gone.
+    std::string                           chat_format;
     std::string                           grammar;
     std::string                           json_schema;
     bool                                  add_generation_prompt  = true;
@@ -373,10 +386,39 @@ struct common_chat_templates_deleter {
 
 typedef std::unique_ptr<struct common_chat_templates, common_chat_templates_deleter> common_chat_templates_ptr;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat format plugins, selected by NAME
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A format plugin is four pieces that must agree -- renderer, validator,
+// tracker, grammar -- registered under one name. `gemma4` is the only one today;
+// adding another means implementing the four and registering it, and nothing
+// else should need to change. See docs/fork/ARCHITECTURE.md.
+
+// Every registered plugin name, sorted. For error messages and for --help.
+std::vector<std::string> common_chat_format_names();
+
+bool common_chat_format_is_registered(const std::string & name);
+
+// Resolve which plugin a MODEL uses, and say where the answer came from.
+//
+// `config_override` is --chat-format; empty falls back to the model's declared
+// `general.architecture`. Throws when the result names no registered plugin --
+// at load, so a server that cannot serve a model does not come up claiming it
+// can. `source_out` receives a human phrase for the log line.
+std::string common_chat_format_resolve(const struct llama_model * model,
+                                       const std::string &        config_override,
+                                       std::string *              source_out = nullptr);
+
 common_chat_templates_ptr common_chat_templates_init(const struct llama_model * model,
                                                      const std::string &        chat_template_override,
                                                      const std::string &        bos_token_override = "",
-                                                     const std::string &        eos_token_override = "");
+                                                     const std::string &        eos_token_override = "",
+                                                     const std::string &        chat_format_override = "");
+
+// The plugin name this model resolved to at load, i.e. the default for every
+// request that does not name one itself.
+std::string common_chat_templates_format(const struct common_chat_templates * tmpls);
 
 bool        common_chat_templates_was_explicit(const struct common_chat_templates * tmpls);
 std::string common_chat_templates_source(const struct common_chat_templates * tmpls, const std::string & variant = "");
@@ -458,11 +500,6 @@ std::string common_chat_template_direct_apply(
 std::string common_chat_template_generation_prompt(
     const common_chat_template &          tmpl,
     const autoparser::generation_params & inputs);
-
-std::optional<common_chat_params> common_chat_try_specialized_template(
-        const common_chat_template &          tmpl,
-        const std::string &                   src,
-        autoparser::generation_params & params);
 
 
 // specialized per-task preset
