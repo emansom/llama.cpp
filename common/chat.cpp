@@ -1792,8 +1792,21 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // the entry state or the prefilled content for the FSM any more --
             // it walks the conversation and knows.
             if (!params.rendered_prompt.empty() && !params.conversation_parser.empty()) {
-                common_peg_parse_context pctx(params.rendered_prompt, flags);
+                // NOT lenient: this is the validator. A rendered prompt that does
+                // not parse against `conversation` is malformed input, and the
+                // whole point is to reject it here rather than send it.
+                common_peg_parse_flags cflags = COMMON_PEG_PARSE_FLAG_NONE;
+                if (params.debug) {
+                    cflags |= COMMON_PEG_PARSE_FLAG_DEBUG;
+                }
+                common_peg_parse_context pctx(params.rendered_prompt, cflags);
                 auto presult = params.conversation_parser.parse(pctx);
+                if (presult.fail()) {
+                    throw std::runtime_error(
+                        "rendered prompt failed `conversation` validation at offset " +
+                        std::to_string(presult.end) + ": " +
+                        params.rendered_prompt.substr(presult.end, 80));
+                }
                 pipeline.run(pctx.ast, presult);
             }
             pipeline.run(ctx.ast, result);
