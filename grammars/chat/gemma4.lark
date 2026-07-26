@@ -55,13 +55,41 @@ response_format: "```json\n" response_content "\n```"
 response_content: {{RESPONSE_SCHEMA}}
 
 # --- Full-conversation walker entry --------------------------------------------
-conversation: turn+ assistant_open?
-turn: "<|turn>" role_name "\n" turn_body_text "<turn|>\n"
-role_name: "system" | "user" | "model"
-assistant_open: "<|turn>model\n" thought_open_marker?
-thought_open_marker: "<|channel>thought\n<channel|>"
+#
+# Real intra-turn structure, not an opaque catch-all. The walker runs the SAME
+# pipeline over a rendered prompt that it runs over generation, so the decoder
+# only emits events for constructs the grammar actually names. `turn_body_text`
+# swallowing every turn body as text is why the walk could validate framing and
+# still recover nothing.
+#
+# The assistant turn deliberately reuses `think_block`, `content` and
+# `tool_calls` from the generation entry above: one description of the model's
+# wire shape, used for both directions.
 
-# Body of a wrapped turn — anything that isn't the start of <turn|>.
-turn_body_text: /([^<]|<(?!turn\|>))*/
+conversation: closed_turn* open_model_turn?
 
-%ignore /[ \t\n\r]/
+closed_turn: system_turn | user_turn | closed_model_turn
+
+system_turn: "<|turn>system\n" opaque_body "<turn|>\n"
+user_turn:   "<|turn>user\n"   opaque_body "<turn|>\n"
+
+# A model turn that completed. It may end at <turn|> or, when it left tool calls
+# outstanding, at a bare <|tool_response> -- both are required literals, not an
+# optional closer (see POLICIES.md#closing-tokens-are-required).
+closed_model_turn: "<|turn>model\n" model_body model_turn_close
+model_turn_close: "<turn|>\n" | tool_response_block+
+
+# The final, UNCLOSED model turn: where generation resumes. Walking it is what
+# carries already-emitted content and reasoning into the output message.
+open_model_turn: "<|turn>model\n" model_body
+
+# Same shape as the generation entry, so the same decoder tags fire.
+model_body: think_or_stray? content (think_block content)* tool_calls?
+
+tool_response_block: "<|tool_response>response:" func_name gemma4_dict "<tool_response|>"
+
+# System and user bodies are not extracted -- nothing downstream reads them --
+# so they stay opaque rather than inventing structure the decoder would ignore.
+opaque_body: /([^<]|<(?!turn\|>))*/
+
+%ignore /[ \t\r]/
