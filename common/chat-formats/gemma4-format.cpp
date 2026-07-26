@@ -336,7 +336,7 @@ const common_chat_format_state_rules gemma4_state_rules = {
 // the state the rendered prompt left the model in. The two answer different
 // questions and a state can appear in one and not the other.
 //
-// It is exhaustive on purpose. Defaulting an unlisted state to "start" is how
+// It is exhaustive on purpose. Defaulting an unlisted state to `turn_start` is how
 // the reasoning continuation broke: `start` requires a `<|channel>thought`
 // opener, the resumed delta has none because the opener is already in the
 // prompt, and the rest of the thought plus its `<channel|>` closer were read as
@@ -359,11 +359,11 @@ const common_chat_format_state_rules gemma4_state_rules = {
 //     need their own resume roots. Nothing prefills a partial tool call.
 static const std::unordered_map<common_chat_format_state, std::string> gemma4_entry_roots = {
     // Fresh model turn: the model may open with a thought, then content.
-    { common_chat_format_state::INITIAL,              "start" },
-    { common_chat_format_state::IN_GENERATION_PROMPT, "start" },
+    { common_chat_format_state::INITIAL,              "turn_start" },
+    { common_chat_format_state::IN_GENERATION_PROMPT, "turn_start" },
     // Mid-content: either a plain content continuation, or the empty-thought
     // prefill, which opened AND closed a thought so the model resumes in content.
-    { common_chat_format_state::IN_CONTENT,           "start" },
+    { common_chat_format_state::IN_CONTENT,           "turn_start" },
     // Mid-thought: the delta begins inside `reasoning`, with the opener already
     // in the prompt and the `<channel|>` closer still to come.
     { common_chat_format_state::IN_REASONING,         "resume_reasoning" },

@@ -617,14 +617,19 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
     if (!root_rule.empty() && root_rule != default_rule) {
         const bool exists = std::any_of(rule_defs.begin(), rule_defs.end(),
                                         [&](const RuleDef & r) { return r.name == root_rule && !r.is_terminal; });
-        if (exists) {
-            start_rule = root_rule;
-        } else if (root_rule != "start") {
+        if (!exists) {
             // Asking for a production the grammar does not define is a wiring
             // bug; falling back to the default entry would parse the wrong thing
             // and look like it worked.
+            //
+            // "start" used to be exempted from this, so a request for it on a
+            // grammar without one fell through to the first rule. The chat
+            // grammars no longer define `start` at all -- the entry is composed
+            // per request (common_chat_grammar_set_entry) -- which turned that
+            // exemption into a silent wrong parse waiting to happen.
             throw std::runtime_error("lark grammar has no rule named '" + root_rule + "'");
         }
+        start_rule = root_rule;
     }
 
     common_peg_parser_builder builder;

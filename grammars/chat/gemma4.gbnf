@@ -3,10 +3,24 @@
 # Covers the full output format for tool-call, content-only, and response_format responses.
 # {{RESPONSE_SCHEMA}} replaced at runtime.
 
-root ::= think-block? ( tool-calls | response-format | content )
+# No `root` rule: like gemma4.lark, this file is a library of productions and the
+# entry is appended per request by common_chat_grammar_set_entry, because GBNF
+# cannot be told which rule to start at either.
+turn-start ::= think-block? ( tool-calls | response-format | content )
 content ::= ( [^<`] | "<" [^|] | "<|" [^tc] | "<|t" [^o] | "<|to" [^o] | "<|too" [^l] | "<|tool" [^_] | "<|tool_" [^c] | "`" [^`] | "``" [^`] )*
 think-block ::= "<|channel>thought" [ \t\n\r]+ reasoning [^<]* "<channel|>"
 reasoning ::= [^<]*
+
+# Entry rule when generation resumes INSIDE a prefilled thought (entry_state
+# IN_REASONING). The model continues the thought body, closes it, then carries on
+# with the turn -- the "<|channel>thought" opener is already in the prompt, so
+# `root` (which expects that opener) is the wrong constraint there.
+#
+# Selected by chat_grammar_set_entry(), which rewrites `root` to reference this
+# rule, because neither GBNF nor llguidance can be told which production to start
+# at. Mirrors gemma4.lark's `resume_reasoning`, hyphenated per GBNF convention --
+# chat_grammar_set_entry does that translation.
+resume-reasoning ::= reasoning "<channel|>" ( tool-calls | response-format | content )
 
 tool-calls ::= tool-call+
 tool-call ::= "<|tool_call>call:" func-name gemma4-dict "<tool_call|>"

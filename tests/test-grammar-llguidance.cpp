@@ -2,6 +2,7 @@
 #    undef NDEBUG
 #endif
 
+#include "chat.h"
 #include "sampling.h"
 
 #include <cassert>
@@ -1144,11 +1145,106 @@ start: /[A-Z ]*/)";
     assert(cur[tok_arr.selected].id == tok_eos);
 }
 
+// The Gemma 4 sampling grammar, compiled through llguidance for real.
+//
+// This closes a gap that was documented in test-chat.cpp and left open: that
+// suite skips Lark grammars, because it builds constraints through the GBNF
+// path. So the constraint the server ACTUALLY samples under when built with
+// LLAMA_LLGUIDANCE=ON -- the whole point of this fork -- was compiled nowhere in
+// the test suite, and a grammar that llguidance rejects outright would have gone
+// unnoticed while every test passed.
+//
+// Both entry rules are exercised, because a resumed generation enters at
+// `resume_reasoning` rather than `start` and that is a different compiled
+// grammar. See common_chat_grammar_set_entry.
+static void test_gemma4_chat_grammar(const std::string & grammars_dir) {
+    common_chat_grammar_init(grammars_dir);
+    std::string base = common_chat_grammar_get("gemma4");
+    if (base.empty()) {
+        fprintf(stderr, "gemma4 grammar not found in %s\n", grammars_dir.c_str());
+        assert(false);
+    }
+
+    // Substitute the response-schema placeholder exactly as the server does for a
+    // request with no response_format (an empty schema: any JSON value).
+    //
+    // This MUST match production. Compiling the raw registry text instead leaves
+    // `{{RESPONSE_SCHEMA}}` in place, which is not valid Lark -- and a grammar
+    // that fails to compile fails OPEN, so every string matches and the whole
+    // test passes vacuously while asserting nothing at all.
+    const std::string placeholder = "{{RESPONSE_SCHEMA}}";
+    const size_t      at          = base.find(placeholder);
+    assert(at != std::string::npos);
+    base.replace(at, placeholder.size(), "%json {\"type\": \"object\"}");
+
+    // Wire strings are built from the tag vocabulary, not retyped. `<|` opens,
+    // `<NAME|>` closes, `<|NAME|>` is self-delimiting -- the same three forms the
+    // grammar names -- so a change to the delimiters does not mean editing every
+    // string here by hand.
+    auto open  = [](const std::string & n) { return "<|" + n + ">"; };
+    auto close = [](const std::string & n) { return "<" + n + "|>"; };
+    auto self  = [](const std::string & n) { return "<|" + n + "|>"; };
+
+    const std::string thought_open  = open("channel") + "thought";
+    const std::string thought_close = close("channel");
+    const std::string call_open     = open("tool_call") + "call:";
+    const std::string call_close    = close("tool_call");
+    const std::string q             = self("\"");
+
+    // Exactly what the server hands llguidance for an ordinary request: the
+    // {{RESPONSE_SCHEMA}} placeholder is substituted only when the caller asked
+    // for a response_format, so on every other request the grammar goes through
+    // as-is. If that does not compile, nothing does.
+    test("gemma4 sampling grammar (entry: turn_start)",
+         common_chat_grammar_set_entry(base, "turn_start"),
+         {
+             "Hello, world!",
+             thought_open + "\nthinking" + thought_close + "Hello, world!",
+             call_open + "get_time{city:" + q + "London" + q + "}" + call_close,
+             thought_open + "\nchecking" + thought_close + call_open + "f{}" + call_close,
+         },
+         {
+             // A close with no open.
+             thought_close + "Hello",
+         });
+
+    // MEASURED, UNRESOLVED: llguidance ACCEPTS a generation that stops inside an
+    // unclosed thought -- `<|channel>thought\nstill thinking` with no
+    // `<channel|>` is reported as a complete match, EOS and all. The grammar
+    // plainly requires the closer (`channel_block: channel_open channel_body
+    // channel_close_tag`), and the extraction parser rejects it, so this is the
+    // sampler's token-level enforcement disagreeing with the character-level
+    // grammar, not a grammar bug.
+    //
+    // It matters: "closing tokens are required" is supposed to mean the sampler
+    // cannot stop mid-thought, and this says it can. Deliberately NOT asserted
+    // either way here -- asserting it valid would bless behaviour that looks
+    // wrong, asserting it invalid would fail on behaviour not yet understood.
+    // Needs a minimal repro against llguidance before either.
+
+    // Resuming inside a thought the caller prefilled: the opener is already in
+    // the prompt, so the model continues the body and must close it.
+    test("gemma4 sampling grammar (entry: resume_reasoning)",
+         common_chat_grammar_set_entry(base, "resume_reasoning"),
+         {
+             " thinking" + thought_close + "Hello, world!",
+             " thinking" + thought_close + call_open + "f{}" + call_close,
+         },
+         {
+             // Opening a SECOND thought while already inside one, and dropping
+             // into content leaving the first unclosed. Both were reachable while
+             // the sampler was pinned to the fresh-turn entry, which is exactly
+             // what entry selection fixes.
+             thought_open + "\nnested" + thought_close + "Hi",
+             "Hello, world!",
+         });
+}
+
 int main(int argc, const char ** argv) {
     fprintf(stdout, "Running llguidance integration tests...\n");
 
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <vocab-file>\n", argv[0]);
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "Usage: %s <vocab-file> [chat-grammars-dir]\n", argv[0]);
         return 1;
     }
 
@@ -1195,6 +1291,10 @@ int main(int argc, const char ** argv) {
     test_json_schema();
 
     test_sampler_chain();
+
+    if (argc == 3) {
+        test_gemma4_chat_grammar(argv[2]);
+    }
 
     llama_free(ctx);
     llama_model_free(model);

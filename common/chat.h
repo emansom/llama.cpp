@@ -437,6 +437,17 @@ nlohmann::ordered_json common_chat_tools_to_json_oaicompat(const std::vector<com
 void        common_chat_grammar_init(const std::string & grammars_dir);
 std::string common_chat_grammar_get(const std::string & model_key);
 
+// Rewrite a grammar so `root_rule` becomes its entry rule.
+//
+// The sampler cannot be told where to start: llguidance compiles the rule
+// literally named "start" (parser/src/lark/compiler.rs:612) and rejects
+// %override (:705); GBNF has the same constraint on "root". Entry selection is
+// therefore structural. Rule names are given the Lark way ('_'); the GBNF
+// spelling ('-') is derived.
+//
+// Throws if the grammar has no entry rule, or no rule by the requested name.
+std::string common_chat_grammar_set_entry(const std::string & grammar, const std::string & root_rule);
+
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
 

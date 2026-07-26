@@ -360,6 +360,22 @@ struct parser_executor {
     parser_executor(const common_peg_arena & arena, common_peg_parse_context & ctx, size_t start)
         : arena(arena), ctx(ctx), start_pos(start) {}
 
+    // True if `id` can match the empty string, i.e. the input may not contain it
+    // at all. Used to decide whether a delimiter search must look past it.
+    bool is_skippable(common_peg_parser_id id) const {
+        if (id == COMMON_PEG_INVALID_PARSER_ID || id >= arena.size()) return false;
+        bool skippable = false;
+        std::visit([&](const auto & p) {
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, common_peg_repetition_parser>) {
+                if (p.min_count == 0) skippable = true;
+            } else if constexpr (std::is_same_v<T, common_peg_epsilon_parser>) {
+                skippable = true;
+            }
+        }, arena.get(id));
+        return skippable;
+    }
+
     // True if `id` matches exactly one fixed string, which is appended to `out`.
     // Descends through refs/rules/tags/atomics and sequences whose every child is
     // itself exact. Anything else (regex, choice, repetition) is not exact.
@@ -447,15 +463,7 @@ struct parser_executor {
                     collect_leading_literals(cid, lits, depth + 1);
                     for (const auto & l : lits) out.push_back(prefix + l);
 
-                    bool skippable = false;
-                    std::visit([&](const auto & cp) {
-                        using CT = std::decay_t<decltype(cp)>;
-                        if constexpr (std::is_same_v<CT, common_peg_repetition_parser>) {
-                            if (cp.min_count == 0) skippable = true;
-                        } else if constexpr (std::is_same_v<CT, common_peg_epsilon_parser>) {
-                            skippable = true;
-                        }
-                    }, arena.get(cid));
+                    const bool skippable = is_skippable(cid);
                     // A required non-literal child ends the fixed prefix: nothing after it
                     // is guaranteed to appear at a known offset.
                     //
@@ -583,8 +591,30 @@ struct parser_executor {
                 // Collect leading literals from ALL remaining siblings so that rest() nodes
                 // stop before any of the subsequent sequence elements (e.g. both an optional
                 // separator and a required closing delimiter).
+                bool all_remaining_skippable = true;
                 for (size_t j = i + 1; j < p.children.size(); j++) {
                     collect_leading_literals(p.children[j], ctx.next_sequence_delimiters);
+                    if (!is_skippable(p.children[j])) {
+                        all_remaining_skippable = false;
+                    }
+                }
+                // If every remaining sibling MAY BE ABSENT, the parse can continue
+                // straight out of this sequence into whatever follows the enclosing
+                // rule, so the outer delimiters still apply and must be kept
+                // alongside the inner ones.
+                //
+                // Without this, a delimiter stopped at a rule boundary. Splitting a
+                // turn body into its own rule -- `system_turn: ... system_body
+                // turn_close` with `system_body: think_marker? system_text
+                // tool_declaration*` -- left `system_text` seeing only
+                // `tool_declaration`'s `<|tool>`, never the `<turn|>` that ends the
+                // turn one level up. It ran to end of input and swallowed the rest of
+                // the conversation. That is why the body had to be a flat rule naming
+                // `<turn|>` in its own regex; with this, structure can be expressed
+                // where it belongs.
+                if (all_remaining_skippable) {
+                    ctx.next_sequence_delimiters.insert(ctx.next_sequence_delimiters.end(),
+                                                        saved_next_delims.begin(), saved_next_delims.end());
                 }
             }
             // else: keep saved_next_delims unchanged so the outer context propagates.

@@ -61,21 +61,47 @@ tool_call_open_tag:       TAG_L "tool_call" TAG_GT
 tool_call_close_tag:      TAG_LT "tool_call" TAG_R
 tool_response_open_tag:   TAG_L "tool_response" TAG_GT
 tool_response_close_tag:  TAG_LT "tool_response" TAG_R
+tool_decl_open_tag:       TAG_L "tool" TAG_GT
+tool_decl_close_tag:      TAG_LT "tool" TAG_R
 
-# Self-delimiting: the name is `"`, so the string delimiter is not a bespoke
-# marker but the third tag form. Being symmetric is why the format cannot
-# escape it -- see ARCHITECTURE.md.
-str_delim_tag: TAG_L "\"" TAG_R
+# Self-delimiting tags: <|NAME|>, the third tag form. The string delimiter's name
+# is `"`, so it is not a bespoke marker; being symmetric is why the format cannot
+# escape it -- see ARCHITECTURE.md. The think marker announces that the model may
+# use its thought channel this turn.
+str_delim_tag:  TAG_L "\"" TAG_R
+think_tag:      TAG_L "think" TAG_R
 
+# Plain text: any run containing NO TAG.
+#
+# `<|` always begins a tag (open `<|NAME>` or self-delimiting `<|NAME|>`) and
+# `<NAME|>` closes one, so both are excluded generically -- never by naming the
+# tags someone remembered. A `<` that begins neither is ordinary text.
+#
+# Every plain-text body in the format is this. Writing the exclusion once means a
+# body cannot fall out of step with the tag vocabulary above.
+TEXT_NO_TAG: /([^<]|<(?!\|)(?![a-zA-Z_][a-zA-Z0-9_]*\|>))*/
+
+# --- Entry rules -----------------------------------------------------------------
+#
+# This file defines productions; it deliberately has NO `start` rule. The entry
+# is chosen per request from the state the prompt left the model in, and appended
+# as `start: <rule>` by common_chat_grammar_set_entry -- llguidance compiles the
+# rule literally named "start" and cannot be told to use another.
+#
+# The selectable entries, mapped from FSM states by gemma4_entry_roots:
+#   turn_start        -- a fresh model turn; the model may open with a thought
+#   resume_reasoning  -- generation resumes inside a thought already opened
+#   conversation      -- a whole rendered prompt (the input validator)
+#
 # This grammar describes VALID Gemma 4 output and nothing else. It is the same
 # grammar llguidance enforces during sampling, so a malformed construct is not
 # something the model can emit -- and a production that tolerates one would be
 # describing a language the format does not have. A stray `<|channel>` with no
 # kind, or a `<channel|>` closing nothing, are parse errors here by design.
-start: channel_block? turn_tail
+turn_start: channel_block? turn_tail
 
 # Everything a model turn can contain after its opening thought. Shared by both
-# generation entries so they cannot drift: `start` and `resume_reasoning` differ
+# generation entries so they cannot drift: `turn_start` and `resume_reasoning` differ
 # ONLY in where the model picks up, never in what it may say next.
 turn_tail: content (channel_block content)* (tool_calls | response_format | )
 
@@ -178,8 +204,28 @@ closed_turn: system_turn | user_turn | closed_model_turn
 
 turn_close: turn_close_tag "\n"
 
-system_turn: turn_open_tag "system" "\n" opaque_body turn_close
-user_turn:   turn_open_tag "user"   "\n" opaque_body turn_close
+# The system turn carries three things, in this order: the think marker (present
+# when the model may use its thought channel this turn), the system text, and the
+# tool declarations.
+#
+# Spelled out rather than swallowed. The body used to be an opaque run stopping
+# at a hardcoded `<turn|>` -- `/([^<]|<(?!turn\|>))*/` -- which named one tag
+# inside a regex, so the tag vocabulary above could change and this would not
+# follow. It could only be written that way because the contents were not
+# modelled: a generic "no tag" body would have stopped at `<|think|>`. Naming the
+# contents is what lets the exclusion be generic.
+system_turn: turn_open_tag "system" "\n" system_body turn_close
+system_body: think_marker? system_text tool_declaration*
+think_marker: think_tag "\n"
+system_text: TEXT_NO_TAG
+
+# A declaration is the tool tag wrapped around its payload -- the same
+# open/payload/close shape as a tool call, and unvalidated beyond that for now.
+tool_declaration: tool_decl_open_tag decl_text tool_decl_close_tag
+decl_text: TEXT_NO_TAG
+
+user_turn: turn_open_tag "user" "\n" user_text turn_close
+user_text: TEXT_NO_TAG
 
 # A model turn that completed. It may end at <turn|> or, when it left tool calls
 # outstanding, at a bare <|tool_response> -- both are required literals, not an
@@ -193,10 +239,6 @@ model_body: channel_block? content (channel_block content)* tool_calls?
 # Same open/directive/colon/payload/close shape as tool_call.
 tool_response_block: tool_response_open_tag tool_response_directive ":" func_name gemma4_dict tool_response_close_tag
 tool_response_directive: "response"
-
-# System and user bodies are not extracted -- nothing downstream reads them --
-# so they stay opaque rather than inventing structure the decoder would ignore.
-opaque_body: /([^<]|<(?!turn\|>))*/
 
 # NO %ignore. Whitespace is significant in this format: content is returned to
 # the caller verbatim, and a global skip silently ate the trailing space of a

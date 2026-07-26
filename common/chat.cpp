@@ -1120,7 +1120,7 @@ static std::string inject_response_schema(const std::string & grammar_template, 
 // and re-imposing it during extraction would reject output the sampler had
 // legitimately produced.
 static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template,
-                                           const std::string & root_rule = "start") {
+                                           const std::string & root_rule = "turn_start") {
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
@@ -1128,6 +1128,43 @@ static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
     return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
+}
+
+// Append `start: <root_rule>` so the chosen production becomes the entry rule.
+//
+// The sampler cannot be told where to begin. llguidance compiles the rule
+// literally named "start" and offers no way to choose another --
+// `let start_name = "start";` (parser/src/lark/compiler.rs:612), with %override
+// explicitly rejected (:705) -- and GBNF has the same constraint on "root". So
+// entry selection is structural.
+//
+// The grammar FILES therefore define no entry rule at all: they are libraries of
+// productions, and the entry is composed here, per request. That is why this can
+// be an append rather than surgery on the grammar text. An earlier version of
+// this function scanned for the `start:` definition and spliced its body,
+// continuation lines and all -- string manipulation of a grammar source, which
+// is exactly the sort of thing this fork exists to remove.
+//
+// Keeping sampling and extraction on the same entry is the point. Extraction
+// takes its root as a parameter; the sampling grammar was always compiled from
+// `start`. Resuming inside a prefilled thought, that is wrong in both
+// directions: it permits a fresh `<|channel>thought` opener (a second thought
+// inside the first) and permits dropping into content (the first thought never
+// closed). The model was free to emit either, and only extraction would have
+// noticed.
+std::string common_chat_grammar_set_entry(const std::string & grammar, const std::string & root_rule) {
+    const bool lark = is_lark_grammar(grammar);
+
+    // Lark rule names use '_', GBNF uses '-'. Callers name rules the Lark way;
+    // this is the same normalization lark-to-peg applies.
+    std::string root = root_rule;
+    if (!lark) {
+        for (char & c : root) {
+            if (c == '_') { c = '-'; }
+        }
+    }
+
+    return grammar + (lark ? "\nstart: " : "\nroot ::= ") + root + "\n";
 }
 
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
@@ -1201,26 +1238,47 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // transformer -- see common_chat_gemma4_transformer::shape.
         const auto parser_base   = common_chat_grammar_require("gemma4");
 
-        std::string sampling_grammar = parser_base;
-        if (has_response_format) {
-            sampling_grammar = inject_response_schema(sampling_grammar, inputs.json_schema);
-        }
-
-        // NOTE: inject_tool_schema() is deliberately not called yet -- gemma4.lark
-        // carries no {{TOOL_SCHEMA}} placeholder, so tool arguments are currently
-        // constrained only to a generic dict, exactly as upstream leaves them.
-        // That is the gap this fork exists to close; see FORK.md.
-
-        // The generation parse starts where the prompt left the model, so its root
-        // follows entry_state. Resuming inside an unclosed thought means the delta
-        // opens mid-`reasoning` with no `<|channel>thought` ahead of it; `start`
-        // requires that opener, so it would read the rest of the thought and the
-        // `<channel|>` closing it as content.
+        // Generation starts where the prompt left the model, so the entry rule
+        // follows entry_state. Resuming inside a prefilled thought means the
+        // model continues mid-`reasoning`, with the `<|channel>thought` opener
+        // already in the prompt; `start` expects that opener.
         //
         // entry_state was computed by the renderer and plumbed through two structs
         // but read by nothing -- the same dead-plumbing shape that let the FSM
         // itself run as unused code.
         const std::string gen_root = common_chat_gemma4_entry_root(rendered.entry_state);
+
+        // BOTH sides enter at the same rule. Extraction takes it as a parameter;
+        // the sampler cannot be told, so the grammar is rewritten to enter there
+        // (see common_chat_grammar_set_entry). Skipping this on the sampling side is
+        // what left the model unconstrained at a resume point -- free to open a
+        // second thought inside the first, or to drop into content leaving the
+        // first unclosed -- with only extraction any the wiser.
+        // The response-schema placeholder is substituted ALWAYS, not only when the
+        // caller asked for a response_format.
+        //
+        // It was conditional, which meant that on every ordinary request the
+        // literal text `{{RESPONSE_SCHEMA}}` was handed to llguidance, where it is
+        // not valid Lark -- the grammar failed to compile and the request sampled
+        // with no format constraint at all. Measured, before this line changed:
+        //   llg error: 173(19): Expected value (at "{" ('{'))
+        // Invisible to the suite because test-chat never compiles Lark grammars;
+        // test-grammar-llguidance's gemma4 case is what caught it and is what
+        // keeps it caught.
+        //
+        // With no schema requested, an empty JSON Schema is used: it accepts any
+        // JSON value, so a fenced ```json block stays samplable without
+        // constraining its contents. Dropping the alternative instead would leave
+        // the model unable to emit ``` at all, since `content` excludes it
+        // precisely so `response_format` can match.
+        std::string sampling_grammar = inject_response_schema(
+            common_chat_grammar_set_entry(parser_base, gen_root),
+            has_response_format ? inputs.json_schema : json::object());
+
+        // NOTE: inject_tool_schema() is deliberately not called yet -- gemma4.lark
+        // carries no {{TOOL_SCHEMA}} placeholder, so tool arguments are currently
+        // constrained only to a generic dict, exactly as upstream leaves them.
+        // That is the gap this fork exists to close; see FORK.md.
 
         data.grammar             = sampling_grammar;
         data.parser              = chat_grammar_to_peg(parser_base, gen_root).save();
