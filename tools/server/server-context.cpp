@@ -1455,7 +1455,7 @@ private:
                 // broke the Granite embedder once format resolution became mandatory.
                 if (!params_base.embedding) {
                     SRV_TRC("%s: chat template, example_format: '%s'\n", __func__,
-                        common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
+                        common_chat_format_example(chat_templates.get(), params_base.default_template_kwargs).c_str());
 
                     // thinking is enabled if:
                     // 1. It's not explicitly disabled via --reasoning off
@@ -1475,7 +1475,6 @@ private:
             //            never store llama_context/llama_model pointers in chat_params,
             //            as they may be invalidated after sleeping
             chat_params = {
-                /* use_jinja             */ params_base.use_jinja,
                 /* prefill_assistant     */ params_base.prefill_assistant,
                 /* reasoning_format      */ params_base.reasoning_format,
                 /* chat_template_kwargs  */ params_base.default_template_kwargs,
@@ -4575,7 +4574,7 @@ void server_routes::init_routes() {
             { "is_sleeping",                 queue_tasks.is_sleeping() },
             { "cors_proxy_enabled",          params.ui_mcp_proxy },
         };
-        if (params.use_jinja) {
+        if (true) {
             if (!tmpl_tools.empty()) {
                 props["chat_template_tool_use"] = tmpl_tools;
             }

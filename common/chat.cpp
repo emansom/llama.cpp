@@ -675,8 +675,8 @@ common_chat_continuation common_chat_continuation_parse(const nlohmann::ordered_
     return COMMON_CHAT_CONTINUATION_NONE;
 }
 
-bool common_chat_verify_template(const std::string & tmpl, bool use_jinja) {
-    if (use_jinja) {
+bool common_chat_verify_template(const std::string & tmpl) {
+    {
         try {
             common_chat_msg msg;
             msg.role    = "user";
@@ -704,10 +704,8 @@ bool common_chat_verify_template(const std::string & tmpl, bool use_jinja) {
 std::string common_chat_format_single(const struct common_chat_templates * tmpls,
                                       const std::vector<common_chat_msg> & past_msg,
                                       const common_chat_msg &              new_msg,
-                                      bool                                 add_ass,
-                                      bool                                 use_jinja) {
+                                      bool                                 add_ass) {
     common_chat_templates_inputs inputs;
-    inputs.use_jinja = use_jinja;
     inputs.add_bos   = tmpls->add_bos;
     inputs.add_eos   = tmpls->add_eos;
 
@@ -732,10 +730,8 @@ std::string common_chat_format_single(const struct common_chat_templates * tmpls
 }
 
 std::string common_chat_format_example(const struct common_chat_templates *       tmpls,
-                                       bool                                       use_jinja,
                                        const std::map<std::string, std::string> & chat_template_kwargs) {
     common_chat_templates_inputs inputs;
-    inputs.use_jinja            = use_jinja;
     inputs.add_bos              = tmpls->add_bos;
     inputs.add_eos              = tmpls->add_eos;
     inputs.chat_template_kwargs = chat_template_kwargs;
@@ -1758,8 +1754,9 @@ static common_chat_params common_chat_templates_apply_legacy(const struct common
 common_chat_params common_chat_templates_apply(const struct common_chat_templates *        tmpls,
                                                const struct common_chat_templates_inputs & inputs) {
     GGML_ASSERT(tmpls != nullptr);
-    return inputs.use_jinja ? common_chat_templates_apply_jinja(tmpls, inputs) :
-                              common_chat_templates_apply_legacy(tmpls, inputs);
+    // One path. There is no template engine to select between any more; the
+    // format plugin's renderer builds the prompt. See FORK.md.
+    return common_chat_templates_apply_jinja(tmpls, inputs);
 }
 
 common_chat_msg common_chat_parse(const std::string &               input,

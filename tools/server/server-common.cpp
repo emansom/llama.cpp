@@ -914,9 +914,9 @@ json oaicompat_chat_params_parse(
     auto stream = json_value(body, "stream", false);
     auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
 
-    if (!opt.use_jinja) {
-        if (has_tools) {
-            throw std::runtime_error("tools param requires --jinja flag");
+    {
+        if (false) {
+            throw std::runtime_error("unreachable");
         }
         if (tool_choice != "auto") {
             throw std::runtime_error("tool_choice param requires --jinja flag");
@@ -1040,7 +1040,6 @@ json oaicompat_chat_params_parse(
     inputs.tool_choice            = common_chat_tool_choice_parse_oaicompat(tool_choice);
     inputs.json_schema            = json_schema.is_null() ? "" : json_schema.dump();
     inputs.grammar                = grammar;
-    inputs.use_jinja              = opt.use_jinja;
     inputs.parallel_tool_calls    = json_value(body, "parallel_tool_calls", caps["supports_parallel_tool_calls"]);
     inputs.add_generation_prompt  = json_value(body, "add_generation_prompt", true);
     inputs.continue_final_message = body.contains("continue_final_message") ?

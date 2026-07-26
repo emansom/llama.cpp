@@ -4311,7 +4311,6 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             inputs.enable_thinking = true;
             inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
             inputs.add_generation_prompt = true;
-            inputs.use_jinja = true;
             common_chat_msg msg;
             msg.role = "user";
             msg.content = "get_weather";
@@ -6189,7 +6188,6 @@ static void test_reasoning_budget_tokens_per_request() {
 
     server_chat_params opt;
     opt.tmpls            = std::move(tmpls);
-    opt.use_jinja        = true;
     opt.enable_thinking  = true;
     opt.reasoning_budget = -1;
     opt.reasoning_format = COMMON_REASONING_FORMAT_NONE;
@@ -6220,7 +6218,6 @@ static void test_reasoning_budget_message_per_request() {
 
     server_chat_params opt;
     opt.tmpls                   = std::move(tmpls);
-    opt.use_jinja               = true;
     opt.enable_thinking         = true;
     opt.reasoning_budget        = -1;
     opt.reasoning_format        = COMMON_REASONING_FORMAT_NONE;

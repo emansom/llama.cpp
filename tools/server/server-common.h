@@ -288,7 +288,6 @@ std::vector<server_tokens> tokenize_input_prompts(
 
 // global server parameters for chat formatting / parsing
 struct server_chat_params {
-    bool use_jinja;
     bool prefill_assistant;
     common_reasoning_format reasoning_format;
     std::map<std::string, std::string> chat_template_kwargs; // mapping key --> json value

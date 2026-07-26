@@ -278,8 +278,6 @@ struct common_chat_templates_inputs {
     std::string                           json_schema;
     bool                                  add_generation_prompt  = true;
     common_chat_continuation              continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
-    bool                                  use_jinja              = true;
-    // Parameters below only supported when use_jinja is true
     std::vector<common_chat_tool>         tools;
     common_chat_tool_choice               tool_choice         = COMMON_CHAT_TOOL_CHOICE_AUTO;
     bool                                  parallel_tool_calls = false;
@@ -343,7 +341,7 @@ struct common_chat_parser_params {
 };
 
 // Check if the template supplied via "--chat-template" is supported or not. Returns true if it's valid
-bool common_chat_verify_template(const std::string & tmpl, bool use_jinja);
+bool common_chat_verify_template(const std::string & tmpl);
 
 void common_chat_templates_free(struct common_chat_templates * tmpls);
 
@@ -368,12 +366,10 @@ struct common_chat_params common_chat_templates_apply(const struct common_chat_t
 std::string common_chat_format_single(const struct common_chat_templates * tmpls,
                                       const std::vector<common_chat_msg> & past_msg,
                                       const common_chat_msg &              new_msg,
-                                      bool                                 add_ass,
-                                      bool                                 use_jinja);
+                                      bool                                 add_ass);
 
 // Returns an example of formatted chat
 std::string common_chat_format_example(const struct common_chat_templates *       tmpls,
-                                       bool                                       use_jinja,
                                        const std::map<std::string, std::string> & chat_template_kwargs);
 
 const char *    common_chat_format_name(common_chat_format format);

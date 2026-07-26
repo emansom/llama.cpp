@@ -865,11 +865,11 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         params.speculative.draft.tensor_buft_overrides.push_back({nullptr, nullptr});
     }
 
-    if (!params.chat_template.empty() && !common_chat_verify_template(params.chat_template, params.use_jinja)) {
+    if (!params.chat_template.empty() && !common_chat_verify_template(params.chat_template)) {
         throw std::runtime_error(string_format(
             "error: the supplied chat template is not supported: %s%s\n",
             params.chat_template.c_str(),
-            params.use_jinja ? "" : "\nnote: llama.cpp was started without --jinja, we only support commonly used templates"
+            ""
         ));
     }
 
@@ -1280,9 +1280,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     // per-example default params
     // we define here to make sure it's included in llama-gen-docs
     if (ex == LLAMA_EXAMPLE_COMPLETION) {
-        params.use_jinja = false;   // disable jinja by default
     } else if (ex == LLAMA_EXAMPLE_MTMD) {
-        params.use_jinja = false;   // disable jinja by default
         params.sampling.temp = 0.2; // lower temp by default for better quality
     } else if (ex == LLAMA_EXAMPLE_SERVER) {
         params.n_parallel = -1;     // auto by default
@@ -3476,14 +3474,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_AUTOLOAD"));
     add_opt(common_arg(
-        {"--jinja"},
-        {"--no-jinja"},
-        string_format("whether to use jinja template engine for chat (default: %s)", params.use_jinja ? "enabled" : "disabled"),
-        [](common_params & params, bool value) {
-            params.use_jinja = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_JINJA"));
-    add_opt(common_arg(
         {"--reasoning-format"}, "FORMAT",
         "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\n"
         "- none: leaves thoughts unparsed in `message.content`\n"
@@ -4456,7 +4446,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.top_p = 1.0f;
             params.sampling.top_k = 0;
             params.sampling.min_p = 0.01f;
-            params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
@@ -4474,7 +4463,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.top_p = 1.0f;
             params.sampling.top_k = 0;
             params.sampling.min_p = 0.01f;
-            params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
@@ -4485,7 +4473,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.model.hf_repo = "ggml-org/gemma-3-4b-it-qat-GGUF";
             params.port = 8014;
             params.n_ctx = 0;
-            params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
@@ -4496,7 +4483,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.model.hf_repo = "ggml-org/gemma-3-12b-it-qat-GGUF";
             params.port = 8014;
             params.n_ctx = 0;
-            params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
