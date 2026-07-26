@@ -1366,18 +1366,26 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     data.thinking_start_tag = "<|channel>thought";
     data.thinking_end_tag   = "<channel|>";
 
-    // Every marker the model can emit. A token absent from this list is DROPPED
-    // from the text the parser sees: the server converts each generated token
+    // Every marker the model can emit. The server converts each generated token
     // with `special = params_base.special || preserved_tokens.count(tok)`, and
-    // llama_vocab::token_to_piece returns nothing for a CONTROL token when
-    // `special` is false.
+    // llama_vocab::token_to_piece renders nothing for a CONTROL token when
+    // `special` is false -- so an unlisted CONTROL marker never reaches the text
+    // the parser is given, and the final non-partial parse fails on the missing
+    // literal.
     //
-    // Which markers that silently affects is not something to reason about from
-    // the spelling. Gemma 4 splits them across two attribute classes --
-    // `<|tool_call>` (48) is USER_DEFINED and renders either way, `<|tool_response>`
-    // (50) carries CONTROL and does not -- so a list curated by eye happens to
-    // work until it names a token from the other class. Listing every marker the
-    // grammar can emit removes the dependency on which class each one landed in.
+    // Measured: dropping `<|tool_response>` from this list does NOT visibly break
+    // tool calls, because server-task.cpp only replaces the accumulated message
+    // `if (!new_msg.empty())` and the streaming partial parses have already built
+    // it. So this is not what makes extraction work -- it is what makes the parse
+    // SUCCEED rather than fail into that fallback. Do not read the fallback as
+    // permission to leave a marker out.
+    //
+    // Which markers are affected cannot be read off the spelling. Gemma 4 splits
+    // them across two attribute classes, and llama.cpp then FORCES CONTROL onto
+    // any token in its hardcoded gemma4 EOG list (`<eos>`, `<turn|>`,
+    // `<|tool_response>`), so the class is partly llama.cpp's doing and not the
+    // publisher's. Listing every marker the grammar can emit removes the
+    // dependency on which class each one ended up in.
     data.preserved_tokens = {
         "<|channel>",
         "<channel|>",
@@ -1418,7 +1426,16 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // entry_state was computed by the renderer and plumbed through two structs
         // but read by nothing -- the same dead-plumbing shape that let the FSM
         // itself run as unused code.
-        const std::string gen_root = common_chat_gemma4_entry_root(rendered.entry_state);
+        //
+        // `tool_choice: "required"` selects the variant of the same entry whose
+        // turn cannot end without a call. Only meaningful with tools declared:
+        // "required" with an empty tool list would otherwise compose a grammar
+        // demanding a call to nothing, which is unsatisfiable and would strand
+        // the sampler with every token masked.
+        const bool tool_required =
+            has_tools && inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+        const std::string gen_root =
+            common_chat_gemma4_entry_root(rendered.entry_state, tool_required);
 
         // BOTH sides enter at the same rule. Extraction takes it as a parameter;
         // the sampler cannot be told, so the grammar is rewritten to enter there
@@ -1454,8 +1471,17 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
         // request without tools is unaffected.
         sampling_grammar = inject_tool_schema(sampling_grammar, inputs.tools);
 
+        // Extraction enters at the PERMISSIVE root even when sampling was pinned
+        // to the tool-required one. The required variant's language is a strict
+        // subset -- it only removes the "no call" alternative -- so the permissive
+        // root accepts everything the sampler could have produced, and re-imposing
+        // the narrower one could only reject output that was legitimately
+        // generated. Same reasoning as withholding the tool schema from the parser.
+        const std::string parse_root =
+            common_chat_gemma4_entry_root(rendered.entry_state, /* tool_required= */ false);
+
         data.grammar             = sampling_grammar;
-        data.parser              = chat_grammar_to_peg(parser_base, gen_root).save();
+        data.parser              = chat_grammar_to_peg(parser_base, parse_root).save();
         data.grammar_file_parser = true;
         data.grammar_lazy        = false;
         data.grammar_triggers    = {};

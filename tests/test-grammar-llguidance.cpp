@@ -1354,6 +1354,31 @@ static void test_gemma4_tool_schema() {
              // the per-tool alternation exists to enforce.
              call_open + "system.ping{city:" + q + "London" + q + "}" + call_close + await_resp,
          });
+
+    // tool_choice: "required" -- the turn cannot end without a call.
+    //
+    // Content is not merely discouraged here, it is absent from the production:
+    // `content` is an unbounded regex, so allowing it before a required call
+    // says "you must call eventually" without ever requiring the model to stop
+    // talking. Measured live against a 12B when the rule still permitted it: on
+    // a chatty prompt the model answered in prose and then degenerated into
+    // repeated emoji until max_tokens, because EOS stayed masked (the call was
+    // still owed) and more content was always legal.
+    inputs.tool_choice = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    auto required_params = common_chat_templates_apply(tmpls.get(), inputs);
+
+    test("gemma4 tool schema (tool_choice: required)", required_params.grammar,
+         {
+             call_open + "get_time{city:" + q + "London" + q + "}" + call_close + await_resp,
+             call_open + "system.ping" + call_close + await_resp,
+         },
+         {
+             // A turn that answers instead of calling.
+             "I'd be happy to help with that!",
+             // Content first, then a call: still rejected, because content is
+             // what makes "required" unbounded.
+             "Let me check." + call_open + "system.ping" + call_close + await_resp,
+         });
 }
 
 // Isolation harness: compile ONE grammar file and report. Driven by an env var

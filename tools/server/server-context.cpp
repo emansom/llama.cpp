@@ -1445,6 +1445,21 @@ private:
             common_chat_templates_ptr chat_templates;
             bool enable_thinking = false;
 
+            // Load chat grammar files into the in-process registry. Read once at
+            // startup and cached; never re-read per request. Override the
+            // location with --chat-grammars-dir / LLAMA_ARG_CHAT_GRAMMARS_DIR.
+            //
+            // This MUST precede the probes below. They apply the template, which
+            // forces chat-format resolution and a grammar lookup, so with an
+            // empty registry the very first probe throws "chat grammar 'gemma4'
+            // not found" and startup aborts -- with `--chat-grammars-dir` on the
+            // command line and pointing at the right directory, because it had
+            // not been read yet. The server could not start with a Gemma 4 model
+            // at all.
+            common_chat_grammar_init(params_base.chat_grammars_dir.empty()
+                ? std::string(DEFAULT_CHAT_GRAMMARS_DIR)
+                : params_base.chat_grammars_dir);
+
             try {
                 chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
 
@@ -1486,13 +1501,6 @@ private:
                 /* media_path            */ params_base.media_path,
                 /* force_pure_content    */ params_base.force_pure_content_parser
             };
-
-            // Load chat grammar files into the in-process registry. Read once at
-            // startup and cached; never re-read per request. Override the
-            // location with --chat-grammars-dir / LLAMA_ARG_CHAT_GRAMMARS_DIR.
-            common_chat_grammar_init(params_base.chat_grammars_dir.empty()
-                ? std::string(DEFAULT_CHAT_GRAMMARS_DIR)
-                : params_base.chat_grammars_dir);
 
             {
                 auto caps = common_chat_templates_get_caps(chat_params.tmpls.get());

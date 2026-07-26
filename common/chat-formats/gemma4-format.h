@@ -69,7 +69,10 @@ extern const common_chat_format_state_rules gemma4_state_rules;
 // Throws on a state with no mapping rather than falling back to "start": parsing a
 // resumed generation with the wrong root yields a plausible message instead of an
 // error. See the registry's note in gemma4-format.cpp.
-std::string common_chat_gemma4_entry_root(common_chat_format_state state);
+//
+// `tool_required` selects the `tool_choice: "required"` variant of the same
+// entry, whose turn cannot end without a tool call.
+std::string common_chat_gemma4_entry_root(common_chat_format_state state, bool tool_required);
 
 // Render the Gemma 4 prompt. Mirrors the canonical gemma-4-12B-it template (see docs/fork/ARCHITECTURE.md#normative-sources),
 // not the older vendored models/templates/google-gemma-4-31B-it.jinja

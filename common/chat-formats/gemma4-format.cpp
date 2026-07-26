@@ -371,19 +371,29 @@ const common_chat_format_state_rules gemma4_state_rules = {
 //     is where it gets its root.
 //   * The mid-tool-call states (IN_TOOL_CALL / IN_TOOL_NAME / IN_TOOL_ARGS) would
 //     need their own resume roots. Nothing prefills a partial tool call.
-static const std::unordered_map<common_chat_format_state, std::string> gemma4_entry_roots = {
-    // Fresh model turn: the model may open with a thought, then content.
-    { common_chat_format_state::INITIAL,              "turn_start" },
-    { common_chat_format_state::IN_GENERATION_PROMPT, "turn_start" },
-    // Mid-content: either a plain content continuation, or the empty-thought
-    // prefill, which opened AND closed a thought so the model resumes in content.
-    { common_chat_format_state::IN_CONTENT,           "turn_start" },
-    // Mid-thought: the delta begins inside `reasoning`, with the opener already
-    // in the prompt and the `<channel|>` closer still to come.
-    { common_chat_format_state::IN_REASONING,         "resume_reasoning" },
+// Each state names BOTH roots explicitly -- the ordinary one and the
+// `tool_choice: "required"` one. Deriving the second by appending a suffix would
+// be shorter and would fail silently: a state whose required-variant nobody
+// wrote would compose a rule name that does not exist, and llguidance answers a
+// missing start rule by failing OPEN, i.e. with no constraint at all.
+struct gemma4_entry_root {
+    const char * any;            // tool_choice: auto / none
+    const char * tool_required;  // tool_choice: required
 };
 
-std::string common_chat_gemma4_entry_root(common_chat_format_state state) {
+static const std::unordered_map<common_chat_format_state, gemma4_entry_root> gemma4_entry_roots = {
+    // Fresh model turn: the model may open with a thought, then content.
+    { common_chat_format_state::INITIAL,              { "turn_start", "turn_start_tool_call" } },
+    { common_chat_format_state::IN_GENERATION_PROMPT, { "turn_start", "turn_start_tool_call" } },
+    // Mid-content: either a plain content continuation, or the empty-thought
+    // prefill, which opened AND closed a thought so the model resumes in content.
+    { common_chat_format_state::IN_CONTENT,           { "turn_start", "turn_start_tool_call" } },
+    // Mid-thought: the delta begins inside `reasoning`, with the opener already
+    // in the prompt and the `<channel|>` closer still to come.
+    { common_chat_format_state::IN_REASONING,         { "resume_reasoning", "resume_reasoning_tool_call" } },
+};
+
+std::string common_chat_gemma4_entry_root(common_chat_format_state state, bool tool_required) {
     auto it = gemma4_entry_roots.find(state);
     if (it == gemma4_entry_roots.end()) {
         throw std::runtime_error(
@@ -391,7 +401,7 @@ std::string common_chat_gemma4_entry_root(common_chat_format_state state) {
             std::to_string(static_cast<int>(state)) +
             " (common_chat_format_state) -- add it to gemma4_entry_roots (see the note there)");
     }
-    return it->second;
+    return tool_required ? it->second.tool_required : it->second.any;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

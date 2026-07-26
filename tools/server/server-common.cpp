@@ -914,14 +914,14 @@ json oaicompat_chat_params_parse(
     auto stream = json_value(body, "stream", false);
     auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
 
-    {
-        if (false) {
-            throw std::runtime_error("unreachable");
-        }
-        if (tool_choice != "auto") {
-            throw std::runtime_error("tool_choice is not supported by this chat format");
-        }
-    }
+    // `tool_choice` is validated below by common_chat_tool_choice_parse_oaicompat,
+    // which accepts auto/required/none and rejects anything else by name.
+    //
+    // What stood here was debris from deleting the other formats: an
+    // `if (false) { unreachable }` followed by a blanket throw on any value but
+    // "auto". Gemma 4 supports all three, and FORK.md commits to `tool_choice`
+    // being part of the UNCHANGED OpenAI surface -- so this rejected a request
+    // stock llama-server answers, which is a regression, not a scope reduction.
 
     // Handle "stop" field
     if (body.contains("stop") && body.at("stop").is_string()) {

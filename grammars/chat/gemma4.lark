@@ -118,6 +118,25 @@ turn_start: channel_block? turn_tail
 # ONLY in where the model picks up, never in what it may say next.
 turn_tail: content (channel_block content)* (tool_call_request | response_format | )
 
+# The `tool_choice: "required"` pair of the two entries above. The model may
+# still think first -- that is where it decides WHICH call to make -- but the
+# turn then goes straight to the call. There is no `content` and no alternative,
+# so a turn that does not call is unrepresentable.
+#
+# Enforcing it in the grammar is what makes it a guarantee rather than a request;
+# instructing the model to "always call a tool" is the same unconstrained-and-
+# usually-fine the arguments themselves were just moved out of.
+#
+# Content is deliberately NOT allowed before the call, and the first attempt that
+# allowed it shows why. `content` is an unbounded regex, so
+# `content* tool_call_request` says "you must call eventually" while never
+# requiring the model to stop talking: asked something chatty with
+# tool_choice=required, it answered in prose and then degenerated into repeated
+# emoji until max_tokens, because EOS was masked (the call was still owed) and
+# more content was always legal. A required call has to be reachable in bounded
+# output, which means it has to be the ONLY thing that follows.
+turn_start_tool_call: channel_block? tool_call_request
+
 # The second generation entry, selected when the rendered prompt ended INSIDE an
 # unclosed thought (entry_state IN_REASONING) because the caller prefilled
 # reasoning_content.
@@ -131,6 +150,7 @@ turn_tail: content (channel_block content)* (tool_call_request | response_format
 # `reasoning` is reused verbatim, so the same REASONING tag fires and the
 # continuation lands in the same field as the part already in the prompt.
 resume_reasoning: reasoning channel_close_tag turn_tail
+resume_reasoning_tool_call: reasoning channel_close_tag tool_call_request
 
 # --- Assistant turn continuation (sampler entry) -------------------------------
 #
