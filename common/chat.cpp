@@ -1,6 +1,5 @@
 #include "chat.h"
 
-#include "chat-auto-parser-helpers.h"
 #include "chat-auto-parser.h"
 #include "chat-formats/format-pipeline.h"
 #include "chat-formats/gemma4-format.h"
@@ -12,9 +11,6 @@
 #include "lark-to-peg.h"
 #include "log.h"
 
-#include "jinja/value.h"
-#include "jinja/runtime.h"
-#include "jinja/caps.h"
 #include "peg-parser.h"
 
 #include "nlohmann/json.hpp"
@@ -38,6 +34,17 @@
 #include <vector>
 
 using json = nlohmann::ordered_json;
+
+// Was in chat-auto-parser-helpers, which went with the auto-parser. Kept here
+// because content normalisation is not an auto-parser concern.
+static std::string trim_whitespace(const std::string & str) {
+    const auto b = str.find_first_not_of(" \t\n\r");
+    if (b == std::string::npos) {
+        return {};
+    }
+    const auto e = str.find_last_not_of(" \t\n\r");
+    return str.substr(b, e - b + 1);
+}
 
 // ---------------------------------------------------------------------------
 // Chat grammar registry
@@ -420,7 +427,6 @@ std::vector<common_chat_msg_diff> common_chat_msg_diff::compute_diffs(const comm
     return diffs;
 }
 
-using chat_template_caps = jinja::caps;
 
 struct common_chat_templates {
     bool add_bos;
@@ -559,7 +565,7 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
     return msgs;
 }
 
-static json render_message_to_json(const std::vector<common_chat_msg> & msgs, const jinja::caps & c) {
+static json render_message_to_json(const std::vector<common_chat_msg> & msgs, const chat_template_caps & c) {
     if (!c.supports_string_content && !c.supports_typed_content) {
         LOG_WRN("%s: Neither string content nor typed content is supported by the template. This is unexpected and may lead to issues.\n", __func__);
     }
@@ -593,7 +599,7 @@ static json render_message_to_json(const std::vector<common_chat_msg> & msgs, co
 
 // DEPRECATED: only used in tests
 json common_chat_msgs_to_json_oaicompat(const std::vector<common_chat_msg> & msgs, bool concat_typed_text) {
-    jinja::caps c;
+    chat_template_caps c;
     c.supports_string_content = true;
     c.supports_typed_content = !concat_typed_text;
     return render_message_to_json(msgs, c);
@@ -971,97 +977,9 @@ static void foreach_parameter(const json &                                      
     }
 }
 
-static std::string common_chat_template_direct_apply_impl(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs,
-    const std::optional<json> & messages_override = std::nullopt,
-    const std::optional<json> & tools_override = std::nullopt,
-    const std::optional<json> & additional_context = std::nullopt) {
-    jinja::context ctx(tmpl.source());
 
-    nlohmann::ordered_json inp = nlohmann::ordered_json{
-        {"messages", messages_override.has_value() ? *messages_override : inputs.messages},
-        {"bos_token", tmpl.bos_token()},
-        {"eos_token", tmpl.eos_token()},
-        {"enable_thinking", inputs.enable_thinking},
-    };
-    if (tools_override.has_value() || !inputs.tools.empty()) {
-        inp["tools"] = tools_override.has_value() ? *tools_override : inputs.tools;
-    }
-    if (inputs.extra_context.is_object()) {
-        // TODO: do we need to merge, or replacing is fine?
-        for (const auto & [k, v] : inputs.extra_context.items()) {
-            inp[k] = v;
-        }
-    }
-    if (additional_context.has_value()) {
-        // TODO: merge properly instead of overwriting (matching old behavior)
-        for (const auto & [k, v] : additional_context->items()) {
-            inp[k] = v;
-        }
-    }
-    if (inputs.add_generation_prompt) {
-        inp["add_generation_prompt"] = true;
-    }
-    if (inp.contains("preserve_reasoning") && inp["preserve_reasoning"].is_boolean()) {
-        bool enabled = inp["preserve_reasoning"].get<bool>();
-        jinja::caps_apply_preserve_reasoning(ctx, enabled);
-    }
 
-    jinja::global_from_json(ctx, inp, inputs.mark_input);
 
-    // render
-    jinja::runtime runtime(ctx);
-    const jinja::value results = runtime.execute(tmpl.prog);
-    auto parts = jinja::runtime::gather_string_parts(results);
-
-    std::string result = parts->as_string().str();
-
-    // TODO: improve this later
-    if (inputs.add_bos && string_starts_with(result, tmpl.bos_token())) {
-        result = result.substr(tmpl.bos_token().size());
-    }
-    if (inputs.add_eos && string_ends_with(result, tmpl.eos_token())) {
-        result = result.substr(0, result.size() - tmpl.eos_token().size());
-    }
-    return result;
-}
-
-std::string common_chat_template_direct_apply(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs) {
-    return common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
-}
-
-static std::string common_chat_template_generation_prompt_impl(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs,
-    const std::optional<json> & messages_override = std::nullopt,
-    const std::optional<json> & tools_override = std::nullopt,
-    const std::optional<json> & additional_context = std::nullopt) {
-
-    auto adjusted_messages = messages_override ? *messages_override : inputs.messages;
-
-    autoparser::generation_params params = inputs;
-    params.add_generation_prompt = false;
-    params.continue_final_message = COMMON_CHAT_CONTINUATION_NONE;
-    std::string no_gen_prompt    = common_chat_template_direct_apply_impl(tmpl, params, adjusted_messages, tools_override, additional_context);
-    params.add_generation_prompt = true;
-    std::string gen_prompt       = common_chat_template_direct_apply_impl(tmpl, params, adjusted_messages, tools_override, additional_context);
-
-    size_t prefix_len = 0;
-    size_t min_size = std::min(no_gen_prompt.size(), gen_prompt.size());
-    while (prefix_len < min_size && no_gen_prompt[prefix_len] == gen_prompt[prefix_len]) {
-        prefix_len++;
-    }
-    return gen_prompt.substr(prefix_len);
-}
-
-std::string common_chat_template_generation_prompt(
-    const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs) {
-    return common_chat_template_generation_prompt_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Grammar-file-driven chat parsing
@@ -1733,8 +1651,18 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         common_chat_params data;
         auto params_copy               = params;
         params_copy.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
-        data.prompt                    = common_chat_template_direct_apply_impl(tmpl, params_copy);
-        data.generation_prompt         = common_chat_template_generation_prompt_impl(tmpl, params);
+        data.prompt                    = common_chat_gemma4_render(params_copy, tmpl.bos_token());
+        {
+            // Same double-render difference as the main path: the generation
+            // prompt is whatever tail add_generation_prompt contributes.
+            auto no_gen                  = params;
+            no_gen.add_generation_prompt = false;
+            const auto with_gen          = common_chat_gemma4_render(params, tmpl.bos_token());
+            const auto without_gen       = common_chat_gemma4_render(no_gen, tmpl.bos_token());
+            data.generation_prompt       = with_gen.size() >= without_gen.size()
+                                             ? with_gen.substr(without_gen.size())
+                                             : std::string{};
+        }
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {
             return p.literal(data.generation_prompt) << p.content(p.rest());
@@ -1747,34 +1675,18 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         return *result;
     }
 
-    try {
-        LOG_DBG("%s: using differential autoparser\n", __func__);
-        struct autoparser::autoparser autoparser;
-        autoparser.analyze_template(tmpl);
-        auto auto_params = autoparser::peg_generator::generate_parser(tmpl, params, autoparser);
-
-        common_chat_msg_delimiters delimiters;
-        if (!autoparser.assistant_start.empty()) {
-            delimiters.add(COMMON_CHAT_ROLE_ASSISTANT, autoparser.assistant_start);
-        }
-        if (!autoparser.user_start.empty()) {
-            delimiters.add(COMMON_CHAT_ROLE_USER, autoparser.user_start);
-        }
-
-        auto_params.message_delimiters = std::move(delimiters);
-
-        auto_params.supports_thinking = autoparser.reasoning.mode != autoparser::reasoning_mode::NONE;
-        if (auto_params.supports_thinking) {
-            auto_params.thinking_start_tag = trim_whitespace(autoparser.reasoning.start);
-            auto_params.thinking_end_tag   = trim_whitespace(autoparser.reasoning.end);
-        }
-        common_peg_arena arena;
-        arena.load(auto_params.parser);
-        LOG_DBG("%s: generated parser:\n%s\n\nparser generation prompt: %s\n", __func__, arena.dump(arena.root()).c_str(), auto_params.generation_prompt.c_str());
-        return auto_params;
-    } catch (const std::exception & e) {
-        throw std::invalid_argument(std::string("Unable to generate parser for this template. Automatic parser generation failed: ") + e.what());
-    }
+    // Unreachable: common_chat_try_specialized_template always resolves.
+    //
+    // What was here was the "differential autoparser" -- it applied the Jinja
+    // template several times with varied inputs, diffed the outputs, and inferred
+    // a grammar from where they differed. That is inference twice over: from a
+    // template this fork no longer renders, into a grammar nobody wrote. A format
+    // gets a hand-written grammar plus a tracker that mirrors it, or it is not
+    // supported. See docs/fork/POLICIES.md#nothing-is-inferred.
+    throw std::invalid_argument(
+        "no chat format plugin resolved for this model. This build serves Gemma 4 "
+        "only; register a format plugin (renderer, validator, tracker, grammar) to "
+        "add another. See FORK.md.");
 }
 
 // Legacy template route (adhoc C++ implementation of known templates), forward to llama_chat_apply_template.

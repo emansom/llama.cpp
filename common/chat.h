@@ -4,9 +4,6 @@
 
 #include "common.h"
 #include "peg-parser.h"
-#include "jinja/parser.h"
-#include "jinja/runtime.h"
-#include "jinja/caps.h"
 
 #include "nlohmann/json_fwd.hpp"
 
@@ -16,7 +13,6 @@
 #include <string>
 #include <vector>
 
-using chat_template_caps = jinja::caps;
 using json = nlohmann::ordered_json;
 
 struct common_chat_templates;
@@ -49,33 +45,59 @@ struct common_chat_msg_content_part {
     }
 };
 
+// Capabilities of a chat format.
+//
+// These used to be DERIVED by executing the Jinja template and inspecting which
+// branches were reachable (jinja::caps). That made model behaviour a property of
+// a template's text, so editing the template silently changed what the server
+// reported it could do. They are now stated facts about the format plugin.
+//
+// The defaults below are Gemma 4's, which is the only format this build serves:
+// it has a real system turn, native tool declarations and tool calls, object-
+// valued arguments, and accepts both string and typed content parts.
+struct chat_template_caps {
+    bool supports_system_role      = true;
+    bool supports_tools            = true;
+    bool supports_tool_calls       = true;
+    bool supports_object_arguments = true;
+    bool supports_string_content   = true;
+    bool supports_typed_content    = true;
+
+    std::map<std::string, bool> to_map() const {
+        return {
+            { "supports_system_role",      supports_system_role      },
+            { "supports_tools",            supports_tools            },
+            { "supports_tool_calls",       supports_tool_calls       },
+            { "supports_object_arguments", supports_object_arguments },
+            { "supports_string_content",   supports_string_content   },
+            { "supports_typed_content",    supports_typed_content    },
+        };
+    }
+};
+
+// Carries the model's special tokens, and the template source purely as an
+// opaque string for reporting (/props, --verbose).
+//
+// It no longer parses anything. This used to hold a jinja::program plus derived
+// jinja::caps, which made the chat template an executable artefact the renderer,
+// validator, tracker and grammar all had to stay consistent with -- a fifth
+// source of truth none of the other four could check. Prompts are now built by a
+// format plugin's renderer; see FORK.md.
 struct common_chat_template {
-    jinja::program prog;
     std::string bos_tok;
     std::string eos_tok;
     std::string src;
+
+    common_chat_template(const std::string & src, const std::string & bos_token, const std::string & eos_token)
+        : bos_tok(bos_token), eos_tok(eos_token), src(src) {}
+
     chat_template_caps caps;
-
-    common_chat_template(const std::string & src, const std::string & bos_token, const std::string & eos_token) {
-        jinja::lexer lexer;
-        auto lexer_res = lexer.tokenize(src);
-        this->prog = jinja::parse_from_tokens(lexer_res);
-
-        this->src = lexer_res.source;
-        this->bos_tok = bos_token;
-        this->eos_tok = eos_token;
-
-        this->caps = jinja::caps_get(prog);
-        // LOG_INF("%s: caps:\n%s\n", __func__, this->caps.to_string().c_str());
-    }
 
     const std::string & source() const { return src; }
     const std::string & bos_token() const { return bos_tok; }
     const std::string & eos_token() const { return eos_tok; }
 
-    chat_template_caps original_caps() const {
-        return caps;
-    }
+    chat_template_caps original_caps() const { return caps; }
 };
 
 struct common_chat_msg {

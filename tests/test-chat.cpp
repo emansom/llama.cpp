@@ -18,6 +18,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <cassert>
 #include <filesystem>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -6040,42 +6041,6 @@ static void test_template_generation_prompt() {
 }
 
 // Test the developer role to system workaround with a simple mock template
-static void test_developer_role_to_system_workaround() {
-    LOG_DBG("%s\n", __func__);
-
-    // Simple mock template that supports system role
-    const std::string mock_template =
-        "{%- for message in messages -%}\n"
-        "  {{- '<|' + message.role + '|>' + message.content + '<|end|>' -}}\n"
-        "{%- endfor -%}\n"
-        "{%- if add_generation_prompt -%}\n"
-        "  {{- '<|assistant|>' -}}\n"
-        "{%- endif -%}";
-
-    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, mock_template));
-
-    // Test case 1: Developer message - should be changed to system
-    // After simplification we only test this case
-    {
-        common_chat_templates_inputs inputs;
-        common_chat_msg developer_msg;
-        developer_msg.role = "developer";
-        developer_msg.content = "You are a helpful developer assistant.";
-        inputs.messages = { developer_msg };
-        inputs.add_generation_prompt = false;
-
-        auto params = common_chat_templates_apply(tmpls.get(), inputs);
-
-        // The developer role should have been changed to system
-        if (params.prompt.find("<|developer|>") != std::string::npos) {
-            throw std::runtime_error("Test failed: developer role was not changed to system");
-        }
-        if (params.prompt.find("<|system|>You are a helpful developer assistant.<|end|>") == std::string::npos) {
-            throw std::runtime_error("Test failed: system message not found in output");
-        }
-        LOG_ERR("Test 1 passed: developer role changed to system\n");
-    }
-}
 
 // Verify reasoning-trace retention rules in the DeepSeek-V4 template:
 // all traces are retained unless drop_thinking is true AND the conversation
@@ -6461,7 +6426,6 @@ int main(int argc, char ** argv) {
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();
         test_convert_responses_to_chatcmpl();
-        test_developer_role_to_system_workaround();
         test_deepseek_v4_thinking_retention();
         test_deepseek_v4_tool_result_ordering();
         test_template_generation_prompt();

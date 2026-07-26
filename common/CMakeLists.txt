@@ -57,10 +57,7 @@ add_library(${TARGET}
     arg.cpp
     arg.h
     base64.hpp
-    chat-auto-parser-generator.cpp
-    chat-auto-parser-helpers.cpp
     chat-auto-parser.h
-    chat-diff-analyzer.cpp
     chat-peg-parser.cpp
     chat-peg-parser.h
     chat-formats/decoded-event.h
@@ -118,18 +115,6 @@ add_library(${TARGET}
     speculative.h
     unicode.cpp
     unicode.h
-    jinja/lexer.cpp
-    jinja/lexer.h
-    jinja/parser.cpp
-    jinja/parser.h
-    jinja/runtime.cpp
-    jinja/runtime.h
-    jinja/value.cpp
-    jinja/value.h
-    jinja/string.cpp
-    jinja/string.h
-    jinja/caps.cpp
-    jinja/caps.h
     )
 
 set_target_properties(${TARGET} PROPERTIES
