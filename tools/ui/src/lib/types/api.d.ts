@@ -245,6 +245,22 @@ export interface ApiLlamaCppServerProps {
 		video: boolean;
 	};
 	chat_template: string;
+	/**
+	 * What the chat FORMAT declares it can do -- stated by the format plugin,
+	 * not derived from `chat_template`. This build renders prompts in C++ and
+	 * has no template to inspect, so anything the UI needs to know about the
+	 * format's abilities comes from here.
+	 */
+	chat_template_caps?: {
+		supports_system_role?: boolean;
+		supports_tools?: boolean;
+		supports_tool_calls?: boolean;
+		supports_object_arguments?: boolean;
+		supports_string_content?: boolean;
+		supports_typed_content?: boolean;
+		supports_preserve_reasoning?: boolean;
+		supports_thinking?: boolean;
+	};
 	bos_token: string;
 	eos_token: string;
 	build_info: string;

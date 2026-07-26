@@ -67,6 +67,14 @@ struct chat_template_caps {
     // Gemma 4 keeps thoughts across an active tool-calling turn (Google's Rule 2),
     // so preserve_reasoning is supported. See docs/fork/ARCHITECTURE.md.
     bool supports_preserve_reasoning = true;
+    // Whether the format has a thinking channel at all -- a STATED fact about the
+    // plugin, like everything else here.
+    //
+    // It exists because the web UI used to answer this by string-searching the
+    // chat template (`detectThinkingSupport(props.chat_template)`), which is the
+    // same inference the server side spent this fork removing, and which broke
+    // outright once there were no templates to search.
+    bool supports_thinking = true;
 
     std::map<std::string, bool> to_map() const {
         return {
@@ -77,6 +85,7 @@ struct chat_template_caps {
             { "supports_string_content",   supports_string_content   },
             { "supports_typed_content",    supports_typed_content    },
             { "supports_preserve_reasoning", supports_preserve_reasoning },
+            { "supports_thinking",         supports_thinking         },
         };
     }
 };

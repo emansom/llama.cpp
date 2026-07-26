@@ -8,7 +8,7 @@ import { serverStore, isRouterMode } from '$lib/stores/server.svelte';
 import {
 	detectThinkingSupport,
 	detectThinkingSupportWithReason
-} from '$lib/utils/chat-template-thinking-detector';
+} from '$lib/utils/format-thinking-support';
 import { TTLCache, getAuthHeaders } from '$lib/utils';
 import {
 	MODEL_PROPS_CACHE_TTL_MS,
@@ -252,7 +252,7 @@ class ModelsStore {
 	 */
 	get supportsThinking(): boolean {
 		if (!isRouterMode()) {
-			return detectThinkingSupport(serverStore.props?.chat_template ?? '');
+			return detectThinkingSupport(serverStore.props);
 		}
 
 		const modelId = this.selectedModelName;
@@ -262,7 +262,7 @@ class ModelsStore {
 			this.fetchModelProps(modelId);
 		}
 		const props = this.getModelProps(modelId);
-		return detectThinkingSupport(props?.chat_template ?? '');
+		return detectThinkingSupport(props);
 	}
 
 	/**
@@ -272,7 +272,7 @@ class ModelsStore {
 	 */
 	checkModelSupportsThinking(modelId: string): boolean {
 		if (!isRouterMode()) {
-			return detectThinkingSupport(serverStore.props?.chat_template ?? '');
+			return detectThinkingSupport(serverStore.props);
 		}
 
 		if (!modelId) return false;
@@ -282,7 +282,7 @@ class ModelsStore {
 		}
 
 		const props = this.getModelProps(modelId);
-		return detectThinkingSupport(props?.chat_template ?? '');
+		return detectThinkingSupport(props);
 	}
 
 	/**
@@ -290,7 +290,7 @@ class ModelsStore {
 	 */
 	get thinkingSupportDetails(): { supported: boolean; reason: string } {
 		if (!isRouterMode()) {
-			return detectThinkingSupportWithReason(serverStore.props?.chat_template ?? '');
+			return detectThinkingSupportWithReason(serverStore.props);
 		}
 
 		const modelId = this.selectedModelName;
@@ -302,7 +302,7 @@ class ModelsStore {
 			this.fetchModelProps(modelId);
 		}
 		const props = this.getModelProps(modelId);
-		return detectThinkingSupportWithReason(props?.chat_template ?? '');
+		return detectThinkingSupportWithReason(props);
 	}
 
 	/**
