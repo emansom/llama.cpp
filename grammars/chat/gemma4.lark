@@ -158,15 +158,24 @@ response_content: {{RESPONSE_SCHEMA}}
 # `tool_calls` from the generation entry above: one description of the model's
 # wire shape, used for both directions.
 
-conversation: closed_turn* open_model_turn?
+# This rule describes COMPLETE conversations only. A rendered prompt is a PREFIX
+# of one -- it stops exactly where generation is about to begin -- so the walk
+# parses it in STREAMING mode and a trailing incomplete turn comes back as
+# NEED_MORE_INPUT with its partial nodes intact. That is the parse telling us
+# where the model is, which is the whole point.
+#
+# There is deliberately NO production for a half-finished turn or a thought
+# without its `<channel|>`. llguidance enforces this same grammar while sampling,
+# so the model cannot emit either; writing them down would describe a language
+# the format does not have, and would let the sampler stop mid-thought during
+# generation -- the exact failure "closing tokens are required" exists to
+# prevent. A prompt that ends mid-thought is not the model emitting an unclosed
+# thought, it is the caller having prefilled part of one; that is a property of
+# where the input stops, and partial parsing is how a parser expresses it.
+conversation: closed_turn*
 
 closed_turn: system_turn | user_turn | closed_model_turn
 
-# A turn is the tag plus its ROLE, not one fused literal. The role is a
-# production, so an unexpected role is a grammar question rather than a missing
-# string nobody thought to add.
-turn_open: turn_open_tag turn_role "\n"
-turn_role: "system" | "user" | "model"
 turn_close: turn_close_tag "\n"
 
 system_turn: turn_open_tag "system" "\n" opaque_body turn_close
@@ -177,54 +186,6 @@ user_turn:   turn_open_tag "user"   "\n" opaque_body turn_close
 # optional closer (see POLICIES.md#closing-tokens-are-required).
 closed_model_turn: turn_open_tag "model" "\n" model_body model_turn_close
 model_turn_close: turn_close | tool_response_block+
-
-# The final, UNCLOSED model turn: where generation resumes. Walking it is what
-# carries already-emitted content and reasoning into the output message.
-#
-# It has TWO shapes, because generation can resume in either of two places:
-#
-#   - inside the thought      -- the caller prefilled reasoning_content and the
-#                                model is still thinking, so there is no
-#                                <channel|> yet
-#   - after the thought       -- the thought completed and the caller prefilled
-#                                content, so the body is an ordinary model_body
-#
-# `open_thought` is NOT a loosened closer. <channel|> stays a required literal
-# everywhere it can appear; this is a distinct wire shape in which it has not
-# been emitted yet, expressed as its own alternative -- the exception spelled out
-# in POLICIES.md#closing-tokens-are-required. Making think_block's closer
-# optional instead would let the sampler skip it during generation, which is the
-# failure that policy exists to prevent.
-open_model_turn: turn_open_tag "model" "\n" open_model_body
-
-# Each alternative must be decidable WHERE IT STANDS. PEG commits to the first
-# one that succeeds and never returns to it, so an alternative that can match the
-# empty string makes every later one unreachable.
-#
-# `model_body | open_thought` looked right -- "closed shape first" -- and was
-# not: every part of `model_body` is optional, so on an unclosed thought it
-# matched EMPTY and won. The reasoning bytes went unread and the walk recovered
-# nothing, with no error anywhere. (The `conversation` root is now anchored at
-# end of input, which turns that class of mistake into a loud failure instead of
-# a silent wrong parse -- but the anchor cannot un-commit the choice, so the
-# alternatives still have to be written to discriminate on their own.)
-#
-# So the unclosed shape is spelled out in full and tried first: any number of
-# COMPLETE thought/content pairs, then a thought that has no `<channel|>`. It
-# cannot match a closed body, because the trailing `open_thought` is required and
-# a closed body has nothing left for it. `model_body` then covers everything that
-# ends in content or tool calls, including an empty body.
-open_model_body: (channel_block content)* open_thought | model_body
-
-# A thought still in progress: opener required, body captured as reasoning, no
-# closer because the model has not finished thinking.
-#
-# Reuses `reasoning` rather than naming a new rule: lark-to-peg tags a rule as
-# REASONING by matching the name exactly ("reasoning" / "thought"), so
-# `open_reasoning` would parse and then emit no reasoning event at all. Its
-# non-greedy body has no following sibling here, so it runs to end of input --
-# which is right, because an unfinished thought is the last thing in the prompt.
-open_thought: channel_open "\n" reasoning
 
 # Same shape as the generation entry, so the same decoder tags fire.
 model_body: channel_block? content (channel_block content)* tool_calls?

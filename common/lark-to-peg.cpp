@@ -603,7 +603,7 @@ std::string collect_rules(LarkLexer & lex, std::vector<RuleDef> & rule_defs) {
 // Public API
 // ──────────────────────────────────────────────────────────────────────────────
 
-common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std::string & root_rule, bool require_eof) {
+common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std::string & root_rule) {
     LarkLexer lex(lark_grammar);
     lex.tokenize();
 
@@ -722,18 +722,7 @@ common_peg_arena common_lark_to_peg(const std::string & lark_grammar, const std:
     }
 
     if (root_set) {
-        // Anchoring at end of input is what makes this a validator rather than a
-        // prefix matcher: without it, a root that matches the empty string
-        // reports success while reading none of the prompt.
-        //
-        // It does NOT rescue an ordered choice that picks a vacuous alternative.
-        // PEG commits to the first alternative that succeeds and never revisits
-        // it when a later sibling fails, so a rule like `a | b` where `a` can
-        // match empty will never reach `b`. The anchor turns that from a silent
-        // wrong parse into a loud failure at the first unread byte -- which is
-        // the point. Each alternative must be decidable where it stands.
-        builder.set_root(require_eof ? builder.sequence({ root_parser, builder.end() })
-                                     : root_parser);
+        builder.set_root(root_parser);
     }
 
     return builder.build();

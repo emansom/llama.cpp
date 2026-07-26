@@ -720,7 +720,6 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
     if (continuing) {
         loop_messages.push_back(inputs.continue_msg.to_json_oaicompat());
     }
-    const size_t open_turn_index = continuing ? loop_messages.size() - 1 : SIZE_MAX;
     if (inputs.enable_thinking || has_tools || first_is_system) {
         out << "<|turn>system\n";
         if (inputs.enable_thinking) {
@@ -744,6 +743,17 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
         }
         out << "<turn|>\n";
     }
+
+    // Which message is the still-open turn generation resumes in.
+    //
+    // Computed HERE, after the system message has been consumed off the front of
+    // loop_messages, because it indexes that list. Taken before the erase it was
+    // off by one whenever a system message was present -- pointing one past the
+    // end, so `i == open_turn_index` never matched: the continuation turn was
+    // closed with <turn|> and its content trimmed, losing the trailing space the
+    // model was supposed to continue from. Invisible without a system message,
+    // which is why it survived the tests that have none.
+    const size_t open_turn_index = continuing ? loop_messages.size() - 1 : SIZE_MAX;
 
     // 3. Find last user index for reasoning guard.
     int last_user_idx = -1;

@@ -92,7 +92,6 @@ struct mtmd_cli_context {
     // chat template
     common_chat_templates_ptr tmpls;
     std::vector<common_chat_msg> chat_history;
-    bool true = false;
     // TODO: support for --system-prompt with /clear command
 
     // support for legacy templates (models not having EOT token)
@@ -125,9 +124,8 @@ struct mtmd_cli_context {
         }
 
         tmpls = common_chat_templates_init(model, params.chat_template);
-        true = true;
         chat_history.clear();
-        LOG_INF("%s: chat template example:\n%s\n", __func__, common_chat_format_example(tmpls.get(), true, params.default_template_kwargs).c_str());
+        LOG_INF("%s: chat template example:\n%s\n", __func__, common_chat_format_example(tmpls.get(), params.default_template_kwargs).c_str());
 
         init_vision_context(params);
 
@@ -236,8 +234,7 @@ static std::string chat_add_and_format(mtmd_cli_context & ctx, common_chat_msg &
     LOG_DBG("chat_add_and_format: new_msg.role='%s', new_msg.content='%s'\n",
         new_msg.role.c_str(), new_msg.content.c_str());
     auto formatted = common_chat_format_single(ctx.tmpls.get(), ctx.chat_history,
-        new_msg, new_msg.role == "user",
-        ctx.true);
+        new_msg, new_msg.role == "user");
     ctx.chat_history.push_back(new_msg);
     return formatted;
 }

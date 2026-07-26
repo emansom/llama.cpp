@@ -1120,15 +1120,14 @@ static std::string inject_response_schema(const std::string & grammar_template, 
 // and re-imposing it during extraction would reject output the sampler had
 // legitimately produced.
 static common_peg_arena chat_grammar_to_peg(const std::string & grammar_template,
-                                           const std::string & root_rule = "start",
-                                           bool                require_eof = false) {
+                                           const std::string & root_rule = "start") {
     std::string base = grammar_template;
     const bool  lark = is_lark_grammar(base);
 
     base = replace_all(base, "{{TOOL_SCHEMA}}",     lark ? "__JSON_OBJECT__" : "([^]*)");
     base = replace_all(base, "{{RESPONSE_SCHEMA}}", lark ? "__JSON_VALUE__"  : "([^]*)");
 
-    return lark ? common_lark_to_peg(base, root_rule, require_eof) : common_gbnf_to_peg(base);
+    return lark ? common_lark_to_peg(base, root_rule) : common_gbnf_to_peg(base);
 }
 
 static common_chat_params common_chat_params_init_gemma4(const common_chat_template &    tmpl,
@@ -1159,9 +1158,7 @@ static common_chat_params common_chat_params_init_gemma4(const common_chat_templ
     {
         const auto conv_grammar = common_chat_grammar_require("gemma4");
         data.rendered_prompt     = data.prompt;
-        // require_eof: this parse validates a COMPLETE rendered prompt, so it has
-        // to account for every byte. See common_lark_to_peg.
-        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation", /* require_eof = */ true);
+        data.conversation_parser = chat_grammar_to_peg(conv_grammar, "conversation");
     }
 
     data.message_delimiters = {
@@ -1807,16 +1804,36 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             // the entry state or the prefilled content for the FSM any more --
             // it walks the conversation and knows.
             if (!params.rendered_prompt.empty() && !params.conversation_parser.empty()) {
-                // NOT lenient: this is the validator. A rendered prompt that does
-                // not parse against `conversation` is malformed input, and the
-                // whole point is to reject it here rather than send it.
-                common_peg_parse_flags cflags = COMMON_PEG_PARSE_FLAG_NONE;
+                // A rendered prompt is a PREFIX of a conversation -- it stops
+                // where generation begins -- so the last turn is legitimately
+                // incomplete. Both flags are needed to say that:
+                //
+                //   STREAMING makes a repetition report NEED_MORE at EOF instead
+                //   of quietly ending, so the incomplete turn's partial nodes
+                //   still reach the decoder.
+                //
+                //   LENIENT makes running OUT of input a partial match rather
+                //   than a failure (peg-parser literal/EOF). Despite the name it
+                //   does not loosen what is accepted: a byte that does not match
+                //   still fails. It is the difference between "no more input" and
+                //   "wrong input", and only the second is malformed.
+                //
+                // Validation therefore still bites: a bad byte fails the parse,
+                // and a parse that stops early is caught by the end-of-input
+                // check below.
+                common_peg_parse_flags cflags = COMMON_PEG_PARSE_FLAG_STREAMING | COMMON_PEG_PARSE_FLAG_LENIENT;
                 if (params.debug) {
                     cflags |= COMMON_PEG_PARSE_FLAG_DEBUG;
                 }
                 common_peg_parse_context pctx(params.rendered_prompt, cflags);
                 auto presult = params.conversation_parser.parse(pctx);
-                if (presult.fail()) {
+                // Every byte must be accounted for. Checked here rather than by
+                // anchoring the grammar at end-of-input, because "wants more
+                // input" is a success for a prefix and the anchor cannot express
+                // that. Without the check a rule like `closed_turn*` reports
+                // success having read nothing at all -- validation that validates
+                // nothing.
+                if (presult.fail() || presult.end != params.rendered_prompt.size()) {
                     throw std::runtime_error(
                         "rendered prompt failed `conversation` validation at offset " +
                         std::to_string(presult.end) + ": " +
