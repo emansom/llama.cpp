@@ -327,6 +327,32 @@ user_content: {{USER_GRAMMAR}}
 resume_reasoning: reasoning channel_close_tag turn_tail
 resume_reasoning_tool_call: reasoning channel_close_tag tool_call_request
 
+# The THIRD generation entry: the prompt ended mid-content (entry_state
+# IN_CONTENT), so the thought phase is already behind the model.
+#
+# These are `turn_start`'s four rules minus the leading `channel_block?`, and
+# that subtraction is the whole point. Sharing `turn_start` let a turn open a
+# thought the ordering says it is past, and the state that reaches here is
+# EXACTLY the state where that is wrong:
+#
+#   * the empty-thought prefill (`enable_thinking: false`), which opened AND
+#     CLOSED a thought in the prompt -- so another one is a SECOND thought;
+#   * `continue_final_message` resuming mid-answer, where the model is part-way
+#     through a sentence;
+#   * carrying on in the same turn after a tool response with thinking off.
+#
+# The first is the one that matters in practice. The empty-thought prefill exists
+# to suppress the "ghost thought channel" Gemma 4 emits on a thinking-off
+# structured call -- Google's own fix, and without it a call burns ~4050 tokens
+# and returns nothing (measured: 10/100 failures on E2B against its own template,
+# 0/100 against the 12B-it one). That prefill is prompt-shaping, which is a
+# nudge; this makes the same thing STRUCTURAL, so a thinking-off request cannot
+# open a thought channel whatever the model would prefer.
+resume_content: turn_tail
+resume_content_tool_call: tool_call_request
+resume_content_response_format: {{TOOL_CALL_ALT}} response_format turn_close_tag?
+resume_content_user_grammar: {{TOOL_CALL_ALT}} user_content turn_close_tag?
+
 # --- Assistant turn continuation (sampler entry) -------------------------------
 #
 # A channel is the tag plus its KIND. `thought` is the only kind the model emits

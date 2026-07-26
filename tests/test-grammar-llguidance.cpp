@@ -1591,11 +1591,22 @@ static void test_gemma4_mask_walk() {
     }
     fprintf(stderr, "    EOS allowed at end: %s\n", eos_at_end ? "yes" : "NO");
 
-    // 1. The turn cannot begin with prose. tool_choice=required removed the
-    //    content branch, so the very first token is already constrained -- to a
-    //    call, or to opening a thought first (`channel_block?`).
+    // 1. The turn has exactly ONE legal first token, and the two constraints
+    //    that produce that are worth reading together. tool_choice=required
+    //    removed the content branch; `enable_thinking: false` put the
+    //    empty-thought prefill in the prompt, which leaves the model at
+    //    IN_CONTENT -- an entry whose rules carry no `channel_block?`, because
+    //    the thought phase is over.
+    //
+    //    So opening a thought is not merely unlikely on a thinking-off call, it
+    //    is unrepresentable. This used to read
+    //    `{ "<|channel>", "<|tool_call>" }`: the state shared `turn_start`, and a
+    //    request that asked for no thinking could open a thought channel anyway
+    //    -- the "ghost channel" the prefill exists to suppress, still reachable
+    //    through the grammar.
     assert(!steps[0].text_allowed);
-    assert((steps[0].allowed == std::vector<std::string>{ "<|channel>", "<|tool_call>" }));
+    assert((steps[0].allowed == std::vector<std::string>{ "<|tool_call>" }));
+    assert(steps[0].n_allowed == 1);
 
     // 2. Nowhere in a tool call is prose legal EXCEPT inside the string argument,
     //    whose body is deliberately unrestricted (a city name is arbitrary text).
@@ -1968,6 +1979,57 @@ static void test_gemma4_fsm_conformance(const std::string & grammars_dir) {
             },
             /* tools = */ true,
         },
+        // ── IN_CONTENT: the thought phase is already over ─────────────────────
+        //
+        // Reached by the empty-thought prefill (every `enable_thinking: false`
+        // request), by continue_final_message mid-answer, and by carrying on
+        // after a tool response with thinking off. In all three the prompt has
+        // passed the thought, so `<|channel>` must be gone from the very first
+        // mask -- these four entries are the turn_start ones minus that opener.
+        {
+            "resume_content", "mid-content: no second thought, whatever else is legal",
+            "Hello.<turn|>",
+            {
+                { "", { "<turn|>", "<|tool_call>" }, { "<|channel>", "<channel|>", "<|tool_response>" }, 1 },
+                { "Hello.", { "<turn|>", "<|tool_call>" }, { "<|channel>", "<channel|>" }, 1 },
+            },
+            /* tools = */ true,
+        },
+        {
+            "resume_content", "mid-content, no tools: only prose and the closer",
+            "Hello.<turn|>",
+            {
+                { "", { "<turn|>" }, { "<|channel>", "<|tool_call>", "<channel|>" }, 1 },
+            },
+            /* tools = */ false,
+        },
+        {
+            "resume_content_tool_call", "thinking off + tool_choice=required: the call is FORCED",
+            CALL + "f{}" + CALL_END + HANDOVER,
+            {
+                // One legal token, and it is the call. No thought to hide in and
+                // no prose to stall with -- the strongest guarantee in the file.
+                { "", { "<|tool_call>" },
+                     { "<|channel>", "<channel|>", "<turn|>", "<|tool_response>" }, 0 },
+            },
+            /* tools = */ true,
+        },
+        {
+            "resume_content_response_format", "thinking off + a schema: straight to the block",
+            "```json\n{}\n```",
+            {
+                { "", { }, { "<|channel>", "<channel|>", "<turn|>", "<|tool_call>" }, 0 },
+            },
+            /* tools = */ false,
+        },
+        {
+            "resume_content_user_grammar", "thinking off + a caller grammar",
+            "anything<turn|>",
+            {
+                { "", { "<turn|>" }, { "<|channel>", "<channel|>", "<|tool_call>" }, 1 },
+            },
+            /* tools = */ false,
+        },
     };
 
     for (const auto & tc : cases) {
@@ -2023,12 +2085,16 @@ static void test_gemma4_user_grammar() {
 
     auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, "gemma4"));
 
-    auto compile_for = [&](const std::string & grammar) {
+    // `thinking` decides which FSM state the prompt leaves the model in, and so
+    // which entry the grammar is rooted at: on -> the prompt stops at
+    // `<|turn>model` (IN_GENERATION_PROMPT, may open a thought); off -> the
+    // empty-thought prefill lands it at IN_CONTENT, past the thought phase.
+    auto compile_for = [&](const std::string & grammar, bool thinking) {
         common_chat_templates_inputs inputs;
         inputs.messages              = { user };
         inputs.grammar               = grammar;
         inputs.add_generation_prompt = true;
-        inputs.enable_thinking       = false;
+        inputs.enable_thinking       = thinking;
         auto params = common_chat_templates_apply(tmpls.get(), inputs);
         // The composed artefact is a grammar LIST, not a bare Lark string: the
         // caller's grammar is the second entry, referenced by name from the
@@ -2065,10 +2131,17 @@ static void test_gemma4_user_grammar() {
     };
 
     for (const auto & p : pairs) {
-        auto * lark = compile_for(p.lark);
-        auto * gbnf = compile_for(p.gbnf);
+        // Both thinking settings, because they root the grammar at different
+        // entries and the difference is exactly what the caller asked for:
+        // thinking on, the model may reason first and then answer in the
+        // grammar; thinking off, it goes straight to the answer and cannot open
+        // a channel at all.
+        auto * lark    = compile_for(p.lark, /* thinking = */ false);
+        auto * gbnf    = compile_for(p.gbnf, /* thinking = */ false);
+        auto * lark_th = compile_for(p.lark, /* thinking = */ true);
 
-        for (auto * smpl : { lark, gbnf }) {
+        for (auto * smpl : { lark, gbnf, lark_th }) {
+            const bool thinking = (smpl == lark_th);
             auto steps = walk_mask(p.generation, smpl, text_probes, nullptr, markers);
             assert(!steps.empty());
 
@@ -2076,10 +2149,12 @@ static void test_gemma4_user_grammar() {
             // the mask has to say so. This is the whole difference between a
             // grammar that is enforced and one that was merely sent.
             assert(!steps[0].text_allowed);
-            // A thought is still allowed first: the caller constrained the
-            // ANSWER, not the reasoning channel.
-            assert(steps[0].allowed_markers.count("<|channel>") == 1);
-            // ...and cannot end the turn before giving one.
+            // The caller constrained the ANSWER, not the reasoning channel -- so
+            // a thought is available exactly when the request asked for one, and
+            // never otherwise. With thinking off the empty-thought prefill has
+            // already opened and closed one, and a second is unrepresentable.
+            assert(steps[0].allowed_markers.count("<|channel>") == (thinking ? 1u : 0u));
+            // ...and either way the turn cannot end before an answer is given.
             assert(steps[0].allowed_markers.count("<turn|>") == 0);
 
             // Having answered, closing the turn is all that is left.
@@ -2106,6 +2181,7 @@ static void test_gemma4_user_grammar() {
 
         llama_sampler_free(lark);
         llama_sampler_free(gbnf);
+        llama_sampler_free(lark_th);
     }
     fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response_format lark_grammar/gbnf_grammar: same mask, prose masked\n");
 }
@@ -2165,6 +2241,17 @@ static void test_gemma4_entry_selection() {
     half_thought.role              = "assistant";
     half_thought.reasoning_content = "let me think";
 
+    // A completed round trip: the model called a tool, the runtime answered, and
+    // the turn is still open for the model to continue in.
+    common_chat_msg tool_caller;
+    tool_caller.role = "assistant";
+    tool_caller.tool_calls.push_back({ "get_time", R"({"city":"Oslo"})", "call_1" });
+
+    common_chat_msg tool_result;
+    tool_result.role         = "tool";
+    tool_result.content      = "13:45";
+    tool_result.tool_call_id = "call_1";
+
     struct sel_case {
         const char *                 label;
         std::vector<common_chat_msg> messages;
@@ -2175,6 +2262,9 @@ static void test_gemma4_entry_selection() {
         std::string                  json_schema;
         std::string                  grammar;
         const char *                 expect_root;
+        // Thinking off makes the renderer emit the empty-thought prefill, which
+        // is what puts the model at IN_CONTENT rather than IN_GENERATION_PROMPT.
+        bool                         thinking = true;
     };
 
     const std::vector<sel_case> cases = {
@@ -2210,6 +2300,41 @@ static void test_gemma4_entry_selection() {
           { user, half_thought }, COMMON_CHAT_CONTINUATION_REASONING, false, {},
           COMMON_CHAT_TOOL_CHOICE_AUTO, "", "%llguidance {}\nstart: \"yes\"\n",
           "resume_reasoning_user_grammar" },
+        // And a third state. `enable_thinking: false` makes the renderer emit
+        // the empty-thought prefill, which opens AND closes a thought in the
+        // prompt -- so the model is at IN_CONTENT, past the thought phase, and
+        // gets entries that cannot open another.
+        { "thinking off (prefill), no demand",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
+          "resume_content", /* thinking = */ false },
+        { "thinking off (prefill), tool_choice=required",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, { get_time }, COMMON_CHAT_TOOL_CHOICE_REQUIRED, "", "",
+          "resume_content_tool_call", /* thinking = */ false },
+        { "thinking off (prefill), response_format json_schema",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO,
+          R"({"type":"object"})", "",
+          "resume_content_response_format", /* thinking = */ false },
+        { "thinking off (prefill), response_format lark_grammar",
+          { user }, COMMON_CHAT_CONTINUATION_NONE, true, {}, COMMON_CHAT_TOOL_CHOICE_AUTO, "",
+          "%llguidance {}\nstart: \"yes\"\n",
+          "resume_content_user_grammar", /* thinking = */ false },
+        // After a TOOL RESPONSE the turn is still open and the model is about to
+        // speak in it for the first time -- so it may think or answer, and the
+        // entry has to be the one that permits both.
+        //
+        // Thinking on, the renderer emits the re-opener and generation resumes
+        // INSIDE it. Thinking off it emits nothing, and this used to fall
+        // through to IN_CONTENT's default -- which was harmless only while
+        // IN_CONTENT still allowed a leading thought. It does not any more, and
+        // the 12B degenerated into emitting the word "thought" as prose.
+        { "after a tool response, thinking on",
+          { user, tool_caller, tool_result }, COMMON_CHAT_CONTINUATION_NONE, true, { get_time },
+          COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
+          "resume_reasoning", /* thinking = */ true },
+        { "after a tool response, thinking off",
+          { user, tool_caller, tool_result }, COMMON_CHAT_CONTINUATION_NONE, true, { get_time },
+          COMMON_CHAT_TOOL_CHOICE_AUTO, "", "",
+          "turn_start", /* thinking = */ false },
     };
 
     fprintf(stderr, "\n  entry rule selected from the FSM state:\n");
@@ -2222,7 +2347,7 @@ static void test_gemma4_entry_selection() {
         inputs.grammar               = tc.grammar;
         inputs.continue_final_message = tc.continuation;
         inputs.add_generation_prompt  = tc.generation_prompt;
-        inputs.enable_thinking        = true;
+        inputs.enable_thinking        = tc.thinking;
 
         auto        params = common_chat_templates_apply(tmpls.get(), inputs);
         const auto  root   = entry_root_of(params.grammar);

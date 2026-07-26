@@ -421,8 +421,15 @@ static const std::unordered_map<common_chat_format_state, gemma4_entry_root> gem
       { "turn_start", "turn_start_tool_call", "turn_start_response_format", "turn_start_user_grammar" } },
     // Mid-content: either a plain content continuation, or the empty-thought
     // prefill, which opened AND closed a thought so the model resumes in content.
+    //
+    // Its OWN family, not `turn_start`'s. Sharing them meant a turn whose thought
+    // phase is demonstrably over could still open one -- a second thought after
+    // the prefill, or a thought spliced into the middle of a sentence the caller
+    // had already begun. The `resume_content*` rules are the `turn_start*` ones
+    // without the leading `channel_block?`.
     { common_chat_format_state::IN_CONTENT,
-      { "turn_start", "turn_start_tool_call", "turn_start_response_format", "turn_start_user_grammar" } },
+      { "resume_content", "resume_content_tool_call", "resume_content_response_format",
+        "resume_content_user_grammar" } },
     // Mid-thought: the delta begins inside `reasoning`, with the opener already
     // in the prompt and the `<channel|>` closer still to come.
     { common_chat_format_state::IN_REASONING,
@@ -1152,6 +1159,28 @@ common_chat_gemma4_rendered common_chat_gemma4_render(const autoparser::generati
         // the entry-root registry sends that to `resume_reasoning`.
         out << "<|channel>thought\n";
         entry = common_chat_format_state::IN_REASONING;
+    } else if (inputs.add_generation_prompt && prev_message_type == PREV_TOOL_RESPONSE) {
+        // The same position with thinking OFF: no re-opener is rendered, so the
+        // model is at the START of its post-tool utterance and has said nothing
+        // in it yet. That is what IN_GENERATION_PROMPT means -- about to speak,
+        // may open a thought or answer directly -- even though no `<|turn>model`
+        // was emitted, because the turn never closed.
+        //
+        // Stated rather than left to the IN_CONTENT default it used to fall
+        // through to. Once IN_CONTENT stopped permitting a leading thought, that
+        // default became wrong in a way that was easy to miss and expensive
+        // live: the 12B reaches hard for a thought after a tool result, and with
+        // `<|channel>` masked it emitted the WORD instead and never stopped --
+        //
+        //   content: '            thought\n  The user is asking for the contents...'
+        //   finish_reason: length
+        //
+        // Blocking it is not what the format says either. The re-opener is the
+        // renderer's to emit when thinking is on; with thinking off the model
+        // simply has not been given one, which is not the same as being past the
+        // thought phase. The prefill states "already thought, move on"; nothing
+        // states that here.
+        entry = common_chat_format_state::IN_GENERATION_PROMPT;
     } else if (inputs.has_continuation()) {
         // Resuming inside the model's own turn: the prompt ends mid-thought when
         // the continuation carries reasoning, otherwise mid-content.
