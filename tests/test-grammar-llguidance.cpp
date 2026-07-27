@@ -2264,37 +2264,27 @@ static void test_gemma4_response_schema_whitespace() {
     {
         const auto line = json_line(grammar_for(schema));
 
-        // Not merely "some x-guidance": the specific setting that corrupts.
-        if (line.find("\"whitespace_flexible\":false") != std::string::npos ||
-            line.find("\"whitespace_flexible\": false") != std::string::npos) {
-            fprintf(stderr, "    FAIL: whitespace is forbidden outright -- see the comment above\n    %s\n",
+        // NO x-guidance IS ADDED. This assertion is inverted from what it was,
+        // because the setting it used to require was measured to be the worst
+        // of the three options rather than the best.
+        //
+        // The reasoning that produced it: llguidance's default whitespace can
+        // repeat, so pin it to a single space instead. The flaw: the pattern
+        // becomes the grammar's SKIP, and a skip re-applies between every pair
+        // of tokens, so " " means "one space, arbitrarily often" -- pinning it
+        // bounds nothing. Worse, removing the newline makes a model trained on
+        // pretty-printed JSON pile probability onto the one whitespace
+        // character still legal. Measured on a nested-array schema, 12B, N=25:
+        //   default [\x20\x0A\x0D\x09]+   0/25 runaway
+        //   whitespace_pattern " "         4/25 runaway (~36 kB of spaces)
+        //   whitespace_flexible false      0/25 runaway, but 6/20 clean strings
+        // The default is the only setting clean in BOTH regimes.
+        if (line.find("x-guidance") != std::string::npos) {
+            fprintf(stderr, "    FAIL: an x-guidance override was injected; the default is what works\n    %s\n",
                     line.c_str());
             assert(false);
         }
-
-        const auto key = line.find("\"whitespace_pattern\":");
-        if (key == std::string::npos) {
-            fprintf(stderr, "    FAIL: no whitespace_pattern set; llguidance's default is unbounded\n    %s\n",
-                    line.c_str());
-            assert(false);
-        }
-        const auto open  = line.find('"', key + strlen("\"whitespace_pattern\":"));
-        const auto close = line.find('"', open + 1);
-        const auto pat   = line.substr(open + 1, close - open - 1);
-
-        // Non-empty: a skip that can match the empty string can be taken over and
-        // over, which is the runaway with extra steps.
-        if (pat.empty() || pat.back() == '?' || pat.back() == '*' || pat.find("{0,") != std::string::npos) {
-            fprintf(stderr, "    FAIL: whitespace pattern '%s' can match empty and loop\n", pat.c_str());
-            assert(false);
-        }
-        // Newline-free: bounding the lexeme does not bound the sequence, since the
-        // skip node repeats. Removing the newline is what actually stops it.
-        if (pat.find('\n') != std::string::npos || pat.find("\\n") != std::string::npos) {
-            fprintf(stderr, "    FAIL: whitespace pattern '%s' admits a newline to run away on\n", pat.c_str());
-            assert(false);
-        }
-        fprintf(stderr, "\n    whitespace_pattern = '%s'  (non-empty, newline-free)\n", pat.c_str());
+        fprintf(stderr, "\n    no whitespace override injected (llguidance default)\n");
     }
 
     {
@@ -2313,7 +2303,7 @@ static void test_gemma4_response_schema_whitespace() {
         fprintf(stderr, "    caller-supplied x-guidance preserved\n");
     }
 
-    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response-schema whitespace: non-empty, newline-free, caller wins\n");
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response-schema whitespace: llguidance default, caller override wins\n");
 }
 
 static void test_gemma4_entry_selection() {
