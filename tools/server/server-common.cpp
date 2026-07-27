@@ -1199,12 +1199,26 @@ json oaicompat_chat_params_parse(
         }
     }
 
-    // Parse also the OAI "reasoning_effort": "none" specific value
+    // "reasoning_effort" is the OAI-official spelling of the same toggle, and
+    // it is read in BOTH directions rather than only for "none".
+    //
+    // The DEGREE is model-specific and still unhandled -- llama.cpp has no
+    // notion of how much a model should think. But whether to think at all is
+    // not model-specific: OpenAI documents "none" as disabling reasoning, so
+    // every other value necessarily asks for it. Acting on only half of that
+    // left a client with no OAI-spec way to say "think" -- it could turn
+    // reasoning off but not on, so thinking-on silently inherited whatever
+    // --reasoning the server happened to be started with, and a request could
+    // not pin it. Requests already override the server default via
+    // chat_template_kwargs.enable_thinking and "thinking"; this makes the
+    // standard spelling as capable as the two extensions.
     if (body.contains("reasoning_effort")) {
         auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));
         if (reasoning_effort == "none") {
             inputs.enable_thinking = false;
-        } // other reasoning_effort values are model-specific and not yet handled
+        } else if (!reasoning_effort.empty()) {
+            inputs.enable_thinking = true;
+        }
     }
 
     inputs.force_pure_content = opt.force_pure_content;

@@ -177,3 +177,41 @@ def test_responses_stream_reports_truncation_as_incomplete():
     assert final is not None
     assert final.status == "incomplete"
     assert final.incomplete_details.reason == "max_output_tokens"
+
+
+def _has_reasoning(res) -> bool:
+    return any(item.type == "reasoning" and item.content for item in res.output)
+
+
+def test_responses_reasoning_effort_pins_thinking_both_ways():
+    """reasoning_effort is the OAI-spec spelling of the thinking toggle, and a
+    request must be able to set it in BOTH directions.
+
+    Only "none" used to be read, so a client could turn reasoning off but not
+    on: asking for it inherited whatever --reasoning the server was started
+    with, and there was no spec-compliant way to override that. This server is
+    started with reasoning OFF (see ServerPreset.gemma4), so an effort level
+    that produces a thought channel here can only have come from the request.
+
+    The DEGREE stays unhandled on purpose -- llama.cpp has no notion of how
+    much a model should think. Whether to think at all is not model-specific.
+    """
+    global server
+    server = ServerPreset.gemma4()
+    server.start()
+    client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+
+    def ask(**kwargs):
+        return client.responses.create(
+            model=server.model_alias,
+            input=[{"role": "user", "content": "Is 91 prime?"}],
+            max_output_tokens=200,
+            **kwargs,
+        )
+
+    assert _has_reasoning(ask(reasoning={"effort": "medium"})), \
+        "an effort level must turn thinking on despite --reasoning off"
+    assert not _has_reasoning(ask(reasoning={"effort": "none"})), \
+        "effort none must turn thinking off"
+    assert not _has_reasoning(ask()), \
+        "with no effort stated the server default (off) must stand"
