@@ -1949,6 +1949,106 @@ static void test_convert_responses_to_chatcmpl() {
 
         assert_equals(false, result.contains("tools"));
     }
+
+    // text.format is the Responses API's structured-output request, and is the
+    // counterpart of Chat Completions' response_format. Untranslated it passed
+    // straight through as an unknown "text" field, so no grammar was built and
+    // the call quietly returned prose — valid output that simply is not the
+    // JSON the caller constrained for. Property ORDER is asserted too: it is
+    // what llguidance generates in, so a reordering here would silently change
+    // what the model emits.
+    {
+        json input = json::parse(R"({
+            "input": "Hello",
+            "model": "test-model",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "verdict",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "feedback": {"type": "string"},
+                            "approved": {"type": "boolean"}
+                        },
+                        "required": ["feedback", "approved"]
+                    }
+                }
+            }
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals(false, result.contains("text"));
+        assert_equals(true, result.contains("response_format"));
+
+        const json & rf = result.at("response_format");
+        assert_equals(std::string("json_schema"), rf.at("type").get<std::string>());
+
+        const json & js = rf.at("json_schema");
+        assert_equals(std::string("verdict"), js.at("name").get<std::string>());
+        assert_equals(true, js.at("strict").get<bool>());
+        // "type" belongs to the outer response_format, not the inner object.
+        assert_equals(false, js.contains("type"));
+
+        const json & props = js.at("schema").at("properties");
+        std::vector<std::string> keys;
+        for (auto it = props.begin(); it != props.end(); ++it) {
+            keys.push_back(it.key());
+        }
+        assert_equals(size_t(2), keys.size());
+        assert_equals(std::string("feedback"), keys[0]);
+        assert_equals(std::string("approved"), keys[1]);
+    }
+
+    // json_object needs no schema and maps to the bare response_format.
+    {
+        json input = json::parse(R"({
+            "input": "Hello",
+            "model": "test-model",
+            "text": {"format": {"type": "json_object"}}
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals(false, result.contains("text"));
+        assert_equals(std::string("json_object"),
+                      result.at("response_format").at("type").get<std::string>());
+    }
+
+    // "text" is the default, unconstrained format: the field is consumed but no
+    // response_format is set, so the request stays a plain completion.
+    {
+        json input = json::parse(R"({
+            "input": "Hello",
+            "model": "test-model",
+            "text": {"format": {"type": "text"}}
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals(false, result.contains("text"));
+        assert_equals(false, result.contains("response_format"));
+    }
+
+    // A json_schema format with no schema is a caller error, not something to
+    // silently downgrade to an unconstrained call.
+    {
+        json input = json::parse(R"({
+            "input": "Hello",
+            "model": "test-model",
+            "text": {"format": {"type": "json_schema", "name": "x"}}
+        })");
+
+        bool threw = false;
+        try {
+            server_chat_convert_responses_to_chatcmpl(input);
+        } catch (const std::invalid_argument &) {
+            threw = true;
+        }
+        assert_equals(true, threw);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser

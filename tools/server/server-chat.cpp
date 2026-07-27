@@ -292,6 +292,47 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
         chatcmpl_body.erase("reasoning");
     }
 
+    // "text.format" is how the Responses API asks for structured output; it is
+    // the exact counterpart of Chat Completions' "response_format". Without
+    // this translation the field is copied through verbatim (chatcmpl_body
+    // starts as a copy of the whole request), no grammar is ever built, and
+    // the call silently returns unconstrained prose. That is the worst failure
+    // shape available to a schema-constrained caller: nothing errors, and the
+    // response is a perfectly valid string that simply is not the JSON asked
+    // for.
+    //
+    // The two spellings differ only in nesting. Responses puts name/schema/
+    // strict directly on the format object; Chat Completions wraps them in a
+    // "json_schema" member.
+    if (response_body.contains("text")) {
+        const json & text = response_body.at("text");
+        chatcmpl_body.erase("text");
+        if (text.is_object() && text.contains("format")) {
+            json format = text.at("format");
+            if (!format.is_object()) {
+                throw std::invalid_argument("'text.format' must be an object");
+            }
+            const std::string type = json_value(format, "type", std::string());
+            if (type == "json_schema") {
+                if (!format.contains("schema")) {
+                    throw std::invalid_argument("'text.format' of type 'json_schema' requires 'schema'");
+                }
+                format.erase("type");
+                chatcmpl_body["response_format"] = {
+                    { "type",        "json_schema" },
+                    { "json_schema", format        },
+                };
+            } else if (type == "json_object") {
+                chatcmpl_body["response_format"] = {
+                    { "type", "json_object" },
+                };
+            } else if (!type.empty() && type != "text") {
+                throw std::invalid_argument("unsupported 'text.format.type': " + type);
+            }
+            // "text" is the default, unconstrained case: nothing to set.
+        }
+    }
+
     return chatcmpl_body;
 }
 
