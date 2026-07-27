@@ -608,7 +608,6 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
         {"model",        oaicompat_model},
         {"object",       "response"},
         {"output",       output},
-        {"status",       "completed"},
         {"usage",        json {
             {"input_tokens",  n_prompt_tokens},
             {"output_tokens", n_decoded},
@@ -617,7 +616,31 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
         }},
     };
 
+    set_oai_resp_status(res);
+
     return res;
+}
+
+// Report truncation the way the Responses API defines it.
+//
+// "status" was hardcoded to "completed", so a generation that ran into the
+// token cap was indistinguishable from one that finished — the same
+// information Chat Completions has always carried as finish_reason: "length"
+// was simply dropped on this endpoint. A client had no way to tell a complete
+// answer from a severed one, which is worse than an error: half a JSON object
+// looks like data, and half an answer reads like an answer.
+//
+// The spec pairs status: "incomplete" with incomplete_details.reason, and
+// "max_output_tokens" is the reason for a token-cap stop. Both are set here so
+// a caller can branch on either.
+void server_task_result_cmpl_final::set_oai_resp_status(json & res) const {
+    if (stop == STOP_TYPE_LIMIT) {
+        res["status"] = "incomplete";
+        res["incomplete_details"] = json { {"reason", "max_output_tokens"} };
+    } else {
+        res["status"] = "completed";
+        res["incomplete_details"] = nullptr;
+    }
 }
 
 json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
@@ -709,24 +732,29 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
     }
 
     std::time_t t = std::time(0);
+    json response = {
+        {"id",         oai_resp_id},
+        {"object",     "response"},
+        {"created_at", t},
+        {"model",      oaicompat_model},
+        {"output",     output},
+        {"usage",      json {
+            {"input_tokens",  n_prompt_tokens},
+            {"output_tokens", n_decoded},
+            {"total_tokens",  n_decoded + n_prompt_tokens},
+            {"input_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
+        }},
+    };
+    set_oai_resp_status(response);
+
+    // The event name stays "response.completed" even when the response is
+    // incomplete: it marks the end of the stream, and the status inside the
+    // payload is what says how it ended.
     server_sent_events.push_back(json {
         {"event", "response.completed"},
         {"data", json {
             {"type", "response.completed"},
-            {"response", json {
-                {"id",         oai_resp_id},
-                {"object",     "response"},
-                {"created_at", t},
-                {"status",     "completed"},
-                {"model",      oaicompat_model},
-                {"output",     output},
-                {"usage",      json {
-                    {"input_tokens",  n_prompt_tokens},
-                    {"output_tokens", n_decoded},
-                    {"total_tokens",  n_decoded + n_prompt_tokens},
-                    {"input_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
-                }}
-            }},
+            {"response", response},
         }}
     });
 

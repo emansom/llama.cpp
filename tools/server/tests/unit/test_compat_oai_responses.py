@@ -112,3 +112,68 @@ def test_responses_stream_with_llama_telemetry():
     assert completed is not None
     assert "usage" in completed["response"]
     assert "timings" in completed
+
+
+def test_responses_reports_truncation_as_incomplete():
+    """A token-cap stop must be reported as incomplete, not as a finished answer.
+
+    status was hardcoded to "completed", so a severed generation was
+    indistinguishable from a whole one -- the information Chat Completions has
+    always carried as finish_reason "length" was simply dropped here. That is
+    worse than an error: half a JSON object still parses as data, and half an
+    answer still reads like an answer.
+    """
+    global server
+    server = ServerPreset.gemma4()
+    server.start()
+    client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+    res = client.responses.create(
+        model=server.model_alias,
+        input=[{"role": "user", "content": "Write a very long story about a book"}],
+        max_output_tokens=8,
+    )
+    assert res.status == "incomplete"
+    assert res.incomplete_details is not None
+    assert res.incomplete_details.reason == "max_output_tokens"
+    # The cap really was the reason, rather than the model happening to stop.
+    assert res.usage.output_tokens == 8
+
+
+def test_responses_reports_a_natural_stop_as_completed():
+    """The other half of the pair: a generation that ends on its own must not
+    be labelled incomplete, or the status is noise rather than signal."""
+    global server
+    server = ServerPreset.gemma4()
+    server.start()
+    client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+    res = client.responses.create(
+        model=server.model_alias,
+        input=[{"role": "user", "content": "Hello"}],
+        max_output_tokens=200,
+    )
+    assert res.status == "completed"
+    assert res.incomplete_details is None
+    assert res.usage.output_tokens < 200
+
+
+def test_responses_stream_reports_truncation_as_incomplete():
+    """The streaming form carries its own copy of the response payload, so it
+    needs the same status -- a client must not have to know which form it asked
+    for to learn that the output was severed."""
+    global server
+    server = ServerPreset.gemma4()
+    server.start()
+    client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+    stream = client.responses.create(
+        model=server.model_alias,
+        input=[{"role": "user", "content": "Write a very long story about a book"}],
+        max_output_tokens=8,
+        stream=True,
+    )
+    final = None
+    for event in stream:
+        if event.type == "response.completed":
+            final = event.response
+    assert final is not None
+    assert final.status == "incomplete"
+    assert final.incomplete_details.reason == "max_output_tokens"

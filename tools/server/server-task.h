@@ -405,6 +405,13 @@ struct server_task_result_cmpl_final : server_task_result {
 
     json to_json_oaicompat_resp_stream();
 
+    // Sets "status" and "incomplete_details" on a Responses payload from the
+    // stop reason, so a token-cap stop is reported as incomplete rather than
+    // as a finished answer. Shared by the streaming and non-streaming forms,
+    // because a client must not have to know which one it asked for to learn
+    // that the output was severed.
+    void set_oai_resp_status(json & res) const;
+
     json to_json_oaicompat_asr();
 
     json to_json_anthropic();
