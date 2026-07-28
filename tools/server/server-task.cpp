@@ -721,6 +721,21 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
             {"call_id",   "call_" + tool_call.id},
             {"name",      tool_call.name}
         };
+        // Terminate the argument stream before closing the item. The partial
+        // path emits response.function_call_arguments.delta per chunk, and this
+        // is its documented terminator. A client that materialises the call when
+        // the arguments finish -- which is what the OpenAI SDKs expose -- sees
+        // the deltas, never sees an end, and so never surfaces a call at all:
+        // generation looks healthy and the tool silently never runs.
+        server_sent_events.push_back(json {
+            {"event", "response.function_call_arguments.done"},
+            {"data", json {
+                {"type",      "response.function_call_arguments.done"},
+                {"item_id",   "fc_" + tool_call.id},
+                {"name",      tool_call.name},
+                {"arguments", tool_call.arguments},
+            }}
+        });
         server_sent_events.push_back(json {
             {"event", "response.output_item.done"},
             {"data", json {

@@ -215,3 +215,59 @@ def test_responses_reasoning_effort_pins_thinking_both_ways():
         "effort none must turn thinking off"
     assert not _has_reasoning(ask()), \
         "with no effort stated the server default (off) must stand"
+
+
+def test_responses_stream_terminates_function_call_arguments():
+    """A streamed tool call must end with response.function_call_arguments.done.
+
+    The server used to emit only the .delta events and close the item, so a
+    client that materialises the call when the arguments finish -- which is what
+    the OpenAI SDKs expose -- accumulated the arguments and never saw an end.
+    It therefore never surfaced a call at all: the generation looked healthy,
+    the tool silently never ran, and the caller re-asked in a loop.
+
+    Assert the terminator exists, that it agrees with the deltas that preceded
+    it, and that it precedes the item's close -- an end that arrives after the
+    item is done is not a terminator.
+    """
+    global server
+    server = ServerPreset.gemma4()
+    server.start()
+    client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
+    stream = client.responses.create(
+        model=server.model_alias,
+        input=[{"role": "user", "content": "What is the weather in Paris?"}],
+        tools=[{
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        }],
+        tool_choice="required",
+        max_output_tokens=200,
+        stream=True,
+    )
+
+    deltas: dict[str, str] = {}
+    done: list = []
+    order: list[str] = []
+    for event in stream:
+        if event.type == "response.function_call_arguments.delta":
+            deltas[event.item_id] = deltas.get(event.item_id, "") + event.delta
+        elif event.type == "response.function_call_arguments.done":
+            done.append(event)
+            order.append("args_done")
+        elif event.type == "response.output_item.done":
+            order.append("item_done")
+
+    assert done, "a streamed tool call emitted no function_call_arguments.done"
+    for event in done:
+        assert event.name, "the terminator must name the function"
+        assert event.arguments == deltas.get(event.item_id), \
+            "the terminator's arguments must match the deltas it terminates"
+    assert order.index("args_done") < order.index("item_done"), \
+        "the arguments must be terminated before the item is closed"
