@@ -1308,6 +1308,182 @@ static std::string gemma4_compose_grammars(const std::string & format_grammar,
     return json{ { "grammars", grammars } }.dump();
 }
 
+// --- Structured output: a JSON skeleton with BOUNDED whitespace --------------
+//
+// A grammar says what may come next. It cannot say "and get on with it", and
+// llguidance's skip regex is where that bites: a skip re-applies between every
+// pair of lexemes, so `[\x20\x0A\x0D\x09]+` at one joint means "whitespace,
+// arbitrarily often". Measured live, the Validator stalled 1 run in 25 at the
+// single joint between the `approved` KEY and its `:` -- 30669 whitespace
+// tokens, the token cap, no verdict. The VALUE was constrained correctly the
+// whole time; only true/false could ever have followed the colon.
+//
+// The skip is a property of the `%json` grammar, so the fix is to stop asking
+// `%json` for the joints. This emits the composite structure -- objects and
+// arrays, the only things that HAVE joints -- as Lark, where gemma4.lark
+// declares no %ignore and therefore contributes no skip, and writes the
+// whitespace in explicitly as a BOUNDED regex. A regex in a rule appears once,
+// where written; that is the whole difference from a skip.
+//
+// Scalars still go to `%json`. llguidance compiles null/boolean/number/string
+// to a single lexeme (parser/src/json/compiler.rs regex_compile), so they hold
+// no joint of their own, and delegating keeps their language exactly
+// llguidance's rather than a hand-written JSON string regex that would differ
+// somewhere subtle.
+//
+// WHY BOUNDED AND NOT FORBIDDEN. Two earlier attempts overrode whitespace
+// globally and both made things worse, in opposite directions:
+//
+//   1. RUNAWAY. `whitespace_pattern " "` -- 4/25 on a nested-array schema, then
+//      19/100 on the real Architect schema, each burning the token cap on ~36 kB
+//      of spaces. It reads as "one space" and means "one space, repeated".
+//
+//   2. CORRUPTED STRINGS. `whitespace_flexible: false` deletes the skip, so
+//      after `"key":` the model's own top candidates -- ` "`, ` "#`, ` ["`, all
+//      leading with a space -- become illegal. The mask falls through to a legal
+//      MERGED token (`">`, `":`, `"]`) and the extra character lands INSIDE the
+//      string, where every byte is legal:
+//        {"canonical_query": "]}```**Canonicalized Query:** Who is ..."}
+//      100% schema-valid, and wrong. Measured on E2B: 6/20 clean.
+//
+// Bounding is neither. Whitespace stays legal exactly where it is legal today,
+// so ` "` is still samplable and (2) cannot arise; it simply cannot run past
+// GEMMA4_JSON_WS_MAX characters at any one joint, so (1) cannot either. A
+// pretty-printer at depth 8 with a two-space indent wants 17 characters.
+//
+// Verified against llguidance directly, byte by byte, before any of this was
+// written: an inline `%json` permits NO leading skip of its own (so the naive
+// skeleton would have reproduced failure 2 exactly), the bound binds at 32, and
+// `%json` ALREADY fixes property order and closes on additionalProperties:false
+// -- so the skeleton's language is the same language, minus the unboundedness.
+static const char * const gemma4_json_ws = R"( /[ \t\n\r]{1,32}/? )";
+
+static bool json_skeleton_annotation(const std::string & key) {
+    return key == "description" || key == "title" || key == "default" ||
+           key == "examples" || key == "$comment" || key == "propertyOrdering";
+}
+
+// An ALLOWLIST, so a keyword this emitter has never heard of falls back to
+// `%json` instead of being silently dropped from the constraint. `pattern`,
+// `minLength`, `anyOf` and `$ref` all change the language and none is handled.
+static bool json_skeleton_expressible(const json & schema) {
+    for (const auto & member : schema.items()) {
+        const std::string & key = member.key();
+        if (json_skeleton_annotation(key)) {
+            continue;
+        }
+        if (key != "type" && key != "properties" && key != "required" &&
+            key != "items" && key != "enum" && key != "additionalProperties") {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Annotations cannot change the language, and a description in this project
+// runs to paragraphs. Dropping them keeps the emitted grammar readable.
+static json json_skeleton_bare(const json & schema) {
+    json out = json::object();
+    for (const auto & member : schema.items()) {
+        if (!json_skeleton_annotation(member.key())) {
+            out[member.key()] = member.value();
+        }
+    }
+    return out;
+}
+
+// A Lark fragment for `schema`, or "" when the schema is outside what the
+// skeleton can express -- in which case the CALLER falls back to a flat `%json`
+// over the whole schema, which is what shipped before this existed. So the
+// fallback is never a regression, only the loss of the bound.
+static std::string json_skeleton_rule(const json & schema, int depth) {
+    if (depth > 8 || !schema.is_object() || !json_skeleton_expressible(schema)) {
+        return "";
+    }
+
+    // A literal alternation is tighter than `%json` and, being literals, holds
+    // no joint at all.
+    if (schema.contains("enum")) {
+        const auto & values = schema.at("enum");
+        if (!values.is_array() || values.empty()) {
+            return "";
+        }
+        std::vector<std::string> alts;
+        for (const auto & value : values) {
+            if (value.is_object() || value.is_array()) {
+                return "";
+            }
+            alts.push_back(gemma4_string_literal(value.dump()));
+        }
+        return "(" + string_join(alts, " | ") + ")";
+    }
+
+    const std::string type = schema.value("type", std::string{});
+
+    if (type == "string" || type == "number" || type == "integer" ||
+        type == "boolean" || type == "null") {
+        return "%json " + json_skeleton_bare(schema).dump();
+    }
+
+    const std::string ws = gemma4_json_ws;
+
+    if (type == "array") {
+        if (!schema.contains("items")) {
+            return "";
+        }
+        const std::string item = json_skeleton_rule(schema.at("items"), depth + 1);
+        if (item.empty()) {
+            return "";
+        }
+        // No two whitespace slots are ever adjacent -- an empty array takes the
+        // trailing one only -- so the bound is per joint and not per spelling.
+        return "(\"[\" (" + ws + item + "(" + ws + "\",\"" + ws + item + ")*)?" + ws + "\"]\")";
+    }
+
+    if (type != "object" || !schema.contains("properties") || !schema.at("properties").is_object()) {
+        return "";
+    }
+    // Only a CLOSED object, and only one whose properties are all required.
+    // Both were measured against `%json` rather than assumed: it rejects an
+    // extra property under `additionalProperties: false` and accepts one
+    // without it, and it already pins the declared property order. Restricting
+    // to that case is what makes the skeleton the same language. An optional
+    // property would additionally raise a question about permutations that
+    // nothing here needs answered.
+    if (!schema.contains("additionalProperties") || schema.at("additionalProperties") != false) {
+        return "";
+    }
+    std::vector<std::string> required;
+    for (const auto & name : schema.value("required", json::array())) {
+        if (name.is_string()) {
+            required.push_back(name.get<std::string>());
+        }
+    }
+    std::string body;
+    bool first = true;
+    for (const auto & property : schema.at("properties").items()) {
+        if (std::find(required.begin(), required.end(), property.key()) == required.end()) {
+            return "";
+        }
+        const std::string value = json_skeleton_rule(property.value(), depth + 1);
+        if (value.empty()) {
+            return "";
+        }
+        if (!first) {
+            body += ws;
+            body += "\",\"";
+        }
+        first = false;
+        body += ws;
+        body += gemma4_string_literal("\"" + property.key() + "\"");
+        body += ws;
+        body += "\":\"";
+        body += ws;
+        body += value;
+    }
+    return "(\"{\"" + body + ws + "\"}\")";
+}
+
 static std::string inject_response_schema(const std::string & grammar_template, const json & json_schema) {
     const std::string placeholder = "{{RESPONSE_SCHEMA}}";
     if (grammar_template.find(placeholder) == std::string::npos) {
@@ -1315,39 +1491,17 @@ static std::string inject_response_schema(const std::string & grammar_template, 
     }
     std::string schema;
     if (is_lark_grammar(grammar_template)) {
-        // WHITESPACE IS LEFT TO llguidance'S DEFAULT, deliberately, after this
-        // code overrode it twice and made things worse both times.
-        //
-        // The two failure modes pull in opposite directions:
-        //
-        // 1. RUNAWAY. `whitespace_pattern` becomes the grammar's SKIP regex,
-        //    used verbatim (llguidance parser/src/json/compiler.rs). A skip is
-        //    re-applied between every pair of tokens, so NO pattern bounds it:
-        //    `" "` does not mean "one space", it means "one space, arbitrarily
-        //    often". Measured on a nested-array schema, 12B: 4/25 runs emitted
-        //    ~36 kB of spaces and burned the whole token cap.
-        //
-        // 2. CORRUPTED STRINGS, if whitespace is forbidden outright.
-        //    `whitespace_flexible: false` deletes the skip, so after `"key":`
-        //    the model's own top candidates -- ` "`, ` "#`, ` ["`, all leading
-        //    with a space -- are illegal. The mask falls through to a legal
-        //    MERGED token (`">`, `":`, `"]`) and the extra character lands
-        //    INSIDE the string, where every byte is legal:
-        //      {"canonical_query": "]}```**Canonicalized Query:** Who is ..."}
-        //    100% schema-valid, and wrong. Measured on E2B: 6/20 clean.
-        //
-        // The default `[\x20\x0A\x0D\x09]+` avoids BOTH, measured 0/25
-        // runaway on the nested schema and 25/25 clean on the free-string one.
-        // The reason the newline matters is what the earlier note had backwards:
-        // a model trained on pretty-printed JSON reaches for `\n` after a value,
-        // and forbidding it piles probability onto the one whitespace character
-        // still legal -- which is why the space-only pattern was the WORST of
-        // the three for runaway, not the best.
-        //
-        // A caller's own x-guidance still wins; that path is live (verified by
-        // handing it an invalid regex and getting llguidance's compile error
-        // back as a 400).
-        schema = "%json " + json_schema.dump();
+        // A skeleton where the schema allows one, so the whitespace at each
+        // joint is bounded; otherwise the flat form, which is what shipped
+        // before the skeleton existed. Neither overrides llguidance's
+        // whitespace SETTINGS -- see json_skeleton_rule for why both attempts
+        // at that made things worse. A caller's own x-guidance still wins on
+        // the flat path; that is live, verified by handing it an invalid regex
+        // and getting llguidance's compile error back as a 400.
+        schema = json_skeleton_rule(json_schema, 0);
+        if (schema.empty()) {
+            schema = "%json " + json_schema.dump();
+        }
     } else {
         std::string gbnf = build_grammar([&](const common_grammar_builder & builder) {
             auto s = json_schema;

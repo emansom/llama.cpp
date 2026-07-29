@@ -2222,9 +2222,20 @@ static std::string entry_root_of(const std::string & grammar) {
 // `{"colour":">Blue"}`: schema-valid, corrupt, and invisible to every conformance
 // check there is. Measured 16/20 on a free-string schema.
 //
-// Allowing unbounded whitespace is the opposite failure -- the model emits
-// newlines forever and never reaches the comma -- so the pattern has to be
-// non-empty AND newline-free, and each clause below pins one of those.
+// Allowing unbounded whitespace is the opposite failure, and it is not
+// hypothetical: measured live at N=25, the Validator stalled once between the
+// `approved` KEY and its `:`, emitting 30669 whitespace tokens until the token
+// cap and returning no verdict at all. The VALUE was masked correctly
+// throughout -- only true/false could ever have followed the colon. What was
+// unbounded is the SKIP between terminals, which no `whitespace_pattern` can
+// fix because a skip re-applies between every pair.
+//
+// So the fix is not a whitespace SETTING, and the first clause below still
+// asserts that no override is injected. It is a SKELETON: objects and arrays
+// emitted as Lark, where gemma4.lark declares no %ignore, with the whitespace
+// written in explicitly and BOUNDED. The clauses split accordingly -- the
+// skeleton path, then the flat `%json` fallback that still serves every schema
+// the skeleton cannot express exactly.
 static void test_gemma4_response_schema_whitespace() {
     auto tmpls = common_chat_templates_ptr(common_chat_templates_init(/* model= */ nullptr, /* chat_template_override= */ "",
                                    /* bos_token_override= */ "", /* eos_token_override= */ "",
@@ -2244,25 +2255,71 @@ static void test_gemma4_response_schema_whitespace() {
         return common_chat_templates_apply(tmpls.get(), inputs).grammar;
     };
 
-    // The %json RULE the composer emits, so the assertions below are about the
-    // grammar actually handed to llguidance and not about this file's idea of it.
+    // The rule the composer emits, so the assertions below are about the
+    // grammar actually handed to llguidance and not about this file's idea of
+    // it. Returns the right-hand side alone, which is also what the skeleton
+    // clause re-wraps as a standalone grammar.
     //
-    // Anchored on the rule name rather than on "%json ", because the placeholder
-    // is substituted everywhere it appears -- including in gemma4.lark's own
-    // comment describing it, which therefore also ends up holding a %json line
-    // and is what an unanchored search finds first.
-    auto json_line = [](const std::string & grammar) {
-        const std::string rule = "response_content: %json ";
+    // Anchored on a line START, because the placeholder is substituted
+    // everywhere it appears -- including in gemma4.lark's own comment
+    // describing it, which is what an unanchored search finds first.
+    auto content_rule = [](const std::string & grammar) {
+        const std::string rule = "\nresponse_content: ";
         const auto        at   = grammar.find(rule);
         if (at == std::string::npos) {
             fprintf(stderr, "    FAIL: composed grammar carries no response_content rule\n");
             assert(false);
         }
-        return grammar.substr(at, grammar.find('\n', at) - at);
+        const auto rhs = at + rule.size();
+        return grammar.substr(rhs, grammar.find('\n', rhs) - rhs);
     };
 
     {
-        const auto line = json_line(grammar_for(schema));
+        // THE MEASURED DEFECT, asserted directly. A closed object whose
+        // properties are all required gets the skeleton, and the run of
+        // whitespace between the `approved` key and its colon -- the exact
+        // position the live stall sat at -- is masked once it passes the bound.
+        //
+        // Driven through the real llguidance sampler over the real vocab rather
+        // than by inspecting the grammar text: the bound is a property of the
+        // MASK, and a string assertion would pass just as happily on a grammar
+        // that never constrained anything.
+        const std::string closed =
+            R"({"type":"object","properties":{"feedback":{"type":"string"},"approved":{"type":"boolean"}},)"
+            R"("required":["feedback","approved"],"additionalProperties":false})";
+        const auto rhs = content_rule(grammar_for(closed));
+        if (rhs.rfind("%json", 0) == 0) {
+            fprintf(stderr, "    FAIL: a closed all-required object still went to a flat %%json\n    %s\n",
+                    rhs.c_str());
+            assert(false);
+        }
+        const std::string gap(40, ' ');
+        test_grammar("gemma4 response schema: bounded whitespace at every joint",
+                     "%llguidance {}\nstart: " + rhs + "\n",
+                     {
+                         R"({"feedback":"ok","approved":true})",
+                         // Whitespace stays LEGAL -- that is the whole point.
+                         // Forbidding it is what displaced a character into the
+                         // string and produced {"colour":">Blue"}.
+                         R"({"feedback": "ok", "approved": false})",
+                         "{\n  \"feedback\": \"ok\",\n  \"approved\": true\n}",
+                     },
+                     {
+                         // The live failure: 40 spaces where the model emitted
+                         // 30669. Bounded now, so the mask forces the colon.
+                         R"({"feedback":"ok","approved")" + gap + ":true}",
+                         R"({"feedback":)" + gap + R"("ok","approved":true})",
+                         // The skeleton must not widen the language either: the
+                         // flat %json it replaces already pinned property order
+                         // and closed the object.
+                         R"({"approved":true,"feedback":"ok"})",
+                         R"({"feedback":"ok","approved":true,"extra":1})",
+                         R"({"feedback":"ok"})",
+                     });
+    }
+
+    {
+        const auto line = content_rule(grammar_for(schema));
 
         // NO x-guidance IS ADDED. This assertion is inverted from what it was,
         // because the setting it used to require was measured to be the worst
@@ -2284,15 +2341,25 @@ static void test_gemma4_response_schema_whitespace() {
                     line.c_str());
             assert(false);
         }
+        // And it IS the flat form here: this schema leaves additionalProperties
+        // open, so the skeleton would have closed an object the caller left
+        // open. Falling back is what keeps the two paths the same language.
+        if (line.rfind("%json", 0) != 0) {
+            fprintf(stderr, "    FAIL: an open object took the skeleton, which would close it\n    %s\n",
+                    line.c_str());
+            assert(false);
+        }
         fprintf(stderr, "\n    no whitespace override injected (llguidance default)\n");
     }
 
     {
         // The documented escape hatch: a caller who states their own x-guidance
         // keeps it. Claimed in a comment for a while before anything checked it.
+        // x-guidance is also outside the skeleton's allowlist, so this doubles
+        // as the fallback path for an unrecognised keyword.
         auto caller = json::parse(schema);
         caller["x-guidance"] = json{ { "whitespace_pattern", "[ \\t]" } };
-        const auto line = json_line(grammar_for(caller.dump()));
+        const auto line = content_rule(grammar_for(caller.dump()));
         // The needle is the pattern as it appears in the DUMPED grammar, where the
         // backslash is JSON-escaped -- searching for the C++ string finds nothing
         // and reads as an overwrite that never happened.
@@ -2303,7 +2370,7 @@ static void test_gemma4_response_schema_whitespace() {
         fprintf(stderr, "    caller-supplied x-guidance preserved\n");
     }
 
-    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response-schema whitespace: llguidance default, caller override wins\n");
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E response-schema whitespace: bounded skeleton, flat fallback, caller override wins\n");
 }
 
 static void test_gemma4_entry_selection() {
