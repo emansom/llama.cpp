@@ -1356,7 +1356,42 @@ static std::string gemma4_compose_grammars(const std::string & format_grammar,
 // skeleton would have reproduced failure 2 exactly), the bound binds at 32, and
 // `%json` ALREADY fixes property order and closes on additionalProperties:false
 // -- so the skeleton's language is the same language, minus the unboundedness.
-static const char * const gemma4_json_ws = R"( /[ \t\n\r]{1,32}/? )";
+// TWO CLASSES OF JOINT, because ECMA-262 governs them by different mechanisms
+// and the model turns out to follow it exactly.
+//
+// JSON.stringify emits `": "` as a fixed literal in SerializeJSONObject -- one
+// space after the colon, never any before it -- while indentation is a separate
+// `gap`, clamped to 10 characters and repeated per nesting level, at `{`, `,`
+// and `}`. The colon spacing is not derived from the gap and cannot be widened.
+//
+// Measured over 25 real generations of a two-property schema, counting only
+// whitespace OUTSIDE strings (Protean's TestLive_WhitespaceHistogram):
+//
+//   joint          runs observed
+//   `:` -> string  1 x25            exactly one space, every time
+//   key -> `:`     0 x45, then 5, 32, 32, 32, 32
+//   `{` -> key     2 x5, 3 x20      newline + indent
+//   `,` -> key     1 x1, 2 x4, 3 x16
+//
+// So the healthy value at a colon joint is 1 after and 0 before, with no
+// exceptions in 25 documents -- the model reproduces the serializer's rule. One
+// character is therefore enough to keep its preferred token samplable, which is
+// the ONLY safety criterion that matters here (the corruption mode fires when
+// the top candidate is masked out, and ` "` stays legal at 1).
+//
+// The tail is the other half of that table and it is why the bound exists at
+// all. Five of ~50 key->colon joints carried whitespace, and FOUR of those five
+// ran to the cap. Those are the stall, truncated: on the unbounded build the
+// same position ran to context exhaustion. The bound is load-bearing on a large
+// fraction of generations, not a rare safety net -- and because the cap
+// censors the distribution, "32" there is a floor on what the model wanted, not
+// a measurement of it.
+//
+// Hence 1 at the colon joints: it is what a correct generation uses, and it
+// ends a degenerate run 32 times sooner. Indent joints keep real room, since
+// that is where a newline plus a nesting indent legitimately goes.
+static const char * const gemma4_json_ws_colon  = R"( /[ \t\n\r]/? )";
+static const char * const gemma4_json_ws_indent = R"( /[ \t\n\r]{1,8}/? )";
 
 static bool json_skeleton_annotation(const std::string & key) {
     return key == "description" || key == "title" || key == "default" ||
@@ -1425,7 +1460,10 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
         return "%json " + json_skeleton_bare(schema).dump();
     }
 
-    const std::string ws = gemma4_json_ws;
+    // `ws` is the INDENT class throughout: every joint an array or object
+    // skeleton contains is a place a newline plus a nesting indent may go. Only
+    // the two joints either side of a colon take the tight class, below.
+    const std::string ws = gemma4_json_ws_indent;
 
     if (type == "array") {
         if (!schema.contains("items")) {
@@ -1476,9 +1514,9 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
         first = false;
         body += ws;
         body += gemma4_string_literal("\"" + property.key() + "\"");
-        body += ws;
+        body += gemma4_json_ws_colon;
         body += "\":\"";
-        body += ws;
+        body += gemma4_json_ws_colon;
         body += value;
     }
     return "(\"{\"" + body + ws + "\"}\")";

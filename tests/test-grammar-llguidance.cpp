@@ -2293,22 +2293,36 @@ static void test_gemma4_response_schema_whitespace() {
                     rhs.c_str());
             assert(false);
         }
+        // Two classes of joint, per ECMA-262 and confirmed by 25 live
+        // generations: the colon takes at most one space (the serializer's
+        // fixed `": "`, and the model reproduced it 25/25), while `{`, `,` and
+        // `}` carry a newline plus a nesting indent and need real room.
         const std::string gap(40, ' ');
-        test_grammar("gemma4 response schema: bounded whitespace at every joint",
+        test_grammar("gemma4 response schema: tight colon, room to indent",
                      "%llguidance {}\nstart: " + rhs + "\n",
                      {
                          R"({"feedback":"ok","approved":true})",
-                         // Whitespace stays LEGAL -- that is the whole point.
-                         // Forbidding it is what displaced a character into the
-                         // string and produced {"colour":">Blue"}.
+                         // One space after the colon is what the model actually
+                         // emits, every time. Keeping it legal is the ENTIRE
+                         // safety criterion: forbidding it is what displaced a
+                         // character into the string and gave {"colour":">Blue"}.
                          R"({"feedback": "ok", "approved": false})",
+                         // Pretty-printed: newline + indent at the container
+                         // joints, one space at the colons.
                          "{\n  \"feedback\": \"ok\",\n  \"approved\": true\n}",
                      },
                      {
-                         // The live failure: 40 spaces where the model emitted
-                         // 30669. Bounded now, so the mask forces the colon.
+                         // The live failure, now cut 32x sooner. Four of the
+                         // five key->colon runs observed live ran to the old
+                         // cap; a correct generation puts nothing here at all.
+                         R"({"feedback":"ok","approved"  :true})",
                          R"({"feedback":"ok","approved")" + gap + ":true}",
+                         // Two spaces after a colon is already more than any of
+                         // 25 generations used.
+                         R"({"feedback":  "ok","approved":true})",
                          R"({"feedback":)" + gap + R"("ok","approved":true})",
+                         // Indent joints stay roomy but are still bounded.
+                         "{" + gap + R"("feedback":"ok","approved":true})",
                          // The skeleton must not widen the language either: the
                          // flat %json it replaces already pinned property order
                          // and closed the object.
