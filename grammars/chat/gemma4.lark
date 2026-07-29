@@ -2,6 +2,14 @@
 
 # Gemma 4 chat grammar (Lark / llguidance)
 #
+# THIS FILE IS THE NATIVE SIDE OF THE BOUNDARY. The model is constrained to
+# Gemma 4's own wire format and nothing else; the OpenAI shapes a client sees
+# (tool_calls, reasoning_content) are TRANSLATED from what this grammar
+# produces, at the API boundary. A client sending OpenAI `tools` and receiving
+# OpenAI `tool_calls` makes that invisible, so it is worth knowing before
+# reading further: nothing here emits OpenAI JSON, including tool arguments.
+# See docs/chat-format-gemma4.md — it also says which side a given bug is on.
+#
 # Two named entries:
 #   - `start` (default) — assistant-turn continuation; sampler entry. The model
 #     emits an optional `<|channel>thought ...<channel|>` reasoning block, then
