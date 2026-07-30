@@ -1583,9 +1583,16 @@ static void test_gemma4_fc_value_corpus() {
                 "b":   { "type": "boolean" },
                 "arr": { "type": "array", "items": { "type": "string" } },
                 "obj": { "type": "object", "properties": { "x": { "type": "integer" } },
-                         "required": ["x"], "additionalProperties": false }
+                         "required": ["x"], "additionalProperties": false },
+                "nul": { "type": "null" },
+                "neg": { "type": "integer" },
+                "ea":  { "type": "array", "items": { "type": "integer" } },
+                "ao":  { "type": "array", "items": {
+                            "type": "object", "properties": { "x": { "type": "integer" } },
+                            "required": ["x"], "additionalProperties": false } },
+                "aa":  { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
             },
-            "required": ["s", "n", "f", "b", "arr", "obj"],
+            "required": ["s", "n", "f", "b", "arr", "obj", "nul", "neg", "ea", "ao", "aa"],
             "additionalProperties": false
         })",
     };
@@ -1612,8 +1619,12 @@ static void test_gemma4_fc_value_corpus() {
     // obj:{x:1}}. Property order follows the schema, which is what llguidance
     // pins it to. Every departure from JSON here is deliberate and load-bearing:
     // <|"|> delimiters, bare keys, raw scalars, no spaces.
+    // Covers every production `value` has, plus the empty forms and a negative
+    // number, since NUMBER is `'-'? INT ( FRAC | EXP )?` and the sign is easy to
+    // omit from a hand-written rule.
     const std::string reference =
-        R"(s:<|"|>hi<|"|>,n:42,f:3.5,b:true,arr:[<|"|>a<|"|>,<|"|>b<|"|>],obj:{x:1})";
+        R"(s:<|"|>hi<|"|>,n:42,f:3.5,b:true,arr:[<|"|>a<|"|>,<|"|>b<|"|>],obj:{x:1},)"
+        R"(nul:null,neg:-7,ea:[],ao:[{x:1},{x:2}],aa:[[<|"|>a<|"|>]])";
 
     const std::string call = "<|tool_call>call:probe{" + reference + "}<tool_call|><|tool_response>";
 

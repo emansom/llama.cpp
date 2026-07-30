@@ -20,9 +20,23 @@
 //   * Tool call:         <|tool_call>call:FUNC_NAME{key:value, ...}<tool_call|>
 //   * Response (JSON):   ```json\n{schema-conformant value}\n```
 //
-// Tool-call value types: ESCAPED_STRING (delimited by <|"|>, <escape>, or
-// <ctrl46>), NUMBER, BOOLEAN, null, nested object, or array. Object keys are
-// bare identifiers (no quoting). The transformer walks the dict subtree and
+// Tool-call value types: ESCAPED_STRING, NUMBER, BOOLEAN, null, nested object,
+// or array. Object keys are bare identifiers (no quoting). Every one of those is
+// asserted against the mask in test_gemma4_fc_value_corpus, including the empty
+// forms, a negative number and nesting in both directions.
+//
+// Strings are delimited by <|"|>, and only by <|"|>. The normative lexer allows
+// two further spellings — ESCAPE : '<escape>' | '<ctrl46>' | '<|"|>' — and this
+// comment used to claim all three were supported. That was never true of the
+// code: neither this file nor grammars/chat/gemma4.lark contains `<escape>` or
+// `ctrl46` anywhere. Measured 2026-07-30 against the Gemma 4 vocabulary, the
+// claim is not merely unimplemented but unreachable — `<|"|>` is a token, while
+// `<escape>`, `<ctrl46>`, and in fact any `<ctrlNN>`, appear NOWHERE in it. The
+// model cannot emit them, so there is nothing for the mask to allow and nothing
+// for the parser to accept. They are tolerance in the reference parser, not part
+// of what this model produces.
+//
+// The transformer walks the dict subtree and
 // produces a canonical JSON `arguments` string — that walk is the only place
 // in this pipeline that synthesizes JSON structural characters, and only
 // because the source format is non-JSON.
