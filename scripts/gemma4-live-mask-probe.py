@@ -39,7 +39,7 @@ Usage:  gemma4-live-mask-probe.py <base-url> [model]
 import json
 import sys
 
-import requests
+from gemma4_transport import post_json
 
 PROMPT = "hello, how are you today?"
 TOOL = {
@@ -74,12 +74,12 @@ def main() -> int:
         "logprobs": True,
         "top_logprobs": 5,
     }
-    r = requests.post(f"{base_url}/v1/chat/completions", json=body, timeout=300)
-    if r.status_code != 200:
-        print(f"http {r.status_code}: {r.text[:300]}")
+    status, text = post_json(base_url, "/v1/chat/completions", body)
+    if status != 200:
+        print(f"http {status}: {text[:300]}")
         return 1
 
-    choice = r.json()["choices"][0]
+    choice = json.loads(text)["choices"][0]
     lp = choice.get("logprobs")
     if not lp:
         print("server returned no logprobs; cannot probe the mask")
