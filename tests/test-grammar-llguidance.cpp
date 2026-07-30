@@ -1643,6 +1643,55 @@ static void test_gemma4_fc_value_corpus() {
                  params.grammar,
                  { call },
                  { json_keys, json_strings });
+
+    // ---------------------------------------------------------------------
+    // RESTRICTION, which is a different claim from acceptance and the one that
+    // matters. The cases above show the mask admits well-formed FC values; they
+    // say nothing about whether it admits values the DECLARED TOOLS do not
+    // specify. A grammar that accepted any well-formed dict would pass every
+    // assertion above while leaving the model free to invent a function name, an
+    // argument, or a type -- which is the whole failure that per-tool schema
+    // constraints exist to prevent, and what `tool_choice=required` plus the
+    // declared interface is supposed to guarantee.
+    //
+    // Each rejection below is well-formed FC and differs from the accepted call
+    // in exactly one respect: it is not what `probe` declares.
+    auto args_with = [&](const std::string & replaced_from, const std::string & replaced_to) {
+        std::string a = reference;
+        const size_t at = a.find(replaced_from);
+        assert(at != std::string::npos);
+        a.replace(at, replaced_from.size(), replaced_to);
+        return "<|tool_call>call:probe{" + a + "}<tool_call|><|tool_response>";
+    };
+
+    // A function the request never declared. Nothing about the FC syntax is
+    // wrong here -- only the name.
+    const std::string undeclared_fn =
+        "<|tool_call>call:not_a_tool{" + reference + "}<tool_call|><|tool_response>";
+
+    // An argument outside the schema's properties, appended to an otherwise
+    // exact call. additionalProperties is false, so the interface forbids it.
+    const std::string undeclared_arg =
+        "<|tool_call>call:probe{" + reference + ",zzz:1}<tool_call|><|tool_response>";
+
+    // Right key, wrong type: `n` is declared integer, given an escaped string.
+    const std::string wrong_type = args_with(R"(n:42)", R"(n:<|"|>42<|"|>)");
+
+    // Right key, wrong type the other way: `s` is declared string, given a bare
+    // number. This direction is the easier one to leave unconstrained, because a
+    // rule that emits "any value" for every property still satisfies the first.
+    const std::string wrong_type_2 = args_with(R"(s:<|"|>hi<|"|>)", R"(s:7)");
+
+    // A required argument omitted. Every property of `probe` is required, so a
+    // call missing one does not satisfy the declared interface.
+    const std::string missing_required =
+        "<|tool_call>call:probe{" + reference.substr(0, reference.find(R"(,aa:)")) +
+        "}<tool_call|><|tool_response>";
+
+    test_grammar("gemma4 FC values: restricted to the declared tool interface",
+                 params.grammar,
+                 { call },
+                 { undeclared_fn, undeclared_arg, wrong_type, wrong_type_2, missing_required });
 }
 
 // The FSM contract, asserted at the token level.
