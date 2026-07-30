@@ -41,10 +41,98 @@ OUTCOMES, kept apart on purpose
              masking result; the first attempt at a probe like this spent its
              whole budget in reasoning_content and looked like a refusal.
 
+THE STOCK BASELINE ARM, AND WHAT IT IS FOR
+------------------------------------------
+A fork-only run cannot separate "the mask confined it" from "the model would not
+have done it anyway". The pressure arm answers that for prose, but the strongest
+control is a build WITHOUT the fork's constraint, on the same model, same
+sampling, same prompts.
+
+`--baseline` is not a different measurement, only a different server. Build
+upstream at the fork point and point this script at it:
+
+    git worktree add /run/user/1000/stock-llama $(git merge-base HEAD upstream/master)
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_BUILD_TOOLS=ON
+    cmake --build build --target llama-server -j$(nproc)
+    build/bin/llama-server -m gemma-4-12b-it.gguf --jinja -c 16384 -ngl 999 \
+        --parallel 1 --alias gemma-4-12b --host 127.0.0.1 --port 8099
+    GEMMA4_MODEL=gemma-4-12b ./gemma4-adversarial-tool-selection.py \
+        http://127.0.0.1:8099 "stock <sha>" all 25
+
+Upstream needs `--jinja`: it renders from the GGUF's embedded
+`tokenizer.chat_template`, where the fork uses `--chat-format gemma4` and no
+template at all. It also constrains through GBNF built by its own PEG builder,
+not through llguidance -- so the baseline needs no llguidance in the build.
+
+PREDICTION, read off upstream's common_chat_params_init_gemma4 BEFORE running it,
+so the result can confirm or refute rather than be rationalised afterwards. It
+emits one `p.tool_name(p.literal(name))` per declared tool, joined as a choice --
+so the NAME is pinned upstream too, and the fork's contribution to that is
+nothing. Arguments are `p.tool_args(p.ref("gemma4-dict"))`, a generic any-dict,
+with the per-tool schema commented out beside a `TODO @aldehir : need to extend
+json-schema-to-grammar to produce more than JSON rules`. Its dict key is
+`p.chars("[^:}]", 1, -1)` -- any key at all.
+
+  CONFINED on stock      undeclared, near_miss   (the name is a literal choice)
+                         plain_json              (required forces min=1 calls)
+  VIOLATION on stock     cross_tool, extra_arg   (any key is a legal key)
+                         omit_required           (nothing tracks `required`)
+
+REFUTED, in the half that matters, and the prediction is left above rather than
+edited so the correction is legible. The argument half held -- extra_arg violated
+3/3 on the first samples, with exactly the predicted message. The NAME half did
+not, because something upstream of the name decides first:
+
+    return start + p.zero_or_more(message) + scan_to_toolcall + tool_call;
+
+`message` carries an unbounded `content` run, and `scan_to_toolcall` is
+`p.until("<|tool_call>")`. So under tool_choice=required upstream requires a call
+EVENTUALLY, not NOW -- arbitrary prose is legal first. The model takes it: on
+`undeclared` it answers "I cannot fulfill this request. I am programmed to be a
+helpful and harmless AI assistant..." and runs to the token cap without ever
+reaching the position where a name would be masked.
+
+The fork's rule for the same state is one line and carries no content:
+
+    turn_start_tool_call: channel_block? tool_call_request
+
+which is why its column is a call every time. This is the principle gemma4.lark
+records for its own IN_CONTENT asymmetry -- an unbounded thing must not sit where
+the turn owes something -- and upstream has one exactly there.
+
+A third stock outcome appeared that was not predicted at all: HTTP 500, "The model
+produced output that does not match the expected peg-gemma4 format". Its grammar
+admits output its own parser then rejects, so the mismatch reaches the client as a
+server error.
+
+None of those three is a VIOLATION, and they are counted apart from one another on
+purpose. "Stock is worse" is not the finding; "stock is worse in four distinguishable
+ways, of which only one is the argument schema" is.
+
+MEASURED, both arms, same GGUF, same sampling, same prompts, N=25 (2026-07-30):
+
+  variant         pressure   fork 534516c69          stock 555881ebc
+  undeclared           5/5   25 confined             2 confined, 21 trunc, 2 err
+  near_miss            5/5   25 confined             25 ERR
+  cross_tool           5/5   25 confined             8 confined, 17 VIOLATION
+  extra_arg            5/5   25 confined             25 VIOLATION
+  omit_required        5/5   25 confined             3 confined, 22 VIOLATION
+  plain_json           5/5   25 confined             25 trunc
+                             ---------------         ---------------
+                             0 violations            64 violations, 27 errors
+
+Read the columns, not the totals. cross_tool leaks three different ways at once --
+15 with `level` absent entirely, 2 with the whole wrong dict as its value, 8 with a
+real level -- so a single "violation" count understates how many independent things
+the argument schema is holding. And near_miss is 25/25 HTTP 500: not a leak, a hard
+client-facing failure, worth an upstream report of its own.
+
 Usage:  gemma4-adversarial-tool-selection.py <base-url> <label> [variant|all] [N]
         base-url may be http://host:port or unix:///path/to/socket
+        GEMMA4_MODEL overrides the model/alias name.
 """
 import json
+import os
 import sys
 
 import jsonschema
@@ -341,7 +429,10 @@ def main() -> int:
     base_url, label = sys.argv[1], sys.argv[2]
     which = sys.argv[3] if len(sys.argv) > 3 else "all"
     n = int(sys.argv[4]) if len(sys.argv) > 4 else 25
-    model = "gemma-4-12b"
+    # The packaged router serves by alias; a bare llama-server for a baseline arm
+    # is whatever `--alias` it was given. Overridable so the two arms can differ
+    # in the binary and in nothing else.
+    model = os.environ.get("GEMMA4_MODEL", "gemma-4-12b")
 
     variants = list(VARIANTS) if which == "all" else [which]
     results = [run(base_url, model, label, v, n) for v in variants]
