@@ -1521,6 +1521,119 @@ static std::vector<mask_step> walk_mask(const std::string &              input,
     return out;
 }
 
+// The MASK must enforce the native format for every value shape, not only for a
+// string.
+//
+// This is the generation side of the format, and it is the point of the FSM: the
+// tracker reports which state generation is in, that selects an entry rule
+// (common_chat_gemma4_entry_root), and llguidance masks to the tokens that state
+// permits. If the rules reachable from a tool-call state do not describe Gemma 4's
+// own encoding, the mask forces the model into the wrong bytes. And the encoding
+// differs from JSON in ways nothing else here checks: strings are wrapped in
+// `<|"|>` rather than `"`, object keys are BARE, and numbers, booleans and null
+// are raw.
+//
+// It exists because the coverage was measured and found to be one shape. Before
+// this, the only tool-call arguments any grammar test accepted were a single
+// string (`call:get_time{city:<|"|>London<|"|>}`) and empty args. Numbers,
+// arrays, nested objects and null had NO acceptance test at all -- and nested
+// objects and arrays are precisely what ggml-org/llama.cpp#21384 was about, the
+// bug whose fix (per-tool schema-constrained arguments) this fork ships and
+// measures at 25/25 adversarial. The fix was untested on the shape it fixed.
+//
+// The expected bytes come from the NORMATIVE grammar, not from another encoder of
+// ours and not from this repo's own rules -- deriving them from the thing under
+// test would make the assertion circular. google-ai-edge/LiteRT-LM,
+// runtime/components/tool_use/antlr, AntlrFcParser.g4:
+//
+//   array  : OPEN_BRACKET ( value (COMMA value)* )? CLOSE_BRACKET ;
+//   object : OPEN_BRACE ( pair (COMMA pair)* )? CLOSE_BRACE ;
+//   pair   : ID COLON value ;
+//   value  : ESCAPED_STRING | NUMBER | BOOLEAN | NULL_LITERAL | object | array ;
+//
+// and AntlrFcLexer.g4 for the bytes those tokens stand for:
+//
+//   OPEN_BRACKET '['   CLOSE_BRACKET ']'   OPEN_BRACE '{'   CLOSE_BRACE '}'
+//   COMMA ','          COLON ':'
+//   ESCAPED_STRING : ESCAPE .*? ESCAPE ;   ESCAPE : '<escape>' | '<ctrl46>' | '<|"|>'
+//   ID : [a-zA-Z_] [a-zA-Z0-9_.-]* ;       BOOLEAN : 'true' | 'false' ;
+//   NULL_LITERAL : 'null' ;
+//
+// So an array is bracket-delimited comma-separated `value`s, each of which may
+// itself be an escaped string -- hence `[<|"|>a<|"|>,<|"|>b<|"|>]` rather than
+// JSON's `["a","b"]` -- and object keys are bare IDs, hence `{x:1}`.
+//
+// Note ESCAPE has three spellings in the normative lexer. A conforming PARSER
+// must accept all three; generation is constrained to `<|"|>` alone, which is a
+// narrowing of what we emit rather than of what we accept.
+static void test_gemma4_fc_value_corpus() {
+    // One tool covering every value shape the formatter distinguishes. All
+    // properties are required and the object is closed, so the schema is strict
+    // and llguidance pins the property order to the order declared here -- which
+    // is why the argument object below is built in the same order.
+    common_chat_tool probe{
+        /* .name = */ "probe",
+        /* .description = */ "Every value shape",
+        /* .parameters = */ R"({
+            "type": "object",
+            "properties": {
+                "s":   { "type": "string" },
+                "n":   { "type": "integer" },
+                "f":   { "type": "number" },
+                "b":   { "type": "boolean" },
+                "arr": { "type": "array", "items": { "type": "string" } },
+                "obj": { "type": "object", "properties": { "x": { "type": "integer" } },
+                         "required": ["x"], "additionalProperties": false }
+            },
+            "required": ["s", "n", "f", "b", "arr", "obj"],
+            "additionalProperties": false
+        })",
+    };
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "call the probe";
+
+    common_chat_templates_inputs inputs;
+    inputs.messages              = { user };
+    inputs.tools                 = { probe };
+    inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    inputs.add_generation_prompt = true;
+    inputs.enable_thinking       = false;
+
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(
+        /* model= */ nullptr, /* chat_template_override= */ "",
+        /* bos_token_override= */ "", /* eos_token_override= */ "",
+        /* chat_format_override= */ "gemma4"));
+    auto params = common_chat_templates_apply(tmpls.get(), inputs);
+    assert(!params.grammar.empty());
+
+    // The native encoding of {s:"hi", n:42, f:3.5, b:true, arr:["a","b"],
+    // obj:{x:1}}. Property order follows the schema, which is what llguidance
+    // pins it to. Every departure from JSON here is deliberate and load-bearing:
+    // <|"|> delimiters, bare keys, raw scalars, no spaces.
+    const std::string reference =
+        R"(s:<|"|>hi<|"|>,n:42,f:3.5,b:true,arr:[<|"|>a<|"|>,<|"|>b<|"|>],obj:{x:1})";
+
+    const std::string call = "<|tool_call>call:probe{" + reference + "}<tool_call|><|tool_response>";
+
+    // The mutations are JSON, not gibberish. That is the point: JSON is what a
+    // model trained on ordinary function calling would reach for, and what a
+    // grammar accidentally built from json-schema-to-grammar would accept. Each
+    // one is a plausible near-miss rather than a straw man.
+    const std::string json_keys =
+        R"(<|tool_call>call:probe{"s":<|"|>hi<|"|>,"n":42,"f":3.5,"b":true,)"
+        R"("arr":[<|"|>a<|"|>,<|"|>b<|"|>],"obj":{"x":1}}<tool_call|><|tool_response>)";
+    const std::string json_strings =
+        R"(<|tool_call>call:probe{s:"hi",n:42,f:3.5,b:true,)"
+        R"(arr:["a","b"],obj:{x:1}}<tool_call|><|tool_response>)";
+
+    test_grammar("gemma4 FC values: the reference corpus is accepted, JSON is not",
+                 params.grammar,
+                 { call },
+                 { json_keys, json_strings });
+}
+
 // The FSM contract, asserted at the token level.
 //
 // One tool is declared (`get_time`, required string `city`) with
@@ -3008,6 +3121,7 @@ int main(int argc, const char ** argv) {
     if (argc == 3) {
         test_gemma4_chat_grammar(argv[2]);
         test_gemma4_tool_schema();
+        test_gemma4_fc_value_corpus();
         test_gemma4_mask_walk();
         test_gemma4_fsm_conformance(argv[2]);
         test_gemma4_user_grammar();
