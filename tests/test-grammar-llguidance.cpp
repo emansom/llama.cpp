@@ -2293,12 +2293,14 @@ static void test_gemma4_response_schema_whitespace() {
                     rhs.c_str());
             assert(false);
         }
-        // Two classes of joint, per ECMA-262 and confirmed by 25 live
-        // generations: the colon takes at most one space (the serializer's
-        // fixed `": "`, and the model reproduced it 25/25), while `{`, `,` and
-        // `}` carry a newline plus a nesting indent and need real room.
+        // Five classes of joint, per ECMA-262 and confirmed by 25 live
+        // generations. A colon takes at most one space (the serializer's fixed
+        // `": "`, reproduced 25/25 by the model) and so does the position before
+        // a comma; a MEMBER carries a newline plus this level's indent and needs
+        // real room; a CLOSER sits back at the PARENT's indent, so at the top
+        // level it is a bare newline and nothing more.
         const std::string gap(40, ' ');
-        test_grammar("gemma4 response schema: tight colon, room to indent",
+        test_grammar("gemma4 response schema: every joint bounded by what a serializer emits",
                      "%llguidance {}\nstart: " + rhs + "\n",
                      {
                          R"({"feedback":"ok","approved":true})",
@@ -2307,9 +2309,17 @@ static void test_gemma4_response_schema_whitespace() {
                          // safety criterion: forbidding it is what displaced a
                          // character into the string and gave {"colour":">Blue"}.
                          R"({"feedback": "ok", "approved": false})",
-                         // Pretty-printed: newline + indent at the container
-                         // joints, one space at the colons.
+                         // Pretty-printed: newline + indent at the member
+                         // joints, one space at the colons, a bare newline
+                         // before the top-level `}`.
                          "{\n  \"feedback\": \"ok\",\n  \"approved\": true\n}",
+                         // The widest indent ECMA-262 permits. A flat object's
+                         // member joint takes 1 + 10*1 = 11 characters, which
+                         // the old flat bound of 8 REJECTED -- conforming output
+                         // the grammar refused, masking the model's preferred
+                         // token exactly where that corrupts a free string.
+                         "{\n" + std::string(10, ' ') + R"("feedback": "ok",)" + "\n" +
+                             std::string(10, ' ') + R"("approved": true)" + "\n}",
                      },
                      {
                          // The live failure, now cut 32x sooner. Four of the
@@ -2321,14 +2331,81 @@ static void test_gemma4_response_schema_whitespace() {
                          // 25 generations used.
                          R"({"feedback":  "ok","approved":true})",
                          R"({"feedback":)" + gap + R"("ok","approved":true})",
-                         // Indent joints stay roomy but are still bounded.
+                         // Member joints stay roomy but are still bounded.
                          "{" + gap + R"("feedback":"ok","approved":true})",
+                         // THE #61 JOINT. A top-level closer sits at the parent's
+                         // indent, which is nothing, so a conforming document has
+                         // exactly one newline here at every gap. Live, this
+                         // position measured 1 x20, 2 x2, 8 x1 -- the last two
+                         // rows non-conforming, and the 8 sitting on the old
+                         // bound, i.e. a degenerate run capped rather than ended.
+                         // Both are now illegal at the second character.
+                         R"({"feedback":"ok","approved":true  })",
+                         R"({"feedback":"ok","approved":true)" + std::string(8, ' ') + "}",
+                         R"({"feedback":"ok","approved":true)" + gap + "}",
+                         // Nothing precedes a comma either.
+                         R"({"feedback":"ok"  ,"approved":true})",
                          // The skeleton must not widen the language either: the
                          // flat %json it replaces already pinned property order
                          // and closed the object.
                          R"({"approved":true,"feedback":"ok"})",
                          R"({"feedback":"ok","approved":true,"extra":1})",
                          R"({"feedback":"ok"})",
+                     });
+    }
+
+    {
+        // A NESTED schema, because depth is the variable a flat one cannot show
+        // and the flat one is all that was ever tested. This is the shape of
+        // Protean's WorkflowDesign -- object -> array -> object -- and the schema
+        // the original 19/100 whitespace runaway was measured on.
+        //
+        // Its deepest member joint wants 1 + 10*3 = 31 characters, so a uniform
+        // bound of 8 made the schema unpretty-printable at any gap above 2. That
+        // is what "one hand-written schema is a regression test, not conformance"
+        // cost: the defect was three levels down, where nothing looked.
+        const std::string step =
+            R"({"type":"object","properties":{"task":{"type":"string"},"role":{"type":"string"}},)"
+            R"("required":["task","role"],"additionalProperties":false})";
+        const std::string nested =
+            R"({"type":"object","properties":{"strategy":{"type":"string"},)"
+            R"("steps":{"type":"array","items":)" + step + R"(}},)" +
+            R"("required":["strategy","steps"],"additionalProperties":false})";
+        const auto rhs = content_rule(grammar_for(nested));
+        if (rhs.rfind("%json", 0) == 0) {
+            fprintf(stderr, "    FAIL: a closed all-required nested object went to a flat %%json\n    %s\n",
+                    rhs.c_str());
+            assert(false);
+        }
+        // Built with an explicit gap rather than written out, so what is asserted
+        // is a conforming layout at a stated indent and not this file's typing.
+        auto pretty = [](int gap) {
+            const std::string i1(gap * 1, ' '), i2(gap * 2, ' '), i3(gap * 3, ' ');
+            return "{\n" + i1 + "\"strategy\": \"parallel\",\n" + i1 + "\"steps\": [\n" +
+                   i2 + "{\n" + i3 + "\"task\": \"a\",\n" + i3 + "\"role\": \"execute\"\n" +
+                   i2 + "}\n" + i1 + "]\n}";
+        };
+        test_grammar("gemma4 response schema: nesting deepens the member bound",
+                     "%llguidance {}\nstart: " + rhs + "\n",
+                     {
+                         R"({"strategy":"parallel","steps":[{"task":"a","role":"execute"}]})",
+                         pretty(2),
+                         pretty(4),  // rejected outright by the old flat bound of 8
+                         pretty(10), // the widest ECMA-262 permits: 31 at depth 3
+                     },
+                     {
+                         // Past the clamp. Nothing conforming reaches here, and
+                         // leaving it legal is what let a stall run.
+                         pretty(11),
+                         // A closer still sits one level back, at every depth. The
+                         // inner `}` may hold 1 + 10*2 = 21, never a member's
+                         // 1 + 10*3 = 31, so 25 characters here separates the two
+                         // bounds rather than merely exceeding both.
+                         "{\n  \"strategy\": \"parallel\",\n  \"steps\": [\n    {\n"
+                         "      \"task\": \"a\",\n      \"role\": \"execute\"\n" +
+                             std::string(24, ' ') + "}\n  ]\n}",
+                         // And the top-level closer holds a bare newline.
+                         R"({"strategy":"parallel","steps":[{"task":"a","role":"execute"}]  })",
                      });
     }
 

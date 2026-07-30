@@ -1348,50 +1348,100 @@ static std::string gemma4_compose_grammars(const std::string & format_grammar,
 //
 // Bounding is neither. Whitespace stays legal exactly where it is legal today,
 // so ` "` is still samplable and (2) cannot arise; it simply cannot run past
-// GEMMA4_JSON_WS_MAX characters at any one joint, so (1) cannot either. A
-// pretty-printer at depth 8 with a two-space indent wants 17 characters.
+// that joint's bound, so (1) cannot either. Each bound is the most a conforming
+// serializer would put at that particular joint -- derived, not chosen, see the
+// table below.
 //
 // Verified against llguidance directly, byte by byte, before any of this was
 // written: an inline `%json` permits NO leading skip of its own (so the naive
 // skeleton would have reproduced failure 2 exactly), the bound binds at 32, and
 // `%json` ALREADY fixes property order and closes on additionalProperties:false
 // -- so the skeleton's language is the same language, minus the unboundedness.
-// TWO CLASSES OF JOINT, because ECMA-262 governs them by different mechanisms
-// and the model turns out to follow it exactly.
+// FIVE CLASSES OF JOINT governed by THREE mechanisms, because that is what
+// ECMA-262 says and the model turns out to follow it exactly. A single number
+// per class cannot be right, and the two earlier attempts here prove it: a
+// uniform 32 was slack everywhere, and 1-at-the-colon/8-elsewhere is
+// simultaneously too LARGE and too SMALL, see below.
 //
-// JSON.stringify emits `": "` as a fixed literal in SerializeJSONObject -- one
-// space after the colon, never any before it -- while indentation is a separate
-// `gap`, clamped to 10 characters and repeated per nesting level, at `{`, `,`
-// and `}`. The colon spacing is not derived from the gap and cannot be widened.
+// SerializeJSONObject (25.5.2.4) emits `": "` as a fixed literal -- one space
+// after a colon, never any before -- and its separator is `",\n" + indent`, so
+// the newline FOLLOWS the comma and nothing precedes it. Indentation is a
+// separate `gap`, clamped to 10 characters by 25.5.2.1 and repeated per nesting
+// level. It lands at two positions that do NOT take the same amount: a member
+// sits at `gap * level`, while a closer sits back one level at
+// `gap * (level - 1)`. Each carries one newline first.
 //
-// Measured over 25 real generations of a two-property schema, counting only
-// whitespace OUTSIDE strings (Protean's TestLive_WhitespaceHistogram):
+//   class          conforming maximum
+//   key -> `:`     0                       fixed literal, never any
+//   value -> `,`   0                       the newline follows the comma
+//   `:` -> value   1                       the space in `": "`
+//   `{ [ , ` -> item   1 + gap * level     newline + this level's indent
+//   value -> `} ]`     1 + gap * (level-1) newline + the PARENT's indent
+//
+// That table is not read off the spec and hoped for. Protean's
+// TestConformingWhitespace_MatchesClosedForm enumerates every conforming layout
+// of all six schemas it constrains -- eleven per schema, since the gap is
+// clamped to 10 -- and asserts each joint holds exactly this, cross-checked
+// against both Go's MarshalIndent and the real JSON.stringify (whose gap 11 and
+// 12 output is byte-identical to gap 10, confirming the clamp).
+//
+// WHAT THE MODEL ACTUALLY EMITS, over 25 real generations of a two-property
+// schema, counting only whitespace outside strings (its
+// TestLive_WhitespaceHistogram):
 //
 //   joint          runs observed
 //   `:` -> string  1 x25            exactly one space, every time
 //   key -> `:`     0 x45, then 5, 32, 32, 32, 32
 //   `{` -> key     2 x5, 3 x20      newline + indent
 //   `,` -> key     1 x1, 2 x4, 3 x16
+//   value -> `}`   1 x20, 2 x2, 8 x1
 //
-// So the healthy value at a colon joint is 1 after and 0 before, with no
-// exceptions in 25 documents -- the model reproduces the serializer's rule. One
-// character is therefore enough to keep its preferred token samplable, which is
-// the ONLY safety criterion that matters here (the corruption mode fires when
-// the top candidate is masked out, and ` "` stays legal at 1).
+// The colon rows are the serializer's rule reproduced exactly, so one character
+// keeps the model's preferred token samplable -- the ONLY safety criterion that
+// matters, since the corruption mode fires when the top candidate is masked and
+// ` "` stays legal at 1. The tail is why a bound exists at all: five of ~50
+// key->colon joints carried whitespace and FOUR ran to the cap. Those are the
+// stall, truncated; unbounded, the same position ran to context exhaustion. And
+// because a cap censors its own distribution, "32" there is a floor on what the
+// model wanted, not a measurement of it.
 //
-// The tail is the other half of that table and it is why the bound exists at
-// all. Five of ~50 key->colon joints carried whitespace, and FOUR of those five
-// ran to the cap. Those are the stall, truncated: on the unbounded build the
-// same position ran to context exhaustion. The bound is load-bearing on a large
-// fraction of generations, not a rare safety net -- and because the cap
-// censors the distribution, "32" there is a floor on what the model wanted, not
-// a measurement of it.
+// WHY THE PREVIOUS 1/8 SPLIT WAS WRONG IN BOTH DIRECTIONS. It lumped the last
+// two classes together as one "indent" bound of 8:
 //
-// Hence 1 at the colon joints: it is what a correct generation uses, and it
-// ends a degenerate run 32 times sooner. Indent joints keep real room, since
-// that is where a newline plus a nesting indent legitimately goes.
-static const char * const gemma4_json_ws_colon  = R"( /[ \t\n\r]/? )";
-static const char * const gemma4_json_ws_indent = R"( /[ \t\n\r]{1,8}/? )";
+//   - Too LARGE at a closer. A closer sits at the PARENT's indent, so at the top
+//     level that is `1 + gap * 0` = one newline, at every gap. The `2 x2, 8 x1`
+//     in the row above is therefore entirely non-conforming -- no serializer
+//     emits either, and indentation never explained them. Given 8 characters of
+//     room, a degenerate run there survived in ~12% of generations and had to be
+//     capped rather than ended.
+//   - Too SMALL at a member. The bound has to clear `1 + 10 * level`. For a flat
+//     schema that is 11; for Protean's WorkflowDesign (object -> array ->
+//     object) it is 31, so 8 made the schema unpretty-printable at any gap above
+//     2 -- rejecting conforming output at three separate joints, which is
+//     precisely the condition that displaces a character into a free string.
+//
+// So the bound is DERIVED per joint from the nesting the joint sits at, which
+// this emitter already tracks for its recursion guard. Nothing is picked.
+//
+// Note RFC 8259 cannot decide any of this: `ws = *(...)` is zero to infinity, so
+// the format spec permits unbounded whitespace and conformance chooses no
+// number. Every bound here narrows what we GENERATE; everything emitted stays
+// valid JSON and the parse path is untouched.
+static const char * const gemma4_json_ws_colon = R"( /[ \t\n\r]/? )";
+
+// ECMA-262 25.5.2.1 step 5 clamps the indent to 10 characters, so this is the
+// widest indent any conforming serializer produces per nesting level.
+static const int gemma4_json_max_gap = 10;
+
+// An optional whitespace slot accepting at most max_run characters. One
+// character is spelled without a repetition count purely so the common case
+// reads cleanly in a dumped grammar.
+static std::string gemma4_json_ws(int max_run) {
+    if (max_run <= 1) {
+        return gemma4_json_ws_colon;
+    }
+    return R"( /[ \t\n\r]{1,)" + std::to_string(max_run) + R"(}/? )";
+}
 
 static bool json_skeleton_annotation(const std::string & key) {
     return key == "description" || key == "title" || key == "default" ||
@@ -1460,10 +1510,14 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
         return "%json " + json_skeleton_bare(schema).dump();
     }
 
-    // `ws` is the INDENT class throughout: every joint an array or object
-    // skeleton contains is a place a newline plus a nesting indent may go. Only
-    // the two joints either side of a colon take the tight class, below.
-    const std::string ws = gemma4_json_ws_indent;
+    // `depth` counts the containers ABOVE this one, so this container's own
+    // nesting level -- what ECMA-262 multiplies the gap by -- is depth + 1.
+    // A member joint sits at that level; a closer sits back one, which at the
+    // top level leaves it a bare newline. Nothing precedes a comma.
+    const int         level     = depth + 1;
+    const std::string ws_member = gemma4_json_ws(1 + gemma4_json_max_gap * level);
+    const std::string ws_close  = gemma4_json_ws(1 + gemma4_json_max_gap * (level - 1));
+    const std::string ws_comma  = gemma4_json_ws(1);
 
     if (type == "array") {
         if (!schema.contains("items")) {
@@ -1475,7 +1529,8 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
         }
         // No two whitespace slots are ever adjacent -- an empty array takes the
         // trailing one only -- so the bound is per joint and not per spelling.
-        return "(\"[\" (" + ws + item + "(" + ws + "\",\"" + ws + item + ")*)?" + ws + "\"]\")";
+        return "(\"[\" (" + ws_member + item + "(" + ws_comma + "\",\"" + ws_member + item + ")*)?" +
+               ws_close + "\"]\")";
     }
 
     if (type != "object" || !schema.contains("properties") || !schema.at("properties").is_object()) {
@@ -1508,18 +1563,18 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
             return "";
         }
         if (!first) {
-            body += ws;
+            body += ws_comma;
             body += "\",\"";
         }
         first = false;
-        body += ws;
+        body += ws_member;
         body += gemma4_string_literal("\"" + property.key() + "\"");
         body += gemma4_json_ws_colon;
         body += "\":\"";
         body += gemma4_json_ws_colon;
         body += value;
     }
-    return "(\"{\"" + body + ws + "\"}\")";
+    return "(\"{\"" + body + ws_close + "\"}\")";
 }
 
 static std::string inject_response_schema(const std::string & grammar_template, const json & json_schema) {
