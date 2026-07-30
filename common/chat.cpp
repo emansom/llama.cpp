@@ -1443,47 +1443,145 @@ static std::string gemma4_json_ws(int max_run) {
     return R"( /[ \t\n\r]{1,)" + std::to_string(max_run) + R"(}/? )";
 }
 
-static bool json_skeleton_annotation(const std::string & key) {
-    return key == "description" || key == "title" || key == "default" ||
-           key == "examples" || key == "$comment" || key == "propertyOrdering";
+// Keywords that cannot change the value language, so their presence must not
+// force anything. Mirrors llguidance's own META_AND_ANNOTATIONS
+// (parser/src/json/schema.rs: "used for metadata or annotations, not directly
+// driving validation") plus genai's propertyOrdering, which this project emits.
+static bool json_skeleton_ignorable(const std::string & key) {
+    return key == "$anchor" || key == "$defs" || key == "definitions" ||
+           key == "$schema" || key == "$id" || key == "id" ||
+           key == "$comment" || key == "title" || key == "description" ||
+           key == "default" || key == "readOnly" || key == "writeOnly" ||
+           key == "examples" || key == "contentMediaType" ||
+           key == "contentEncoding" || key == "propertyOrdering";
 }
 
-// An ALLOWLIST, so a keyword this emitter has never heard of falls back to
-// `%json` instead of being silently dropped from the constraint. `pattern`,
-// `minLength`, `anyOf` and `$ref` all change the language and none is handled.
+// The subset of the above that is safe to DROP from a fragment handed to
+// `%json`. Descriptions in this project run to paragraphs, so dropping them
+// keeps an emitted grammar readable.
+//
+// `$defs`, `definitions`, `$anchor` and `$id` are deliberately NOT here.
+// llguidance ignores them only until a `$ref` resolves against them, so
+// dropping them turns a resolvable reference into a grammar that fails to
+// BUILD -- and a grammar that fails to build fails OPEN, leaving the sampler
+// unconstrained. That is the worst outcome available here, so they travel with
+// every fragment; see json_skeleton_delegate.
+static bool json_skeleton_droppable(const std::string & key) {
+    return key == "description" || key == "title" || key == "default" ||
+           key == "examples" || key == "$comment" || key == "propertyOrdering" ||
+           key == "readOnly" || key == "writeOnly";
+}
+
+// An ALLOWLIST, so a keyword this emitter has never heard of is handed to
+// llguidance rather than silently dropped from the constraint. `pattern`,
+// `minLength`, `$ref`, `allOf` and the rest all change the language and none is
+// emitted here. `anyOf` IS handled, separately, below.
 static bool json_skeleton_expressible(const json & schema) {
     for (const auto & member : schema.items()) {
         const std::string & key = member.key();
-        if (json_skeleton_annotation(key)) {
+        if (json_skeleton_ignorable(key)) {
             continue;
         }
         if (key != "type" && key != "properties" && key != "required" &&
-            key != "items" && key != "enum" && key != "additionalProperties") {
+            key != "items" && key != "enum" && key != "additionalProperties" &&
+            key != "anyOf") {
             return false;
         }
     }
     return true;
 }
 
-// Annotations cannot change the language, and a description in this project
-// runs to paragraphs. Dropping them keeps the emitted grammar readable.
 static json json_skeleton_bare(const json & schema) {
     json out = json::object();
     for (const auto & member : schema.items()) {
-        if (!json_skeleton_annotation(member.key())) {
+        if (!json_skeleton_droppable(member.key())) {
             out[member.key()] = member.value();
         }
     }
     return out;
 }
 
-// A Lark fragment for `schema`, or "" when the schema is outside what the
-// skeleton can express -- in which case the CALLER falls back to a flat `%json`
-// over the whole schema, which is what shipped before this existed. So the
-// fallback is never a regression, only the loss of the bound.
-static std::string json_skeleton_rule(const json & schema, int depth) {
+// Hand ONE SUBTREE to llguidance's own JSON compiler, which supports far more
+// than this emitter does -- anyOf, allOf, $ref, const, pattern, format, the
+// numeric bounds, prefixItems, patternProperties (docs/json_schema.md).
+//
+// This is the graceful degradation the previous shape lacked. Returning "" used
+// to propagate to the root, so ONE unexpressible subschema anywhere made the
+// WHOLE schema a flat `%json` and every joint in it lost its bound. Delegating
+// per subtree keeps every joint above and beside it bounded; only the joints
+// inside the delegated subtree revert to llguidance's unbounded default skip.
+//
+// `defs` carries the root's $defs/definitions so a `$ref` inside the subtree
+// still resolves -- see json_skeleton_droppable for why that matters.
+static std::string json_skeleton_delegate(const json & schema, const json & defs) {
+    // A JSON Schema may be `true` or `false` rather than an object; llguidance
+    // accepts those, and json_skeleton_bare would not survive iterating one.
+    if (!schema.is_object()) {
+        return "%json " + schema.dump();
+    }
+    json bare = json_skeleton_bare(schema);
+    for (const auto & def : defs.items()) {
+        if (!bare.contains(def.key())) {
+            bare[def.key()] = def.value();
+        }
+    }
+    return "%json " + bare.dump();
+}
+
+// json_skeleton_defs picks the reference targets out of a root schema, so they
+// can be re-attached to any fragment that might reference them.
+static json json_skeleton_defs(const json & schema) {
+    json out = json::object();
+    if (!schema.is_object()) {
+        return out;
+    }
+    for (const char * key : { "$defs", "definitions" }) {
+        if (schema.contains(key)) {
+            out[key] = schema.at(key);
+        }
+    }
+    return out;
+}
+
+// A Lark fragment for `schema`. ALWAYS returns something: anything the skeleton
+// cannot express is delegated to `%json` for that subtree alone, so the caller
+// has no fallback branch and no schema is ever left unconstrained.
+static std::string json_skeleton_rule(const json & schema, int depth, const json & defs) {
     if (depth > 8 || !schema.is_object() || !json_skeleton_expressible(schema)) {
-        return "";
+        return json_skeleton_delegate(schema, defs);
+    }
+
+    // anyOf becomes a Lark alternation, which llguidance's own docs give as the
+    // equivalent form: "you can use either `%json { "anyOf": [ ... ] }`, or
+    // `fun_call1 | fun_call2` where each `fun_callX` is defined as `%json { ... }`"
+    // (docs/syntax.md). Emitting it here rather than delegating is what keeps the
+    // joints INSIDE the union bounded as well.
+    //
+    // It matters for conformance, not tidiness: OpenAI's structured outputs
+    // PERMIT anyOf at strict=true, so a fully spec-compliant schema used to lose
+    // the whitespace bound for the entire document -- the person adding it would
+    // have been making the schema more standards-compliant, not less.
+    //
+    // Only when anyOf is the sole non-ignorable keyword. llguidance defines
+    // sibling keys alongside anyOf as an INTERSECTION of the two schemas
+    // (docs/json_schema.md), which this emitter cannot express, so anything else
+    // present sends the whole node to `%json` where the intersection is handled.
+    if (schema.contains("anyOf")) {
+        const auto & branches = schema.at("anyOf");
+        bool alone = branches.is_array() && !branches.empty();
+        for (const auto & member : schema.items()) {
+            if (member.key() != "anyOf" && !json_skeleton_ignorable(member.key())) {
+                alone = false;
+            }
+        }
+        if (!alone) {
+            return json_skeleton_delegate(schema, defs);
+        }
+        std::vector<std::string> alts;
+        for (const auto & branch : branches) {
+            alts.push_back(json_skeleton_rule(branch, depth + 1, defs));
+        }
+        return "(" + string_join(alts, " | ") + ")";
     }
 
     // A literal alternation is tighter than `%json` and, being literals, holds
@@ -1491,12 +1589,12 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
     if (schema.contains("enum")) {
         const auto & values = schema.at("enum");
         if (!values.is_array() || values.empty()) {
-            return "";
+            return json_skeleton_delegate(schema, defs);
         }
         std::vector<std::string> alts;
         for (const auto & value : values) {
             if (value.is_object() || value.is_array()) {
-                return "";
+                return json_skeleton_delegate(schema, defs);
             }
             alts.push_back(gemma4_string_literal(value.dump()));
         }
@@ -1521,12 +1619,9 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
 
     if (type == "array") {
         if (!schema.contains("items")) {
-            return "";
+            return json_skeleton_delegate(schema, defs);
         }
-        const std::string item = json_skeleton_rule(schema.at("items"), depth + 1);
-        if (item.empty()) {
-            return "";
-        }
+        const std::string item = json_skeleton_rule(schema.at("items"), depth + 1, defs);
         // No two whitespace slots are ever adjacent -- an empty array takes the
         // trailing one only -- so the bound is per joint and not per spelling.
         return "(\"[\" (" + ws_member + item + "(" + ws_comma + "\",\"" + ws_member + item + ")*)?" +
@@ -1534,7 +1629,7 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
     }
 
     if (type != "object" || !schema.contains("properties") || !schema.at("properties").is_object()) {
-        return "";
+        return json_skeleton_delegate(schema, defs);
     }
     // Only a CLOSED object, and only one whose properties are all required.
     // Both were measured against `%json` rather than assumed: it rejects an
@@ -1544,7 +1639,7 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
     // property would additionally raise a question about permutations that
     // nothing here needs answered.
     if (!schema.contains("additionalProperties") || schema.at("additionalProperties") != false) {
-        return "";
+        return json_skeleton_delegate(schema, defs);
     }
     std::vector<std::string> required;
     for (const auto & name : schema.value("required", json::array())) {
@@ -1556,12 +1651,9 @@ static std::string json_skeleton_rule(const json & schema, int depth) {
     bool first = true;
     for (const auto & property : schema.at("properties").items()) {
         if (std::find(required.begin(), required.end(), property.key()) == required.end()) {
-            return "";
+            return json_skeleton_delegate(schema, defs);
         }
-        const std::string value = json_skeleton_rule(property.value(), depth + 1);
-        if (value.empty()) {
-            return "";
-        }
+        const std::string value = json_skeleton_rule(property.value(), depth + 1, defs);
         if (!first) {
             body += ws_comma;
             body += "\",\"";
@@ -1584,17 +1676,19 @@ static std::string inject_response_schema(const std::string & grammar_template, 
     }
     std::string schema;
     if (is_lark_grammar(grammar_template)) {
-        // A skeleton where the schema allows one, so the whitespace at each
-        // joint is bounded; otherwise the flat form, which is what shipped
-        // before the skeleton existed. Neither overrides llguidance's
-        // whitespace SETTINGS -- see json_skeleton_rule for why both attempts
-        // at that made things worse. A caller's own x-guidance still wins on
-        // the flat path; that is live, verified by handing it an invalid regex
-        // and getting llguidance's compile error back as a 400.
-        schema = json_skeleton_rule(json_schema, 0);
-        if (schema.empty()) {
-            schema = "%json " + json_schema.dump();
-        }
+        // A skeleton wherever the schema allows one, so the whitespace at each
+        // joint is bounded, and a per-subtree `%json` wherever it does not.
+        // Neither overrides llguidance's whitespace SETTINGS -- see
+        // json_skeleton_rule for why both attempts at that made things worse. A
+        // caller's own x-guidance still reaches llguidance on a delegated
+        // subtree; that is live, verified by handing it an invalid regex and
+        // getting llguidance's compile error back as a 400.
+        //
+        // No fallback branch: json_skeleton_rule always returns a rule now, and
+        // delegates only the subtrees it cannot express. A root-level delegation
+        // reproduces exactly the flat form that shipped before the skeleton
+        // existed, so the degraded case is unchanged.
+        schema = json_skeleton_rule(json_schema, 0, json_skeleton_defs(json_schema));
     } else {
         std::string gbnf = build_grammar([&](const common_grammar_builder & builder) {
             auto s = json_schema;

@@ -2410,6 +2410,104 @@ static void test_gemma4_response_schema_whitespace() {
     }
 
     {
+        // anyOf, which OpenAI's structured outputs PERMIT at strict=true. Before
+        // the skeleton handled it, one anyOf anywhere sent the WHOLE schema to a
+        // flat %json and every joint in the document lost its bound -- so writing
+        // a spec-compliant schema silently reintroduced the runaway.
+        //
+        // Emitted as a Lark alternation, which llguidance's own docs give as the
+        // equivalent of %json {"anyOf": [...]}, so the joints inside the union
+        // stay bounded too.
+        const std::string with_anyof =
+            R"({"type":"object","properties":{"value":{"anyOf":[)"
+            R"({"type":"string"},{"type":"integer"}]}},)"
+            R"("required":["value"],"additionalProperties":false})";
+        const auto rhs = content_rule(grammar_for(with_anyof));
+        if (rhs.rfind("%json", 0) == 0) {
+            fprintf(stderr, "    FAIL: anyOf still sent the whole schema to a flat %%json\n    %s\n",
+                    rhs.c_str());
+            assert(false);
+        }
+        const std::string gap(40, ' ');
+        test_grammar("gemma4 response schema: anyOf branches, joints still bounded",
+                     "%llguidance {}\nstart: " + rhs + "\n",
+                     {
+                         R"({"value":"text"})",   // first branch
+                         R"({"value":42})",       // second branch
+                         R"({"value": "text"})",  // the serializer's single space
+                         "{\n  \"value\": 42\n}", // pretty-printed
+                     },
+                     {
+                         // Neither branch admits the other's type.
+                         R"({"value":true})",
+                         R"({"value":[1]})",
+                         // The bound still applies at the joints AROUND the union:
+                         // emitting the alternation rather than delegating is what
+                         // keeps these illegal.
+                         "{" + gap + R"("value":"text"})",
+                         R"({"value")" + gap + R"(:"text"})",
+                         R"({"value":"text")" + gap + "}",
+                     });
+    }
+
+    {
+        // A subtree the skeleton cannot express must be delegated ALONE, leaving
+        // the joints above it bounded. `pattern` is the disqualifier here; before
+        // this, it flattened the entire document.
+        const std::string with_pattern =
+            R"({"type":"object","properties":{"id":{"type":"string","pattern":"^[a-z]+$"}},)"
+            R"("required":["id"],"additionalProperties":false})";
+        const auto rhs = content_rule(grammar_for(with_pattern));
+        if (rhs.rfind("%json", 0) == 0) {
+            fprintf(stderr, "    FAIL: an unexpressible PROPERTY flattened the whole schema\n    %s\n",
+                    rhs.c_str());
+            assert(false);
+        }
+        const std::string gap(40, ' ');
+        test_grammar("gemma4 response schema: one subtree delegated, outer joints bounded",
+                     "%llguidance {}\nstart: " + rhs + "\n",
+                     {
+                         R"({"id":"abc"})",
+                         R"({"id": "abc"})",
+                     },
+                     {
+                         // llguidance still enforces the delegated subtree's own
+                         // constraint, so delegation is not a loss of meaning.
+                         R"({"id":"ABC"})",
+                         R"({"id":"a1"})",
+                         // ...and the joints outside it are still bounded, which
+                         // is the whole point of delegating per subtree.
+                         "{" + gap + R"("id":"abc"})",
+                         R"({"id":"abc")" + gap + "}",
+                     });
+    }
+
+    {
+        // $ref + $defs. llguidance treats $defs as an annotation it ignores UNTIL
+        // a ref resolves against it, so a delegated fragment that dropped them
+        // would produce a grammar that fails to BUILD -- and a grammar that fails
+        // to build fails OPEN, leaving the sampler unconstrained. This is the
+        // regression test for carrying them along.
+        const std::string with_ref =
+            R"({"type":"object","properties":{"who":{"$ref":"#/$defs/name"}},)"
+            R"("required":["who"],"additionalProperties":false,)"
+            R"("$defs":{"name":{"type":"string","enum":["ada","alan"]}}})";
+        const auto rhs = content_rule(grammar_for(with_ref));
+        test_grammar("gemma4 response schema: $ref resolves inside a delegated subtree",
+                     "%llguidance {}\nstart: " + rhs + "\n",
+                     {
+                         R"({"who":"ada"})",
+                         R"({"who":"alan"})",
+                     },
+                     {
+                         // If $defs had been dropped the grammar would not build,
+                         // and a non-building grammar accepts everything -- so this
+                         // rejection is what proves the reference resolved.
+                         R"({"who":"grace"})",
+                     });
+    }
+
+    {
         const auto line = content_rule(grammar_for(schema));
 
         // NO x-guidance IS ADDED. This assertion is inverted from what it was,
