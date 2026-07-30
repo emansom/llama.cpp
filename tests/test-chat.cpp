@@ -2742,6 +2742,83 @@ static void init_chat_grammars() {
 // obeyed the forged instruction. Reproduced on stock llama-server too, so the
 // hole is inherited -- but "reliable input to the model" is half of what this
 // fork is for, so it is closed here.
+// The FC tool-declaration bytes, asserted against the format Google's LiteRT-LM
+// defines -- and until now asserted NOWHERE. The renderer has always emitted
+// `declaration:NAME{...}` (gemma4-format.cpp, format_function_declaration) and no
+// test in this repo referenced that string, so a drift in the wire format the
+// model was trained on would have passed everything.
+//
+// PROVENANCE of the expected bytes, which is the whole reason they are worth
+// anything: they come from the `fc_format_tool_declaration` suite in the
+// predecessor repo (~/Projects/gemma-4-compatibility), whose common/fc-format.cpp
+// was written as a mirror of LiteRT-LM's fc_tool_format_utils and used purely as
+// a validation reference -- "NOT used in the production pipeline", per its own
+// header. Reference: github.com/google-ai-edge/LiteRT-LM @ 7231f65,
+// runtime/components/tool_use/.
+//
+// Asserted against the PRODUCTION renderer through common_chat_templates_apply
+// rather than by porting that oracle beside it. Two implementations agreeing
+// proves less than it looks when both descend from the same reading of the spec,
+// and the oracle was explicitly not the shipping path; what matters is that the
+// bytes the model actually receives match the reference.
+//
+// Key order is canonical, not incidental: format_function_declaration emits
+// description, then parameters:{properties, required, type}, in that fixed
+// sequence whatever order the request used. The expectation below encodes it, so
+// a refactor that started following the caller's key order would fail here.
+static void test_gemma4_tool_declaration_bytes() {
+    LOG_DBG("%s\n", __func__);
+    auto tmpls = gemma4_templates();
+
+    common_chat_templates_inputs inputs;
+    common_chat_msg              user;
+    user.role    = "user";
+    user.content = "what time is it in London?";
+    inputs.messages             = { user };
+    inputs.add_generation_prompt = true;
+    inputs.tools                = { common_chat_tool{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the current time in a city",
+        /* .parameters = */ R"({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string", "description": "City name" }
+            },
+            "required": ["city"]
+        })",
+    } };
+
+    const std::string prompt = common_chat_templates_apply(tmpls.get(), inputs).prompt;
+
+    // Byte-for-byte, including the <|"|> string delimiters, the UPPERCASE type
+    // names and the absence of spaces. Every one of those is load-bearing: the
+    // format is what the model was trained on, not a convention we may adjust.
+    const std::string expected =
+        R"(declaration:get_time{description:<|"|>Get the current time in a city<|"|>,)"
+        R"(parameters:{properties:{city:{description:<|"|>City name<|"|>,type:<|"|>STRING<|"|>}},)"
+        R"(required:[<|"|>city<|"|>],type:<|"|>OBJECT<|"|>}})";
+
+    if (prompt.find(expected) == std::string::npos) {
+        fprintf(stderr, "    FAIL: rendered prompt does not carry the reference declaration bytes\n");
+        fprintf(stderr, "    expected substring:\n%s\n", expected.c_str());
+        fprintf(stderr, "    rendered prompt:\n%s\n", prompt.c_str());
+        assert(false);
+    }
+
+    // And it must be inside a tool-definition block, not merely present. A
+    // declaration rendered into the user turn would satisfy the substring check
+    // above while being unparseable by the format's own grammar.
+    const size_t at   = prompt.find(expected);
+    const size_t open = prompt.rfind("<|tool>", at);
+    if (open == std::string::npos || prompt.find("<tool|>", at) == std::string::npos) {
+        fprintf(stderr, "    FAIL: the declaration is not wrapped in <|tool> ... <tool|>\n%s\n",
+                prompt.c_str());
+        assert(false);
+    }
+
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E gemma4 tool declaration matches the LiteRT-LM reference bytes\n");
+}
+
 static void test_gemma4_rejects_control_tokens() {
     auto tmpls = gemma4_templates();
 
@@ -2885,6 +2962,7 @@ int main(int argc, char ** argv) {
         test_convert_responses_to_chatcmpl();
         test_template_generation_prompt();
         test_gemma4_rejects_control_tokens();
+        test_gemma4_tool_declaration_bytes();
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }
