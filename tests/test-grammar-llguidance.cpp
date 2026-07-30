@@ -9,7 +9,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cassert>
+#include <deque>
 #include <set>
 #include <string>
 #include <vector>
@@ -1828,6 +1830,527 @@ static void test_gemma4_mask_walk() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The mask INSIDE a tool call, against the interface the request declared
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The two tests above establish different halves and neither reaches this one.
+// test_gemma4_mask_walk reads the mask but asks only about markers and prose --
+// control tokens, the format's skeleton. test_gemma4_fc_value_corpus asks about
+// the declared interface but reads only whole strings, accepted or rejected.
+//
+// Whole-string rejection is the weaker claim, and the gap is exactly where
+// steering lives. A grammar that admitted every function name and only failed at
+// the closing marker would reject `call:not_a_tool{...}` -- passing that test --
+// while leaving the mask wide open at the position where the model picks the
+// name. The model would sample `launch_missiles`, generate to the end, and the
+// whole turn would be discarded. That is not constraint; it is validation with
+// extra steps, and it is invisible to every assertion written so far.
+//
+// So the question here is per position and exhaustive: at each step inside a
+// call, what is the COMPLETE set of tokens llguidance leaves, and is that set
+// what the request's `tools` entry permits and nothing more?
+
+// Every token the mask leaves at a position, with its id. Not capped the way a
+// walk's listing is: the violation being hunted is an EXTRA token, and a cap is
+// precisely what would hide one.
+static std::vector<std::pair<llama_token, std::string>> mask_tokens_at(
+        llama_sampler * grammar, const std::vector<llama_token> & prefix) {
+    llama_sampler_reset(grammar);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    std::vector<llama_token_data> cur;
+    cur.reserve(n_vocab);
+    for (llama_token t = 0; t < n_vocab; t++) {
+        cur.emplace_back(llama_token_data{ t, 0.0f, 0.0f });
+    }
+    llama_token_data_array arr = { cur.data(), cur.size(), -1, false };
+
+    // apply-then-accept per token, the order walk_mask uses.
+    for (auto tok : prefix) {
+        for (llama_token t = 0; t < n_vocab; t++) { cur[t].logit = 0.0f; }
+        llama_sampler_apply(grammar, &arr);
+        llama_sampler_accept(grammar, tok);
+    }
+    for (llama_token t = 0; t < n_vocab; t++) { cur[t].logit = 0.0f; }
+    llama_sampler_apply(grammar, &arr);
+
+    std::vector<std::pair<llama_token, std::string>> out;
+    for (llama_token t = 0; t < n_vocab; t++) {
+        if (cur[t].logit < 0.0f) { continue; }
+        char    tb[256];
+        int32_t tl = llama_detokenize(vocab, &t, 1, tb, sizeof(tb), false, true);
+        out.emplace_back(t, std::string(tb, tl > 0 ? (size_t) tl : 0));
+    }
+    return out;
+}
+
+static std::vector<std::pair<llama_token, std::string>> mask_after(llama_sampler * grammar,
+                                                                   const std::string & prefix) {
+    return mask_tokens_at(grammar, common_tokenize(vocab, prefix, false, true));
+}
+
+// Can the model REACH `tail` from `prefix`, under ANY tokenization?
+//
+// A sampler answers one question per token, so this walks BYTE OFFSETS: from an
+// offset, every allowed token matching the bytes there advances to a new offset,
+// and an offset no allowed token can leave is a dead end. Memoized on the offset,
+// so each is expanded once.
+//
+// Walking offsets rather than one tokenization is what makes a NEGATIVE result
+// mean something. `common_tokenize` picks a single segmentation; if that one is
+// blocked, another might not be, and the claim "the model cannot write this"
+// would be unproven. Exhausting the offsets proves it for every segmentation --
+// the difference between "the model would not" and "the model cannot", which is
+// the whole difference between hoping and masking.
+static bool mask_reaches(llama_sampler * grammar, const std::string & prefix, const std::string & tail,
+                         std::string * furthest = nullptr) {
+    const auto  head = common_tokenize(vocab, prefix, false, true);
+    const size_t n   = tail.size();
+
+    std::vector<std::vector<llama_token>> path(n + 1);
+    std::vector<bool>                     seen(n + 1, false);
+    std::deque<size_t>                    queue;
+
+    seen[0] = true;
+    path[0] = head;
+    queue.push_back(0);
+    size_t best = 0;
+
+    while (!queue.empty()) {
+        const size_t at = queue.front();
+        queue.pop_front();
+        if (at == n) { return true; }
+
+        for (const auto & [id, piece] : mask_tokens_at(grammar, path[at])) {
+            if (piece.empty()) { continue; }
+            const size_t left = n - at;
+            if (piece.size() >= left) {
+                // A token that runs past the goal still reaches it, so long as
+                // what remains of the tail opens the token.
+                if (piece.compare(0, left, tail, at, left) == 0) { return true; }
+                continue;
+            }
+            if (tail.compare(at, piece.size(), piece) != 0) { continue; }
+            const size_t next = at + piece.size();
+            if (seen[next]) { continue; }
+            seen[next] = true;
+            path[next] = path[at];
+            path[next].push_back(id);
+            best       = std::max(best, next);
+            queue.push_back(next);
+        }
+    }
+    if (furthest != nullptr) { *furthest = tail.substr(0, best); }
+    return false;
+}
+
+// Assert the mask at a position is CONFINED: every token it leaves must be able
+// to open one of the continuations the declared interface permits.
+//
+// Soundness only. Completeness -- that each legal continuation is still
+// reachable -- is mask_reaches's job, and both directions are needed: a mask that
+// allows nothing is trivially confined and useless.
+static void mask_confined_to(llama_sampler *                  grammar,
+                             const char *                     where,
+                             const std::string &              prefix,
+                             const std::vector<std::string> & legal) {
+    const auto allowed = mask_after(grammar, prefix);
+
+    std::vector<std::string> stray;
+    for (const auto & [id, piece] : allowed) {
+        // An empty piece is not "harmless whitespace": it is a token the model
+        // may sample that advances no byte, so it can never be ruled out by a
+        // byte-level argument. At a structural position there is nothing it
+        // could legitimately be.
+        bool ok = false;
+        for (const auto & c : legal) {
+            const size_t k = std::min(piece.size(), c.size());
+            if (k > 0 && piece.compare(0, k, c, 0, k) == 0) { ok = true; break; }
+        }
+        if (!ok) { stray.push_back(piece); }
+    }
+
+    // Shown by distinct TEXT, counted by token. The two differ: a vocabulary
+    // carries more than one id spelling the same bytes, so `s | s` in a listing
+    // is two real tokens and not a bug in the printing.
+    std::set<std::string> distinct;
+    for (const auto & [id, piece] : allowed) { distinct.insert(piece); }
+    std::string shown;
+    size_t      n = 0;
+    for (const auto & p : distinct) {
+        if (n++ == 12) { shown += " | ..."; break; }
+        shown += (shown.empty() ? "" : " | ") + p;
+    }
+    fprintf(stderr, "    %-34s %4zu tokens / %2zu distinct  %s\n", where, allowed.size(),
+            distinct.size(), shown.c_str());
+
+    if (!stray.empty()) {
+        fprintf(stderr, "    FAIL: %s admits %zu token(s) the declared interface does not permit:\n",
+                where, stray.size());
+        for (size_t i = 0; i < stray.size() && i < 20; i++) {
+            fprintf(stderr, "          \"%s\"\n", stray[i].c_str());
+        }
+        assert(false);
+    }
+    assert(!allowed.empty() && "a mask that allows nothing is not a constraint");
+}
+
+// `must` / `must not` against the sampler, printed so a reader sees where a
+// rejected string died rather than only that it did.
+static void reachable(llama_sampler * g, const std::string & prefix, const std::string & tail,
+                      bool want, const char * why) {
+    std::string furthest;
+    const bool  got = mask_reaches(g, prefix, tail, &furthest);
+    fprintf(stderr, "    %-7s %-46s %s\n", got ? "REACHES" : "blocked",
+            ("\"" + tail + "\"").c_str(), why);
+    if (got != want) {
+        fprintf(stderr, "    FAIL: \"%s\" should be %s; the mask got as far as \"%s\"\n",
+                tail.c_str(), want ? "reachable" : "unreachable", furthest.c_str());
+        assert(false);
+    }
+}
+
+// Defined with the FSM conformance cases below, which is where the placeholder
+// substitution belongs; needed here only for the negative control.
+static std::string gemma4_grammar_at(const std::string & base, const std::string & root, bool tools);
+
+static void test_gemma4_tool_interface_mask(const std::string & grammars_dir) {
+    // Three tools, chosen so each assertion is decidable at one token.
+    //
+    // The NAMES share prefixes on purpose -- `get_` opens one, `se` opens two --
+    // so "the mask admits a prefix" and "the mask admits a name" are separate
+    // observations. A near-miss like `get_weather` is the interesting negative
+    // precisely because its first four characters are legal.
+    //
+    // The PROPERTY names are pairwise distinct in their first character, which is
+    // what makes the cross-tool claim decidable: if `city` is reachable inside
+    // send_email's arguments, the grammar paired a name with the wrong schema.
+    common_chat_tool get_time{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the current time in a city",
+        /* .parameters = */ R"({"type":"object",
+            "properties":{"city":{"type":"string"}},
+            "required":["city"],"additionalProperties":false})",
+    };
+    common_chat_tool send_email{
+        /* .name = */ "send_email",
+        /* .description = */ "Send an email",
+        /* .parameters = */ R"({"type":"object",
+            "properties":{"recipient":{"type":"string"},"urgent":{"type":"boolean"}},
+            "required":["recipient","urgent"],"additionalProperties":false})",
+    };
+    common_chat_tool set_volume{
+        /* .name = */ "set_volume",
+        /* .description = */ "Set the output volume",
+        /* .parameters = */ R"({"type":"object",
+            "properties":{"level":{"type":"integer"}},
+            "required":["level"],"additionalProperties":false})",
+    };
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "what time is it in London?";
+
+    common_chat_templates_inputs inputs;
+    inputs.messages              = { user };
+    inputs.tools                 = { get_time, send_email, set_volume };
+    inputs.tool_choice           = COMMON_CHAT_TOOL_CHOICE_REQUIRED;
+    inputs.add_generation_prompt = true;
+    inputs.enable_thinking       = false;
+
+    auto tmpls  = common_chat_templates_ptr(common_chat_templates_init(
+        /* model= */ nullptr, /* chat_template_override= */ "",
+        /* bos_token_override= */ "", /* eos_token_override= */ "",
+        /* chat_format_override= */ "gemma4"));
+    auto params = common_chat_templates_apply(tmpls.get(), inputs);
+    assert(!params.grammar.empty());
+
+    auto * g = llama_sampler_init_llg(vocab, "lark", params.grammar.c_str());
+    // Null means the grammar did not compile, and llguidance answers that by
+    // failing OPEN. Every assertion below would then be measuring an
+    // unconstrained sampler.
+    assert(g != nullptr && "tool grammar failed to compile");
+
+    const std::string CALL = "<|tool_call>call:";
+    const std::string Q    = "<|\"|>";
+
+    // The complete legal payload for each declared tool. Property order follows
+    // the declaration, which is what llguidance pins a strict schema to.
+    const std::vector<std::string> legal_calls = {
+        "get_time{city:" + Q + "London" + Q + "}",
+        "send_email{recipient:" + Q + "a@b" + Q + ",urgent:true}",
+        "set_volume{level:7}",
+    };
+
+    fprintf(stderr, "\n  the mask inside a tool call (3 tools declared, tool_choice=required):\n");
+
+    // ── 1. The function name ─────────────────────────────────────────────────
+    //
+    // The position the whole FSM exists to control. Every token here must open
+    // one of the three declared names; there is no fourth alternative, and a
+    // free identifier would show up as stray tokens.
+    mask_confined_to(g, "after \"call:\"", CALL, legal_calls);
+
+    // Each declared tool stays reachable -- soundness alone would be satisfied by
+    // a mask that had silently dropped two of the three.
+    reachable(g, CALL, "get_time{",   true, "declared");
+    reachable(g, CALL, "send_email{", true, "declared");
+    reachable(g, CALL, "set_volume{", true, "declared");
+
+    // And nothing else is. `get_weather` is the case that matters: `get_` is a
+    // legal prefix, so this can only fail at the `w`, which is what walking byte
+    // offsets is for.
+    reachable(g, CALL, "launch_missiles{", false, "never declared");
+    reachable(g, CALL, "get_weather{",     false, "near-miss: shares the get_ prefix");
+    reachable(g, CALL, "send_emails{",     false, "near-miss: one character over");
+    reachable(g, CALL, "get_tim{",         false, "near-miss: one character short");
+
+    // ── 2. The argument keys are bound to the name that was chosen ───────────
+    //
+    // The sharpest form of "the FSM knows which states inside a call are
+    // allowed". A grammar shaped `any_declared_name "{" any_declared_args "}"`
+    // passes every test written before this one, and is wrong: it lets the model
+    // name one tool and carry another's arguments.
+    mask_confined_to(g, "after \"send_email{\"", CALL + "send_email{",
+                     { "recipient:" + Q + "a@b" + Q + ",urgent:true}" });
+    mask_confined_to(g, "after \"set_volume{\"", CALL + "set_volume{", { "level:7}" });
+
+    reachable(g, CALL + "send_email{", "recipient:", true,  "send_email's own property");
+    reachable(g, CALL + "send_email{", "city:",      false, "get_time's property, wrong tool");
+    reachable(g, CALL + "send_email{", "level:",     false, "set_volume's property, wrong tool");
+    reachable(g, CALL + "get_time{",   "recipient:", false, "send_email's property, wrong tool");
+    reachable(g, CALL + "get_time{",   "zzz:",       false, "additionalProperties is false");
+
+    // ── 3. The value type is the DECLARED type ───────────────────────────────
+    //
+    // `city` is declared string, so the only legal continuation is the string
+    // delimiter -- exactly one entry in the whole 262k vocabulary. Nothing about
+    // Gemma 4's FC syntax requires that; the schema does.
+    {
+        const auto allowed = mask_after(g, CALL + "get_time{city:");
+        std::vector<std::string> pieces;
+        for (const auto & [id, p] : allowed) { pieces.push_back(p); }
+        std::sort(pieces.begin(), pieces.end());
+        fprintf(stderr, "    %-34s %4zu legal  %s\n", "after \"get_time{city:\"", pieces.size(),
+                pieces.empty() ? "" : pieces[0].c_str());
+        assert((pieces == std::vector<std::string>{ Q }) &&
+               "a declared string admits the delimiter and nothing else");
+    }
+
+    // Booleans and integers, the two shapes a string-only rule would wave
+    // through. Both directions of the type error are checked, because a rule
+    // emitting "any value" for every property satisfies only one of them.
+    reachable(g, CALL + "get_time{city:",   "7",     false, "declared string, given a number");
+    reachable(g, CALL + "get_time{city:",   "true",  false, "declared string, given a boolean");
+    reachable(g, CALL + "get_time{city:",   "null",  false, "declared string, given null");
+    reachable(g, CALL + "get_time{city:",   "{",     false, "declared string, given an object");
+    reachable(g, CALL + "get_time{city:",   "[",     false, "declared string, given an array");
+
+    reachable(g, CALL + "set_volume{level:", "7",    true,  "declared integer");
+    reachable(g, CALL + "set_volume{level:", "-7",   true,  "NUMBER carries the sign");
+    reachable(g, CALL + "set_volume{level:", Q,      false, "declared integer, given a string");
+    reachable(g, CALL + "set_volume{level:", "true", false, "declared integer, given a boolean");
+
+    const std::string EMAIL = CALL + "send_email{recipient:" + Q + "a@b" + Q;
+    reachable(g, EMAIL + ",urgent:", "true",  true,  "declared boolean");
+    reachable(g, EMAIL + ",urgent:", "false", true,  "declared boolean");
+    reachable(g, EMAIL + ",urgent:", "1",     false, "declared boolean, given a number");
+    reachable(g, EMAIL + ",urgent:", Q,       false, "declared boolean, given a string");
+
+    // ── 4. A required argument cannot be skipped ─────────────────────────────
+    //
+    // `urgent` is required, so the call cannot close after `recipient`. This is
+    // the one constraint a model under length pressure is most likely to want to
+    // break, and the mask has to be what stops it.
+    reachable(g, EMAIL, ",", true,  "urgent is still owed");
+    reachable(g, EMAIL, "}", false, "required urgent omitted");
+    reachable(g, CALL + "send_email", "{}", false, "both required arguments omitted");
+    reachable(g, CALL + "get_time",   "{}", false, "required city omitted");
+
+    // ── 5. The call closes only once the interface is satisfied ──────────────
+    reachable(g, EMAIL + ",urgent:true", "}<tool_call|>", true, "complete call");
+    reachable(g, CALL + "get_time{city:" + Q + "London" + Q, "}<tool_call|>", true, "complete call");
+
+    llama_sampler_free(g);
+
+    // ── 6. The negative control: none of this comes from the format ──────────
+    //
+    // Every restriction above is the DECLARED INTERFACE's, not Gemma 4's FC
+    // syntax. With no tools declared the grammar degrades to the format's own
+    // any-name/any-dict shape, so `launch_missiles{city:<|"|>x<|"|>}` is
+    // well-formed FC -- and if it were reachable in the run above, the test would
+    // have been measuring syntax and calling it an interface.
+    //
+    // This is the control that makes the difference visible, and it is checked
+    // through the same entry rule so nothing else varies.
+    {
+        common_chat_grammar_init(grammars_dir);
+        const std::string any = gemma4_grammar_at(common_chat_grammar_get("gemma4"),
+                                                  "turn_start_tool_call", /* tools = */ true);
+        auto * ga = llama_sampler_init_llg(vocab, "lark", any.c_str());
+        assert(ga != nullptr);
+        reachable(ga, CALL, "launch_missiles{", true,
+                  "FC syntax alone permits it -- only the interface does not");
+        reachable(ga, CALL + "launch_missiles{", "city:" + Q, true,
+                  "and any dict, since nothing declared a schema to bind to");
+        llama_sampler_free(ga);
+    }
+
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E tool-interface mask\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The conversation reaches the sampler — the chain, joined
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every link already has a test. test-chat.cpp asserts a rendered prompt implies
+// an entry STATE; test_gemma4_entry_selection asserts a state implies an entry
+// ROOT; test_gemma4_fsm_conformance asserts a root implies a MASK, compiling that
+// root by hand.
+//
+// A chain tested link by link can still be broken at a joint. The production path
+// could derive the state correctly and then hand llguidance a grammar built from
+// somewhere else -- a fixed root, say -- and all three tests would still pass,
+// because not one of them takes the grammar that `common_chat_templates_apply`
+// actually produced.
+//
+// So this varies ONLY the conversation, reads `params.grammar` -- the bytes the
+// server ships to the sampler -- and asks what the mask permits at the first
+// token. If the FSM's knowledge of where the conversation stands reaches
+// llguidance at all, these cases cannot agree with each other.
+static void test_gemma4_conversation_drives_the_mask() {
+    common_chat_tool get_time{
+        /* .name = */ "get_time",
+        /* .description = */ "Get the current time in a city",
+        /* .parameters = */ R"({"type":"object","properties":{"city":{"type":"string"}},
+            "required":["city"],"additionalProperties":false})",
+    };
+
+    common_chat_msg user;
+    user.role    = "user";
+    user.content = "what time is it in London?";
+
+    auto tmpls = common_chat_templates_ptr(common_chat_templates_init(
+        /* model= */ nullptr, /* chat_template_override= */ "",
+        /* bos_token_override= */ "", /* eos_token_override= */ "",
+        /* chat_format_override= */ "gemma4"));
+
+    const auto markers = marker_probes();
+
+    struct convo {
+        const char *              label;
+        bool                      tools;
+        bool                      thinking;
+        bool                      require_call;
+        bool                      prefill_open_thought;
+        std::vector<const char *> must_allow;
+        std::vector<const char *> must_deny;
+    };
+
+    const std::vector<convo> cases = {
+        // Nothing said yet and thinking is on: the turn may open with a thought,
+        // go straight to a call, or answer. All three are the format's.
+        { "fresh turn, thinking on", true, true, false, false,
+          { "<|channel>", "<|tool_call>", "<turn|>" }, { "<channel|>", "<tool_call|>" } },
+
+        // The same request with thinking OFF, and the turn owing nothing. The
+        // prompt carries the empty-thought prefill, so the tracker reports
+        // IN_CONTENT rather than a fresh turn -- and `<|channel>` stays legal
+        // anyway. That asymmetry is deliberate and measured (gemma4.lark, the
+        // note above resume_content_tool_call): `turn_tail` is unbounded content
+        // already, so a thought before it costs nothing, while blocking it left
+        // a turn that may not call, may not think and has no answer -- which
+        // degenerated into the literal word "thought" until the token cap.
+        //
+        // Pinned as an assertion because it reads like an oversight. A mask can
+        // be correct and still corner a model, and that is what this row is.
+        { "thinking off, nothing owed", true, false, false, false,
+          { "<|channel>", "<|tool_call>", "<turn|>" }, { "<channel|>" } },
+
+        // The contrast, and the reason the row above is not simply a hole: the
+        // same state with a call OWED drops the thought opener structurally.
+        // `tool_choice` is per request, so this pair is the demand reaching the
+        // sampler -- nothing else differs between the two.
+        { "thinking off, a call owed", true, false, true, false,
+          { "<|tool_call>" }, { "<|channel>", "<channel|>", "<turn|>" } },
+
+        // Tools removed. The tool-call alternative leaves the grammar entirely:
+        // with nothing declared there is no interface to constrain a call
+        // against, so permitting one would be permitting an invented function.
+        { "no tools declared", false, true, false, false,
+          { "<|channel>", "<turn|>" }, { "<|tool_call>", "<channel|>" } },
+
+        // Generation resumes INSIDE a thought the prompt left open. The closer is
+        // legal and the opener is not -- a thought inside a thought is what the
+        // resume entry exists to make unrepresentable.
+        { "resuming an open thought", true, true, false, true,
+          { "<channel|>" }, { "<|channel>", "<|tool_call>", "<turn|>" } },
+    };
+
+    fprintf(stderr, "\n  the conversation decides the mask (production grammar, first token):\n");
+
+    for (const auto & c : cases) {
+        common_chat_templates_inputs in;
+        in.messages        = { user };
+        in.enable_thinking = c.thinking;
+        if (c.tools) {
+            in.tools       = { get_time };
+            in.tool_choice = c.require_call ? COMMON_CHAT_TOOL_CHOICE_REQUIRED
+                                            : COMMON_CHAT_TOOL_CHOICE_AUTO;
+        }
+        if (c.prefill_open_thought) {
+            // An assistant message carrying reasoning and no content renders as
+            // an UNCLOSED thought, which is what puts the tracker in
+            // IN_REASONING. Nothing here says "IN_REASONING" -- the state is
+            // derived from the bytes, which is the property under test.
+            common_chat_msg prefill;
+            prefill.role              = "assistant";
+            prefill.reasoning_content = "I'm";
+            in.messages.push_back(prefill);
+            in.continue_final_message = COMMON_CHAT_CONTINUATION_REASONING;
+            in.add_generation_prompt  = false;
+        } else {
+            in.add_generation_prompt = true;
+        }
+
+        auto params = common_chat_templates_apply(tmpls.get(), in);
+        assert(!params.grammar.empty());
+
+        auto * g = llama_sampler_init_llg(vocab, "lark", params.grammar.c_str());
+        assert(g != nullptr && "production grammar failed to compile");
+
+        std::set<std::string> legal;
+        for (const auto & [id, piece] : mask_tokens_at(g, {})) {
+            for (const auto & [name, mid] : markers) {
+                if (id == mid) { legal.insert(name); }
+            }
+        }
+
+        std::string shown;
+        for (const auto & m : legal) { shown += (shown.empty() ? "" : " ") + m; }
+        fprintf(stderr, "    %-26s entry=%-2d  markers: %s\n", c.label,
+                static_cast<int>(params.chat_prompt.entry_state),
+                shown.empty() ? "(none)" : shown.c_str());
+
+        for (const char * m : c.must_allow) {
+            if (legal.count(m) == 0) {
+                fprintf(stderr, "    FAIL: %s must be legal for \"%s\" but the mask removed it\n", m, c.label);
+                assert(false);
+            }
+        }
+        for (const char * m : c.must_deny) {
+            if (legal.count(m) != 0) {
+                fprintf(stderr, "    FAIL: %s must NOT be legal for \"%s\" but the mask allows it\n", m, c.label);
+                assert(false);
+            }
+        }
+        llama_sampler_free(g);
+    }
+
+    fprintf(stderr, "  \xE2\x9C\x85\xEF\xB8\x8E conversation drives the mask\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Conformance: the mask at EVERY FSM state, against the documented ordering
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -3183,6 +3706,8 @@ int main(int argc, const char ** argv) {
         test_gemma4_tool_schema();
         test_gemma4_fc_value_corpus();
         test_gemma4_mask_walk();
+        test_gemma4_tool_interface_mask(argv[2]);
+        test_gemma4_conversation_drives_the_mask();
         test_gemma4_fsm_conformance(argv[2]);
         test_gemma4_user_grammar();
         test_gemma4_response_schema_whitespace();
