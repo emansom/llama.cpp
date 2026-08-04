@@ -102,29 +102,74 @@ much as hitting it.
 
 ## Measured
 
-Radeon RX 9070 XT, 64 chained 2048×2048 matmuls × 40 iterations, duty cycle set directly:
+Radeon RX 9070 XT (Navi 48), stock 304 W board limit, kernel 7.2.0-rc5.
 
-| duty | seconds | rel. throughput | driver busy% | junction | power |
-|---|---|---|---|---|---|
-| 1.00 | 0.70 | 1.00 | 95 | 61 °C | 148 W |
-| 0.75 | 1.04 | 0.67 | 71 | 58 °C | 99 W |
-| 0.50 | 1.58 | 0.44 | 49 | 55 °C | 87 W |
-| 0.25 | 3.56 | 0.20 | 26 | 51 °C | 58 W |
+### The actuator, in isolation
 
-Driver-reported utilisation tracks the setpoint within a few percent, which is what says the
-drain works and the duty cycle is real.
+64 chained 2048x2048 matmuls, 25 s per arm, telemetry averaged over the second half of each arm
+so the reading is a steady state rather than a transient, with a 20 s cooldown between arms:
 
-Throughput falls slightly faster than the duty cycle (0.67 at duty 0.75, not 0.75). That is the
-cost of draining the queue at every pace point: it gives up the CPU/GPU overlap. It is only paid
-while actually throttling — at duty 1.0 the pace point is one relaxed atomic load.
+| duty | rel. throughput | driver busy% | junction | power |
+|---|---|---|---|---|
+| 1.00 | 1.00 | 96 | 79.8 °C | 304 W |
+| 0.75 | 0.64 | 70 | 60.5 °C | 161 W |
+| 0.50 | 0.25 | 49 | 46.1 °C | 68.6 W |
+| 0.25 | 0.11 | 25 | 44.0 °C | 53.2 W |
+
+Driver-reported utilisation tracks the setpoint within a few percent. That is the measurement
+that matters: it says the drain works and the duty cycle is real rather than a number in a log.
+
+### End to end
+
+`llama-server`, gemma-4-12b-it Q4, `-ngl 99`, 3 x 300-token streamed generations per arm. The
+generation rate is measured client-side from the token stream, because llama.cpp's own eval-time
+counter excludes the governor's sleeps and so reports the instantaneous decode rate rather than
+the rate a caller actually sees:
+
+| arm | gen tok/s | duty | junction | power | busy% | fan RPM | tok/J |
+|---|---|---|---|---|---|---|---|
+| baseline | 65.31 | 1.00 | 68.8 °C | 289 W | 95 | 3112 | 0.226 |
+| `--max-gen-tps 20` | **20.00** | 1.00 | 46.0 °C | 75 W | 41 | 1826 | 0.267 |
+| `--power-governor` (70 °C / 182 W) | 42.37 | 0.85 | 55.3 °C | 159 W | 69 | 2143 | 0.266 |
+| `--power-governor`, 55 °C / 120 W | 35.97 | 0.73 | 49.2 °C | 102 W | 62 | 1889 | 0.354 |
+| both | 20.00 | 1.00 | 46.0 °C | 83 W | 49 | 1833 | 0.242 |
+
+Three things to read out of that table.
+
+**The rate ceiling is exact.** 20.00 tok/s against a 20 tok/s target, for a 74% cut in board
+power, 23 °C off the junction and 41% off the fan. Nothing about it is approximate or reactive,
+which is why it is the lever to reach for first.
+
+**The governor only takes what it needs.** At the shipped 70 °C / 182 W targets it settled on a
+duty of 0.85 and held 65% of baseline throughput while cutting power by 45%. Tighten the targets
+and it gives up more; leave the card cool and it does nothing at all.
+
+**The arbiter behaves.** In the combined arm the rate ceiling already keeps the card at 46 °C, so
+the governor correctly sits at duty 1.00 and adds nothing. The two setpoints do not fight.
+
+### Pacing costs more throughput, and less energy, than the duty cycle suggests
+
+Both are visible above, and they pull in opposite directions.
+
+Throughput falls faster than the duty setpoint - 0.64 at duty 0.75, 0.25 at duty 0.50. Part is
+the queue drain at every pace point giving up CPU/GPU overlap, and part is the card's own DPM
+dropping clocks during the idle gaps and having to ramp back up. It is only paid while actually
+throttling: at duty 1.0 the pace point is one relaxed atomic load.
+
+But energy per token *improves* - by 18% at the shipped settings and 57% at the aggressive ones.
+Those same idle gaps let the card fall to a lower voltage/frequency point, and the baseline is
+pinned at the top of the V/f curve where efficiency is worst. So pacing is not "less work for
+proportionally less power": it buys back some of what it costs.
 
 ## What this does not do
 
-It does not write the GPU's power limit. Capping `power1_cap` would be the better actuator —
-power scales with V²f, so a 70% cap costs perhaps 10% throughput rather than 30%, and it holds
-temperature steady instead of cycling it. But it is `0644 root:root`, and the router runs
-`DynamicUser=yes` with `ProtectKernelTunables=yes`. Duty-cycle pacing needs no privilege at all,
-which is why it is what shipped. If you can set a power cap out of band, do — the two compose.
+It does not write the GPU's power limit. Capping `power1_cap` lets the card's own DPM sit at a
+lower point on the V/f curve continuously, instead of alternating between full tilt and idle, so
+it should hold a temperature target for less throughput loss and without thermal cycling - and
+thermal cycling is itself a wear mechanism. But `power1_cap` is `0644 root:root`, and the router
+runs `DynamicUser=yes` with `ProtectKernelTunables=yes`. Duty-cycle pacing needs no privilege at
+all, which is why it is what shipped. If you can set a power cap out of band, do - the two
+compose, and the governor will simply find it has less work to do.
 
 ## Observability
 

@@ -61,7 +61,10 @@ struct common_power_status {
     float target_mem_temp_c = NAN;
     float target_power_w    = NAN;
 
-    double throttled_seconds = 0.0;   // cumulative time spent sleeping to hold the setpoints
+    // Cumulative time this process slept to hold the tokens/s ceilings. The thermal duty cycle
+    // is applied by ggml at submission boundaries, so it does not show up here - `duty` is the
+    // observable for that half.
+    double throttled_seconds = 0.0;
 };
 
 struct common_power_governor;

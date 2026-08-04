@@ -4496,7 +4496,7 @@ void server_routes::init_routes() {
                     {"value",  (float) res_task->power.busy_pct}
             },{
                     {"name",  "power_throttle_seconds_total"},
-                    {"help",  "Cumulative time spent sleeping to hold the power and rate targets."},
+                    {"help",  "Cumulative time spent sleeping to hold the tokens/s ceilings. The thermal duty cycle is applied inside ggml and is not counted here; see power_duty_cycle."},
                     {"value",  res_task->power.throttled_seconds}
             }}}
         };
