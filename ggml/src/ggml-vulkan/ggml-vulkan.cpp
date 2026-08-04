@@ -92,6 +92,7 @@ typedef struct VkPhysicalDeviceCooperativeMatrixDecodeVectorFeaturesNV {
 
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
+#include "ggml-governor.h"
 
 #include "ggml-vulkan-shaders.hpp"
 
@@ -16522,9 +16523,35 @@ static int32_t find_first_set(uint32_t x) {
     return ret;
 }
 
+// Apply the power governor's duty cycle at a submission boundary.
+//
+// The drain is the load-bearing part. Queue submission is asynchronous, so sleeping straight
+// after a submit would only let the GPU work through its backlog - the card would never go
+// idle and the duty cycle would be fiction. Draining first means the sleep that follows is
+// real idle time on the device.
+//
+// Uses the same empty-submit-plus-fence idiom as ggml_vk_synchronize, but waits on the fence
+// rather than spinning on it: the whole point here is to burn less power, so the CPU should
+// sleep through the wait too.
+static void ggml_vk_governor_pace(ggml_backend_vk_context * ctx, ggml_backend_dev_t dev) {
+    ctx->device->compute_queue->handle->submit({}, ctx->fence);
+
+    VK_CHECK(ctx->device->device.waitForFences({ ctx->fence }, true, UINT64_MAX), "governor pace fence");
+    ctx->device->device.resetFences({ ctx->fence });
+
+    ggml_governor_pace_point(dev);
+}
+
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    // The existing submission cadence (max_nodes_per_submit, flops_per_submit) already gives
+    // tens of boundaries across a graph, which is fine granularity for pacing - no need to
+    // shrink the batches further. The perf logger owns ctx->fence and the query pool for the
+    // whole graph, so pacing stands down while it is active.
+    ggml_backend_dev_t gov_dev    = ggml_backend_get_device(backend);
+    const bool         gov_pacing = !vk_perf_logger_enabled && ggml_governor_pace_active(gov_dev);
 
     if (vk_instance.debug_utils_support) {
         vk::DebugUtilsLabelEXT dul = {};
@@ -16877,6 +16904,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 flops_per_submit *= 2;
             }
             submit_count++;
+
+            if (gov_pacing) {
+                ggml_vk_governor_pace(ctx, gov_dev);
+            }
         }
         i += ctx->num_additional_fused_ops;
         ctx->num_additional_fused_ops = 0;
@@ -18243,11 +18274,28 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void * ggml_backend_vk_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    // The governor entry points are resolved by name rather than linked directly, so a caller
+    // built against a ggml without governor support sees a NULL here instead of failing to link.
+    if (strcmp(name, GGML_GOVERNOR_PROC_GET_TELEMETRY) == 0) {
+        ggml_backend_dev_get_telemetry_t fct = ggml_backend_dev_get_telemetry;
+        return (void *)fct;
+    }
+    if (strcmp(name, GGML_GOVERNOR_PROC_SET_PACE) == 0) {
+        ggml_backend_dev_set_pace_t fct = ggml_backend_dev_set_pace;
+        return (void *)fct;
+    }
+
+    return NULL;
+
+    GGML_UNUSED(reg);
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {
