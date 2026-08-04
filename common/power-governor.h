@@ -124,7 +124,9 @@ void common_power_governor_on_decode(
         int32_t                 n_gen_tokens,
         int64_t                 work_us);
 
-common_power_status common_power_governor_status(const common_power_governor * gov);
+// Not const: this refreshes the sensor snapshot when it has gone stale, so that an idle server
+// reports live readings rather than zeros.
+common_power_status common_power_governor_status(common_power_governor * gov);
 
 // Human-readable summary of what was resolved, for the startup log.
 std::string common_power_governor_describe(const common_power_governor * gov);

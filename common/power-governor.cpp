@@ -138,11 +138,15 @@ struct common_power_governor {
 
     // Long-window average VRAM temperature. Seeded on the first reading rather than from zero,
     // so the loop does not spend the first window believing the memory is ice cold.
-    float mem_temp_ewma = NAN;
+    float   mem_temp_ewma    = NAN;
+    int64_t t_last_ewma_us   = 0;   // whichever path last advanced the average
 
-    // last sensor snapshot, for status reporting
+    // Snapshot for status reporting, refreshed on its own timer. Kept separate from
+    // t_last_sample_us so that a frequent /metrics scrape cannot consume the controller's
+    // sample slots and starve the loop.
     ggml_governor_telemetry last{};
     bool                    has_last = false;
+    int64_t                 t_last_snapshot_us = 0;
 
     // rate limiter state
     int64_t t_last_step_us   = 0;
@@ -150,6 +154,31 @@ struct common_power_governor {
 
     float min_duty = 0.15f;
 };
+
+// Record a telemetry reading: keep it as the reportable snapshot and advance the long-window
+// VRAM average. Called from both the decode path and a /metrics scrape, so the average is a
+// true time-average of memory temperature rather than one biased towards whenever we happened
+// to be decoding. Seeded from the first reading so it starts at the truth.
+static void gov_record_sample(common_power_governor * gov,
+                              const ggml_governor_telemetry & t,
+                              int64_t now_us) {
+    gov->last     = t;
+    gov->has_last = true;
+
+    if (!std::isnan(t.temp_mem_c)) {
+        const float tau = std::max((float) gov->params.sustained_window_s, 1.0f);
+
+        if (std::isnan(gov->mem_temp_ewma) || gov->t_last_ewma_us == 0) {
+            gov->mem_temp_ewma = t.temp_mem_c;
+        } else {
+            const float dt = (float) (now_us - gov->t_last_ewma_us) / 1e6f;
+            if (dt > 0.0f) {
+                gov->mem_temp_ewma += (t.temp_mem_c - gov->mem_temp_ewma) * std::min(dt / tau, 1.0f);
+            }
+        }
+        gov->t_last_ewma_us = now_us;
+    }
+}
 
 static void gov_push_duty(common_power_governor * gov, float duty) {
     for (auto & d : gov->devices) {
@@ -187,18 +216,8 @@ static void gov_update_thermal(common_power_governor * gov, int64_t now_us) {
             continue;
         }
 
-        gov->last     = t;
-        gov->has_last = true;
-        any           = true;
-
-        // Cumulative VRAM exposure. Seed on the first reading so the average starts at the
-        // truth rather than climbing towards it from nothing.
-        if (!std::isnan(t.temp_mem_c)) {
-            const float tau = std::max((float) gov->params.sustained_window_s, 1.0f);
-            gov->mem_temp_ewma = std::isnan(gov->mem_temp_ewma)
-                ? t.temp_mem_c
-                : gov->mem_temp_ewma + (t.temp_mem_c - gov->mem_temp_ewma) * std::min(dt / tau, 1.0f);
-        }
+        gov_record_sample(gov, t, now_us);
+        any = true;
 
         const float e_junction = common_power_headroom_error(t.temp_junction_c, gov->params.max_temp_c,     d.crit_junction_c);
         const float e_mem      = common_power_headroom_error(t.temp_mem_c,      gov->params.max_mem_temp_c, d.crit_mem_c);
@@ -368,7 +387,7 @@ void common_power_governor_on_decode(
     }
 }
 
-common_power_status common_power_governor_status(const common_power_governor * gov) {
+common_power_status common_power_governor_status(common_power_governor * gov) {
     common_power_status st;
 
     if (gov == nullptr) {
@@ -376,6 +395,26 @@ common_power_status common_power_governor_status(const common_power_governor * g
     }
 
     std::lock_guard<std::mutex> lock(gov->mutex);
+
+    // Refresh if the snapshot has gone stale. Without this the readings only advance while
+    // decoding, so an idle server reports zeros for every sensor - which reads as broken
+    // hardware rather than an idle one, and leaves the cumulative VRAM average frozen exactly
+    // when there is nothing to make it move.
+    const int64_t now_us = ggml_time_us();
+    if (!gov->devices.empty() &&
+        (gov->t_last_snapshot_us == 0 ||
+         now_us - gov->t_last_snapshot_us >= (int64_t) gov->params.sample_interval_ms * 1000)) {
+        gov->t_last_snapshot_us = now_us;
+
+        for (const auto & d : gov->devices) {
+            ggml_governor_telemetry t;
+            ggml_governor_telemetry_init(&t);
+            if (d.get_telemetry(d.dev, &t)) {
+                gov_record_sample(gov, t, now_us);
+                break;
+            }
+        }
+    }
 
     st.enabled           = gov->params.enabled;
     st.rate_capped       = gov->params.max_gen_tps > 0.0f || gov->params.max_prompt_tps > 0.0f;

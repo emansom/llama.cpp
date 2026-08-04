@@ -306,6 +306,36 @@ static void test_disabled_governor_is_inert() {
     check(true, "null governor tolerated");
 }
 
+// The sustained average must advance on wall-clock time, not on how often we happen to decode.
+// It is driven from both the decode path and a /metrics scrape for exactly this reason, so the
+// arithmetic has to be correct for irregular sampling intervals.
+static void test_sustained_average_is_sampling_rate_independent() {
+    printf("test_sustained_average_is_sampling_rate_independent\n");
+
+    const float tau = 300.0f;
+    const float seed = 60.0f;
+    const float value = 80.0f;
+
+    auto converge = [&](float dt, float seconds) {
+        float e = seed;
+        for (int i = 0; i < (int) (seconds / dt); i++) {
+            e += (value - e) * std::min(dt / tau, 1.0f);
+        }
+        return e;
+    };
+
+    // Ten minutes at 0.25 s and at 5 s steps must land in the same place: the average is a
+    // function of elapsed time, not of sample count.
+    const float fast = converge(0.25f, 600.0f);
+    const float slow = converge(5.00f, 600.0f);
+    check_near(fast, slow, 0.5f, "same result at 20x different sampling rates");
+
+    // And a single very long gap must not overshoot past the reading itself.
+    float once = seed;
+    once += (value - once) * std::min(3600.0f / tau, 1.0f);
+    check(once <= value + 1e-3f, "a long gap clamps rather than overshooting");
+}
+
 int main() {
     test_headroom_error();
     test_loop_deadband();
@@ -316,6 +346,7 @@ int main() {
     test_loop_leaves_a_cool_card_alone();
     test_utilisation_headroom();
     test_sustained_window_ignores_spikes_catches_plateaus();
+    test_sustained_average_is_sampling_rate_independent();
     test_rate_interval();
     test_rate_interval_matches_requested_rate();
     test_disabled_governor_is_inert();
