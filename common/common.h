@@ -3,6 +3,7 @@
 #pragma once
 
 #include "llama-cpp.h"
+#include "power-governor.h"
 
 #include "ggml-opt.h"
 #include "ggml.h"
@@ -502,6 +503,7 @@ struct common_params {
     struct common_params_speculative speculative;
     struct common_params_vocoder     vocoder;
     struct common_params_diffusion   diffusion;
+    struct common_power_params       power;
 
     struct common_params_model model;
 

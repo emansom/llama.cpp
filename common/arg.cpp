@@ -1657,6 +1657,116 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.no_perf = !value;
         }
     ).set_env("LLAMA_ARG_PERF"));
+    //
+    // power governor and rate ceilings
+    //
+    add_opt(common_arg(
+        {"--max-gen-tps"}, "N",
+        "cap generation at N tokens per second per sequence (default: 0 = unlimited).\n"
+        "the cheapest way to stop the GPU being driven flat out: if 20 tok/s is fast enough to read,\n"
+        "generating at 90 buys nothing but heat",
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v < 0.0f) {
+                throw std::invalid_argument("max-gen-tps must be non-negative");
+            }
+            params.power.max_gen_tps = v;
+        }
+    ).set_env("LLAMA_ARG_MAX_GEN_TPS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--max-prompt-tps"}, "N",
+        "cap prompt processing at N tokens per second (default: 0 = unlimited)",
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v < 0.0f) {
+                throw std::invalid_argument("max-prompt-tps must be non-negative");
+            }
+            params.power.max_prompt_tps = v;
+        }
+    ).set_env("LLAMA_ARG_MAX_PROMPT_TPS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-governor"},
+        {"--no-power-governor"},
+        string_format("whether to hold the GPU at a temperature and power target by modulating a compute\n"
+                      "duty cycle, instead of running it flat out (default: %s)",
+                      params.power.enabled ? "true" : "false"),
+        [](common_params & params, bool value) {
+            params.power.enabled = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_GOVERNOR").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-max-temp"}, "N",
+        string_format("junction/hotspot temperature target in degrees Celsius (default: %.0f)", params.power.max_temp_c),
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v <= 0.0f) {
+                throw std::invalid_argument("power-max-temp must be positive");
+            }
+            params.power.max_temp_c = v;
+        }
+    ).set_env("LLAMA_ARG_POWER_MAX_TEMP").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-max-mem-temp"}, "N",
+        string_format("memory temperature target in degrees Celsius (default: %.0f)", params.power.max_mem_temp_c),
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v <= 0.0f) {
+                throw std::invalid_argument("power-max-mem-temp must be positive");
+            }
+            params.power.max_mem_temp_c = v;
+        }
+    ).set_env("LLAMA_ARG_POWER_MAX_MEM_TEMP").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-budget-pct"}, "N",
+        string_format("power target as a percentage of the board's default power limit (default: %d)", params.power.budget_pct),
+        [](common_params & params, int value) {
+            if (value < 1 || value > 100) {
+                throw std::invalid_argument("power-budget-pct must be between 1 and 100");
+            }
+            params.power.budget_pct = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_BUDGET_PCT").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-budget-watts"}, "N",
+        "absolute power target in Watts, overriding --power-budget-pct (default: 0 = derive from the percentage)",
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v < 0.0f) {
+                throw std::invalid_argument("power-budget-watts must be non-negative");
+            }
+            params.power.budget_watts = v;
+        }
+    ).set_env("LLAMA_ARG_POWER_BUDGET_WATTS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-min-duty"}, "N",
+        string_format("floor for the compute duty cycle, as a percentage (default: %d).\n"
+                      "the governor will not throttle below this even if it cannot reach its target",
+                      params.power.min_duty_pct),
+        [](common_params & params, int value) {
+            if (value < 1 || value > 100) {
+                throw std::invalid_argument("power-min-duty must be between 1 and 100");
+            }
+            params.power.min_duty_pct = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_MIN_DUTY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-sample-interval-ms"}, "N",
+        string_format("how often to read the hardware sensors, in milliseconds (default: %d)", params.power.sample_interval_ms),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("power-sample-interval-ms must be positive");
+            }
+            params.power.sample_interval_ms = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_SAMPLE_MS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-governor-hwmon"}, "PATH",
+        "explicit hwmon directory for the GPU sensors, e.g. /sys/class/hwmon/hwmon3\n"
+        "(default: empty = resolve from the device's PCI id)",
+        [](common_params & params, const std::string & value) {
+            params.power.hwmon_path = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_HWMON").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--show-timings"},
         {"--no-show-timings"},

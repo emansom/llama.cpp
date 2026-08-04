@@ -109,6 +109,8 @@ add_library(${TARGET}
     ngram-mod.h
     peg-parser.cpp
     peg-parser.h
+    power-governor.cpp
+    power-governor.h
     preset.cpp
     preset.h
     reasoning-budget.cpp
