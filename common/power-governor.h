@@ -27,9 +27,23 @@ struct common_power_params {
 
     // targets
     float   max_temp_c        = 70.0f;   // junction/hotspot
-    float   max_mem_temp_c    = 85.0f;   // memory
+    float   max_mem_temp_c    = 85.0f;   // memory, instantaneous
     int32_t budget_pct        = 60;      // % of the board's default power limit
     float   budget_watts      = 0.0f;    // absolute override; 0 means derive from budget_pct
+
+    // Long-window average VRAM temperature. The instantaneous ceiling above stops a spike;
+    // this is what bounds *cumulative* exposure, which is the thing that actually degrades
+    // memory on a box running agentic loops around the clock for months. 0 disables it.
+    float   mem_temp_sustained_c = 80.0f;
+    int32_t sustained_window_s   = 300;
+
+    // Utilisation ceilings, as a share of the whole card. Both counters are system-wide
+    // rather than per-process, so capping them is what leaves headroom for a game, a browser
+    // or the compositor: when something else starts using the card the totals rise and the
+    // governor yields. 0 disables, which is the default - throttling a card that nothing else
+    // wants would be pure loss.
+    int32_t max_gpu_busy_pct  = 0;       // GPU core
+    int32_t max_mem_busy_pct  = 0;       // memory controller, i.e. bandwidth
 
     // loop behaviour
     int32_t min_duty_pct      = 15;
@@ -53,8 +67,19 @@ struct common_power_status {
     float   temp_junction_c = NAN;
     float   temp_mem_c      = NAN;
     float   temp_edge_c     = NAN;
+    float   temp_vrmem_c    = NAN;
     float   power_w         = NAN;
     int32_t busy_pct        = -1;
+    int32_t mem_busy_pct    = -1;
+
+    // Long-window average VRAM temperature. This is the number to watch on a machine that
+    // runs for months; the instantaneous reading above says nothing about accumulated wear.
+    float mem_temp_sustained_c = NAN;
+
+    // Capacity, in bytes. Reported only - see the note in the header about why pacing cannot
+    // move these.
+    uint64_t vram_used  = 0;
+    uint64_t vram_total = 0;
 
     // resolved targets, after budget_pct was applied to the board's limit
     float target_temp_c     = NAN;

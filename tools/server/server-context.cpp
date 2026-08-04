@@ -4487,6 +4487,26 @@ void server_routes::init_routes() {
                     {"help",  "GPU memory temperature."},
                     {"value",  std::isnan(res_task->power.temp_mem_c) ? 0.f : res_task->power.temp_mem_c}
             },{
+                    {"name",  "gpu_temp_mem_sustained_celsius"},
+                    {"help",  "GPU memory temperature averaged over the sustained window. This is the number to watch for long-term VRAM wear; the instantaneous reading says nothing about accumulated exposure."},
+                    {"value",  std::isnan(res_task->power.mem_temp_sustained_c) ? 0.f : res_task->power.mem_temp_sustained_c}
+            },{
+                    {"name",  "gpu_temp_vrmem_celsius"},
+                    {"help",  "GPU memory voltage regulator temperature."},
+                    {"value",  std::isnan(res_task->power.temp_vrmem_c) ? 0.f : res_task->power.temp_vrmem_c}
+            },{
+                    {"name",  "gpu_mem_busy_percent"},
+                    {"help",  "Memory controller utilisation for the whole card, -1 when unknown. Bandwidth left for other applications is 100 minus this."},
+                    {"value",  (float) res_task->power.mem_busy_pct}
+            },{
+                    {"name",  "gpu_vram_used_bytes"},
+                    {"help",  "VRAM in use across the whole card. Reported only: a compute duty cycle cannot free VRAM, so use models-max and sleep-idle-seconds to bound it."},
+                    {"value",  (double) res_task->power.vram_used}
+            },{
+                    {"name",  "gpu_vram_total_bytes"},
+                    {"help",  "Total VRAM on the card."},
+                    {"value",  (double) res_task->power.vram_total}
+            },{
                     {"name",  "gpu_power_watts"},
                     {"help",  "GPU board power draw."},
                     {"value",  std::isnan(res_task->power.power_w) ? 0.f : res_task->power.power_w}
@@ -4630,6 +4650,10 @@ void server_routes::init_routes() {
             { "min_duty_pct",      params.power.min_duty_pct },
             { "max_gen_tps",       params.power.max_gen_tps },
             { "max_prompt_tps",    params.power.max_prompt_tps },
+            { "mem_temp_sustained_c", params.power.mem_temp_sustained_c },
+            { "sustained_window_s",   params.power.sustained_window_s },
+            { "max_gpu_busy_pct",     params.power.max_gpu_busy_pct },
+            { "max_mem_busy_pct",     params.power.max_mem_busy_pct },
         };
 
         json props = {

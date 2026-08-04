@@ -52,8 +52,12 @@ struct governor_device {
     int fd_temp_edge      = -1;
     int fd_temp_junction  = -1;
     int fd_temp_mem       = -1;
+    int fd_temp_vrmem     = -1;
     int fd_power          = -1;
     int fd_busy           = -1;
+    int fd_mem_busy       = -1;
+    int fd_vram_used      = -1;
+    int fd_vram_total     = -1;
 
     // static values, read once at resolution time
     float temp_edge_crit_c     = NAN;
@@ -202,6 +206,8 @@ void resolve_temp_sensors(governor_device * gd) {
         int *   fd_slot   = nullptr;
         float * crit_slot = nullptr;
 
+        static float ignored_crit = NAN;
+
         if (label == "edge") {
             fd_slot   = &gd->fd_temp_edge;
             crit_slot = &gd->temp_edge_crit_c;
@@ -211,6 +217,11 @@ void resolve_temp_sensors(governor_device * gd) {
         } else if (label == "mem" || label == "vram") {
             fd_slot   = &gd->fd_temp_mem;
             crit_slot = &gd->temp_mem_crit_c;
+        } else if (label == "vrmem") {
+            // The VRAM voltage regulator. amdgpu exposes no _crit for it, so it is reported
+            // but not governed - there is no hardware-declared ceiling to normalise against.
+            fd_slot   = &gd->fd_temp_vrmem;
+            crit_slot = &ignored_crit;
         } else {
             continue;
         }
@@ -261,24 +272,36 @@ void resolve_sensors(governor_device * gd, ggml_backend_dev_t dev) {
     ggml_backend_dev_props props;
     ggml_backend_dev_get_props(dev, &props);
 
-    if (props.device_id == nullptr) {
-        GGML_LOG_DEBUG("%s: device '%s' reports no PCI id, no sensors available\n",
-                __func__, ggml_backend_dev_name(dev));
-        return;
-    }
-
-    // An explicit override wins over discovery, so a caller can point the governor at a
-    // specific hwmon node when the PCI mapping is ambiguous or absent.
+    // An explicit override wins over discovery, and is honoured even for a device that reports
+    // no PCI id - the whole point of the override is to cover the cases discovery cannot reach.
     const char * override_path = getenv("GGML_GOVERNOR_HWMON");
+
     if (override_path != nullptr && override_path[0] != '\0') {
         gd->hwmon_path = override_path;
     } else {
+        if (props.device_id == nullptr) {
+            GGML_LOG_DEBUG("%s: device '%s' reports no PCI id, no sensors available\n",
+                    __func__, ggml_backend_dev_name(dev));
+            return;
+        }
+
         const std::string pci_base = std::string("/sys/bus/pci/devices/") + props.device_id;
         gd->hwmon_path = find_hwmon(pci_base);
 
-        const int fd_busy = open((pci_base + "/gpu_busy_percent").c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd_busy >= 0) {
-            gd->fd_busy = fd_busy;
+        // Utilisation and capacity hang off the PCI node rather than hwmon. They are
+        // system-wide counters, not per-process, which is what makes the busy figures useful
+        // for yielding to whatever else is on the card.
+        struct { const char * name; int * fd; } extras[] = {
+            { "/gpu_busy_percent",    &gd->fd_busy       },
+            { "/mem_busy_percent",    &gd->fd_mem_busy   },
+            { "/mem_info_vram_used",  &gd->fd_vram_used  },
+            { "/mem_info_vram_total", &gd->fd_vram_total },
+        };
+        for (const auto & e : extras) {
+            const int fd = open((pci_base + e.name).c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd >= 0) {
+                *e.fd = fd;
+            }
         }
     }
 
@@ -292,7 +315,8 @@ void resolve_sensors(governor_device * gd, ggml_backend_dev_t dev) {
     resolve_power_sensors(gd);
 
     gd->usable = gd->fd_temp_edge >= 0 || gd->fd_temp_junction >= 0 ||
-                 gd->fd_temp_mem  >= 0 || gd->fd_power         >= 0;
+                 gd->fd_temp_mem  >= 0 || gd->fd_power         >= 0 ||
+                 gd->fd_busy      >= 0 || gd->fd_mem_busy      >= 0;
 
     if (!gd->usable) {
         GGML_LOG_DEBUG("%s: device '%s' (%s) exposes no usable sensors under %s\n",
@@ -300,13 +324,16 @@ void resolve_sensors(governor_device * gd, ggml_backend_dev_t dev) {
         return;
     }
 
-    GGML_LOG_INFO("%s: device '%s' (%s) sensors at %s:%s%s%s%s%s\n",
+    GGML_LOG_INFO("%s: device '%s' (%s) sensors at %s:%s%s%s%s%s%s%s%s\n",
             __func__, ggml_backend_dev_name(dev), props.device_id, gd->hwmon_path.c_str(),
             gd->fd_temp_edge     >= 0 ? " edge"     : "",
             gd->fd_temp_junction >= 0 ? " junction" : "",
             gd->fd_temp_mem      >= 0 ? " mem"      : "",
+            gd->fd_temp_vrmem    >= 0 ? " vrmem"    : "",
             gd->fd_power         >= 0 ? " power"    : "",
-            gd->fd_busy          >= 0 ? " busy"     : "");
+            gd->fd_busy          >= 0 ? " busy"     : "",
+            gd->fd_mem_busy      >= 0 ? " mem-busy" : "",
+            gd->fd_vram_used     >= 0 ? " vram"     : "");
 }
 
 float read_temp_c(int fd) {
@@ -340,7 +367,7 @@ void sleep_us_sliced(int64_t total_us) {
 } // namespace
 
 bool ggml_backend_dev_get_telemetry(ggml_backend_dev_t dev, struct ggml_governor_telemetry * out) {
-    if (out == nullptr) {
+    if (out == nullptr || out->size < sizeof(uint32_t)) {
         return false;
     }
 
@@ -357,20 +384,31 @@ bool ggml_backend_dev_get_telemetry(ggml_backend_dev_t dev, struct ggml_governor
         return false;
     }
 
-    out->temp_edge_c          = read_temp_c(gd->fd_temp_edge);
-    out->temp_junction_c      = read_temp_c(gd->fd_temp_junction);
-    out->temp_mem_c           = read_temp_c(gd->fd_temp_mem);
-    out->temp_edge_crit_c     = gd->temp_edge_crit_c;
-    out->temp_junction_crit_c = gd->temp_junction_crit_c;
-    out->temp_mem_crit_c      = gd->temp_mem_crit_c;
-    out->power_limit_w        = gd->power_limit_w;
-    out->power_limit_max_w    = gd->power_limit_max_w;
+    // Fill a full struct, then copy back only as much as the caller declared room for. A
+    // caller built against an older header gets the prefix it understands and nothing else.
+    ggml_governor_telemetry t;
+    ggml_governor_telemetry_init(&t);
 
-    long power_uw = 0;
-    out->power_w = read_fd_long(gd->fd_power, power_uw) ? power_uw / 1000000.0f : NAN;
+    t.temp_edge_c          = read_temp_c(gd->fd_temp_edge);
+    t.temp_junction_c      = read_temp_c(gd->fd_temp_junction);
+    t.temp_mem_c           = read_temp_c(gd->fd_temp_mem);
+    t.temp_vrmem_c         = read_temp_c(gd->fd_temp_vrmem);
+    t.temp_edge_crit_c     = gd->temp_edge_crit_c;
+    t.temp_junction_crit_c = gd->temp_junction_crit_c;
+    t.temp_mem_crit_c      = gd->temp_mem_crit_c;
+    t.power_limit_w        = gd->power_limit_w;
+    t.power_limit_max_w    = gd->power_limit_max_w;
 
-    long busy = 0;
-    out->busy_pct = read_fd_long(gd->fd_busy, busy) ? (int32_t) busy : -1;
+    long v = 0;
+    t.power_w      = read_fd_long(gd->fd_power,     v) ? v / 1000000.0f : NAN;
+    t.busy_pct     = read_fd_long(gd->fd_busy,      v) ? (int32_t) v : -1;
+    t.mem_busy_pct = read_fd_long(gd->fd_mem_busy,  v) ? (int32_t) v : -1;
+    t.vram_used    = read_fd_long(gd->fd_vram_used,  v) ? (uint64_t) v : 0;
+    t.vram_total   = read_fd_long(gd->fd_vram_total, v) ? (uint64_t) v : 0;
+
+    const uint32_t want = out->size;
+    memcpy(out, &t, want < sizeof(t) ? want : sizeof(t));
+    out->size = want;
 
     return true;
 #else

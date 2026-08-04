@@ -184,6 +184,55 @@ static void test_loop_leaves_a_cool_card_alone() {
 }
 
 //
+// utilisation ceilings and sustained exposure
+//
+
+static void test_utilisation_headroom() {
+    printf("test_utilisation_headroom\n");
+
+    // The counters are a share of the whole card and the ceiling is 100%, so the error is
+    // simply how far past the target the card has gone relative to the remaining headroom.
+    check_near(common_power_headroom_error(85.0f, 85.0f, 100.0f), 0.0f, 1e-6f, "at the busy target");
+    check_near(common_power_headroom_error(100.0f, 85.0f, 100.0f), 1.0f, 1e-6f, "fully saturated");
+    check(common_power_headroom_error(40.0f, 85.0f, 100.0f) < 0.0f, "idle card reads negative");
+
+    // A target of 100 leaves no headroom to normalise against and must be rejected rather
+    // than dividing by zero.
+    check(std::isnan(common_power_headroom_error(100.0f, 100.0f, 100.0f)), "target of 100 rejected");
+}
+
+// The point of the sustained signal: a card that spikes briefly is fine, a card that sits hot
+// for months is not. The long window has to ignore the former and catch the latter.
+static void test_sustained_window_ignores_spikes_catches_plateaus() {
+    printf("test_sustained_window_ignores_spikes_catches_plateaus\n");
+
+    const float dt = 0.25f;
+    const float tau = 300.0f;   // the shipped 5 minute window
+
+    auto ewma = [&](float seed, float value, float seconds) {
+        float e = seed;
+        for (int i = 0; i < (int) (seconds / dt); i++) {
+            e += (value - e) * std::min(dt / tau, 1.0f);
+        }
+        return e;
+    };
+
+    // A 30 s excursion to 95 C from a 65 C baseline barely moves a 5 minute average.
+    const float spike = ewma(65.0f, 95.0f, 30.0f);
+    check(spike < 68.0f, "a 30s spike hardly moves the long window");
+    check(common_power_headroom_error(spike, 80.0f, 85.0f) < 0.0f, "and does not trip the target");
+
+    // Sitting at 84 C for an hour does move it, and does trip.
+    const float plateau = ewma(65.0f, 84.0f, 3600.0f);
+    check(plateau > 83.0f, "an hour at 84C converges the long window");
+    check(common_power_headroom_error(plateau, 80.0f, 85.0f) > 0.0f, "and trips the target");
+
+    // Seeding matters: starting the average at zero would take a full window to become
+    // meaningful, during which the loop would believe the memory was ice cold.
+    check_near(ewma(70.0f, 70.0f, 600.0f), 70.0f, 0.01f, "a seeded average at steady state does not drift");
+}
+
+//
 // rate ceilings
 //
 
@@ -265,6 +314,8 @@ int main() {
     test_loop_min_duty_clamp();
     test_loop_converges_on_synthetic_thermal_model();
     test_loop_leaves_a_cool_card_alone();
+    test_utilisation_headroom();
+    test_sustained_window_ignores_spikes_catches_plateaus();
     test_rate_interval();
     test_rate_interval_matches_requested_rate();
     test_disabled_governor_is_inert();

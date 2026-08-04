@@ -136,6 +136,10 @@ struct common_power_governor {
     common_power_loop_state loop;
     int64_t                 t_last_sample_us = 0;
 
+    // Long-window average VRAM temperature. Seeded on the first reading rather than from zero,
+    // so the loop does not spend the first window believing the memory is ice cold.
+    float mem_temp_ewma = NAN;
+
     // last sensor snapshot, for status reporting
     ggml_governor_telemetry last{};
     bool                    has_last = false;
@@ -177,7 +181,8 @@ static void gov_update_thermal(common_power_governor * gov, int64_t now_us) {
     bool  any = false;
 
     for (const auto & d : gov->devices) {
-        ggml_governor_telemetry t{};
+        ggml_governor_telemetry t;
+        ggml_governor_telemetry_init(&t);
         if (!d.get_telemetry(d.dev, &t)) {
             continue;
         }
@@ -186,11 +191,37 @@ static void gov_update_thermal(common_power_governor * gov, int64_t now_us) {
         gov->has_last = true;
         any           = true;
 
+        // Cumulative VRAM exposure. Seed on the first reading so the average starts at the
+        // truth rather than climbing towards it from nothing.
+        if (!std::isnan(t.temp_mem_c)) {
+            const float tau = std::max((float) gov->params.sustained_window_s, 1.0f);
+            gov->mem_temp_ewma = std::isnan(gov->mem_temp_ewma)
+                ? t.temp_mem_c
+                : gov->mem_temp_ewma + (t.temp_mem_c - gov->mem_temp_ewma) * std::min(dt / tau, 1.0f);
+        }
+
         const float e_junction = common_power_headroom_error(t.temp_junction_c, gov->params.max_temp_c,     d.crit_junction_c);
         const float e_mem      = common_power_headroom_error(t.temp_mem_c,      gov->params.max_mem_temp_c, d.crit_mem_c);
         const float e_power    = common_power_headroom_error(t.power_w,         d.target_power_w,           d.power_ceiling_w);
 
-        for (const float e : { e_junction, e_mem, e_power }) {
+        // Sustained VRAM temperature, normalised against the instantaneous ceiling rather
+        // than crit: exceeding the long-run target by as much as the spike ceiling allows is
+        // already a full-scale error, because this signal is about months, not seconds.
+        const float e_mem_sustained = gov->params.mem_temp_sustained_c > 0.0f
+            ? common_power_headroom_error(gov->mem_temp_ewma, gov->params.mem_temp_sustained_c,
+                    std::max(gov->params.max_mem_temp_c, gov->params.mem_temp_sustained_c + 1.0f))
+            : NAN;
+
+        // Utilisation ceilings. Both counters cover the whole card, so this is what yields to
+        // a game or a compositor: their load lands in the same number and pushes the error up.
+        const float e_gpu_busy = gov->params.max_gpu_busy_pct > 0 && t.busy_pct >= 0
+            ? common_power_headroom_error((float) t.busy_pct, (float) gov->params.max_gpu_busy_pct, 100.0f)
+            : NAN;
+        const float e_mem_busy = gov->params.max_mem_busy_pct > 0 && t.mem_busy_pct >= 0
+            ? common_power_headroom_error((float) t.mem_busy_pct, (float) gov->params.max_mem_busy_pct, 100.0f)
+            : NAN;
+
+        for (const float e : { e_junction, e_mem, e_power, e_mem_sustained, e_gpu_busy, e_mem_busy }) {
             if (!std::isnan(e)) {
                 err = std::max(err, e);
             }
@@ -244,7 +275,8 @@ common_power_governor_ptr common_power_governor_init(const common_power_params &
             continue;
         }
 
-        ggml_governor_telemetry t{};
+        ggml_governor_telemetry t;
+        ggml_governor_telemetry_init(&t);
         if (!get_telemetry(dev, &t)) {
             continue;
         }
@@ -357,12 +389,18 @@ common_power_status common_power_governor_status(const common_power_governor * g
         st.target_power_w = gov->devices.front().target_power_w;
     }
 
+    st.mem_temp_sustained_c = gov->mem_temp_ewma;
+
     if (gov->has_last) {
         st.temp_junction_c = gov->last.temp_junction_c;
         st.temp_mem_c      = gov->last.temp_mem_c;
         st.temp_edge_c     = gov->last.temp_edge_c;
+        st.temp_vrmem_c    = gov->last.temp_vrmem_c;
         st.power_w         = gov->last.power_w;
         st.busy_pct        = gov->last.busy_pct;
+        st.mem_busy_pct    = gov->last.mem_busy_pct;
+        st.vram_used       = gov->last.vram_used;
+        st.vram_total      = gov->last.vram_total;
     }
 
     return st;
@@ -382,7 +420,7 @@ std::string common_power_governor_describe(const common_power_governor * gov) {
     } else if (gov->devices.empty()) {
         out += "sensor loop off (no devices)";
     } else {
-        char buf[256];
+        char buf[320];
         for (const auto & d : gov->devices) {
             snprintf(buf, sizeof(buf),
                     "%s (%s) junction<=%.0fC (crit %.0fC), mem<=%.0fC (crit %.0fC), power<=%.0fW of %.0fW; ",
@@ -392,10 +430,22 @@ std::string common_power_governor_describe(const common_power_governor * gov) {
                     d.target_power_w, d.power_limit_w);
             out += buf;
         }
-        char duty[64];
-        snprintf(duty, sizeof(duty), "min duty %d%%, sampling every %dms",
+        if (gov->params.mem_temp_sustained_c > 0.0f) {
+            snprintf(buf, sizeof(buf), "mem<=%.0fC averaged over %ds; ",
+                    gov->params.mem_temp_sustained_c, gov->params.sustained_window_s);
+            out += buf;
+        }
+        if (gov->params.max_gpu_busy_pct > 0) {
+            snprintf(buf, sizeof(buf), "gpu busy<=%d%%; ", gov->params.max_gpu_busy_pct);
+            out += buf;
+        }
+        if (gov->params.max_mem_busy_pct > 0) {
+            snprintf(buf, sizeof(buf), "mem busy<=%d%%; ", gov->params.max_mem_busy_pct);
+            out += buf;
+        }
+        snprintf(buf, sizeof(buf), "min duty %d%%, sampling every %dms",
                 gov->params.min_duty_pct, gov->params.sample_interval_ms);
-        out += duty;
+        out += buf;
     }
 
     if (gov->params.max_gen_tps > 0.0f) {

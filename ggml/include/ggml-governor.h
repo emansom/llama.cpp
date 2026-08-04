@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 //
 // GPU power governor support.
@@ -35,12 +36,20 @@ extern "C" {
 #define GGML_GOVERNOR_PROC_GET_TELEMETRY "ggml_backend_dev_get_telemetry"
 #define GGML_GOVERNOR_PROC_SET_PACE      "ggml_backend_dev_set_pace"
 
-    // Physical sensor readings for a device. Fields that could not be read are NAN (floats)
-    // or -1 (integers). Temperatures are degrees Celsius, power is Watts.
+    // Physical sensor readings for a device. Fields that could not be read are NAN (floats),
+    // -1 (signed integers) or 0 (sizes). Temperatures are degrees Celsius, power is Watts.
+    //
+    // The caller MUST set `size` to sizeof(struct ggml_governor_telemetry) before the call.
+    // ggml writes at most that many bytes, so a caller compiled against an older header is not
+    // overflowed when the library is upgraded underneath it - which is a real case here,
+    // because ggml and its consumers ship as separate packages.
     struct ggml_governor_telemetry {
+        uint32_t size;
+
         float temp_edge_c;
         float temp_junction_c;
-        float temp_mem_c;
+        float temp_mem_c;         // VRAM
+        float temp_vrmem_c;       // VRAM voltage regulator
 
         // hardware-declared critical thresholds, for deriving headroom
         float temp_edge_crit_c;
@@ -51,8 +60,21 @@ extern "C" {
         float power_limit_w;      // the board's default power limit
         float power_limit_max_w;  // the highest limit the board will accept
 
-        int32_t busy_pct;         // driver-reported utilisation, -1 if unknown
+        int32_t busy_pct;         // GPU core utilisation, -1 if unknown
+        int32_t mem_busy_pct;     // memory controller utilisation, -1 if unknown
+
+        // Capacity, in bytes. Reported for observability only: a compute duty cycle cannot
+        // free VRAM, so nothing the governor does moves these numbers.
+        uint64_t vram_used;
+        uint64_t vram_total;
     };
+
+    // Zero a telemetry struct and stamp its size. Always use this rather than initialising by
+    // hand: `size` is what bounds how much the library writes back.
+    static inline void ggml_governor_telemetry_init(struct ggml_governor_telemetry * t) {
+        memset(t, 0, sizeof(*t));
+        t->size = (uint32_t) sizeof(*t);
+    }
 
     // Fill *out with the current sensor readings for dev.
     // Returns false if the device has no resolvable sensors, leaving *out untouched.

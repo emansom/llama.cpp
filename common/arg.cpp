@@ -1717,6 +1717,56 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_POWER_MAX_MEM_TEMP").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--power-mem-temp-sustained"}, "N",
+        string_format("long-window average VRAM temperature target in degrees Celsius (default: %.0f, 0 = off).\n"
+                      "--power-max-mem-temp stops a spike; this bounds CUMULATIVE exposure, which is what\n"
+                      "degrades memory on a machine running around the clock for months",
+                      params.power.mem_temp_sustained_c),
+        [](common_params & params, const std::string & value) {
+            const float v = std::stof(value);
+            if (v < 0.0f) {
+                throw std::invalid_argument("power-mem-temp-sustained must be non-negative");
+            }
+            params.power.mem_temp_sustained_c = v;
+        }
+    ).set_env("LLAMA_ARG_POWER_MEM_TEMP_SUSTAINED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-sustained-window-s"}, "N",
+        string_format("averaging window for --power-mem-temp-sustained, in seconds (default: %d)",
+                      params.power.sustained_window_s),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("power-sustained-window-s must be positive");
+            }
+            params.power.sustained_window_s = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_SUSTAINED_WINDOW_S").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-max-mem-busy"}, "N",
+        string_format("cap memory-controller utilisation at N%% of the whole card (default: %d, 0 = off).\n"
+                      "the counter is system-wide, so this is what leaves VRAM bandwidth for a game,\n"
+                      "a browser or the compositor: their load raises it and inference yields",
+                      params.power.max_mem_busy_pct),
+        [](common_params & params, int value) {
+            if (value < 0 || value > 100) {
+                throw std::invalid_argument("power-max-mem-busy must be between 0 and 100");
+            }
+            params.power.max_mem_busy_pct = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_MAX_MEM_BUSY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-max-gpu-busy"}, "N",
+        string_format("cap GPU core utilisation at N%% of the whole card (default: %d, 0 = off).\n"
+                      "same system-wide counter semantics as --power-max-mem-busy",
+                      params.power.max_gpu_busy_pct),
+        [](common_params & params, int value) {
+            if (value < 0 || value > 100) {
+                throw std::invalid_argument("power-max-gpu-busy must be between 0 and 100");
+            }
+            params.power.max_gpu_busy_pct = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_MAX_GPU_BUSY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--power-budget-pct"}, "N",
         string_format("power target as a percentage of the board's default power limit (default: %d)", params.power.budget_pct),
         [](common_params & params, int value) {
