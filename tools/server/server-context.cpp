@@ -920,6 +920,10 @@ private:
 
     server_metrics metrics;
 
+    // Holds the GPU at a temperature/power target and enforces the tokens-per-second ceilings.
+    // Always constructed; inert unless the governor is enabled or a ceiling is configured.
+    common_power_governor_ptr power_governor;
+
     json json_ui_settings = json::object();
 
     // Necessary similarity of prompt for slot selection
@@ -1006,6 +1010,12 @@ private:
 
         params_base = params;
         params_base.n_outputs_max = server_n_outputs_max(params_base);
+
+        // Resolve the governor before the model is loaded, so a misconfigured device or a ggml
+        // without governor support fails startup rather than silently leaving the hardware
+        // unprotected. Logged once, so the resolution is never a mystery.
+        power_governor = common_power_governor_init(params_base.power);
+        SRV_INF("%s\n", common_power_governor_describe(power_governor.get()).c_str());
 
         const bool has_mmproj = !params.mmproj.path.empty();
         const bool has_draft = params.speculative.has_dft();
@@ -2518,6 +2528,8 @@ private:
 
                     res->n_tokens_max = metrics.n_tokens_max;
 
+                    res->power = common_power_governor_status(power_governor.get());
+
                     res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
                     res->t_prompt_processing       = metrics.t_prompt_processing;
                     res->n_tokens_predicted        = metrics.n_tokens_predicted;
@@ -3612,9 +3624,33 @@ private:
             n_empty_consecutive = 0;
         }
 
+        const int64_t t_decode_start_us = ggml_time_us();
+
         const int ret = llama_decode(ctx_tgt, batch_view);
 
+        const int64_t t_decode_us = ggml_time_us() - t_decode_start_us;
+
         metrics.on_decoded(slots);
+
+        // Pace the next step. One decode advances every generating sequence by exactly one
+        // token, so counting generating slots gives the per-sequence rate; anything else in the
+        // batch is bulk prompt work and is gated on its token count instead. A batch that
+        // carries both is treated as prompt work, which is where the compute actually is.
+        if (ret == 0) {
+            int32_t n_gen = 0;
+            for (const auto & slot : slots) {
+                if (slot.state == SLOT_STATE_GENERATING) {
+                    n_gen++;
+                }
+            }
+
+            int32_t n_prompt = std::max(0, batch_view.n_tokens - n_gen);
+            if (n_prompt > 0) {
+                n_gen = 0;
+            }
+
+            common_power_governor_on_decode(power_governor.get(), n_prompt, n_gen, t_decode_us);
+        }
 
         if (ret != 0) {
             {
@@ -4438,6 +4474,30 @@ void server_routes::init_routes() {
                     {"name",  "n_busy_slots_per_decode"},
                     {"help",  "Average number of busy slots per llama_decode() call"},
                     {"value",  (float) res_task->n_busy_slots_total / std::max((float) res_task->n_decode_total, 1.f)}
+            },{
+                    {"name",  "power_duty_cycle"},
+                    {"help",  "Compute duty cycle currently held by the power governor (1.0 = unthrottled)."},
+                    {"value",  res_task->power.duty}
+            },{
+                    {"name",  "gpu_temp_junction_celsius"},
+                    {"help",  "GPU junction (hotspot) temperature."},
+                    {"value",  std::isnan(res_task->power.temp_junction_c) ? 0.f : res_task->power.temp_junction_c}
+            },{
+                    {"name",  "gpu_temp_mem_celsius"},
+                    {"help",  "GPU memory temperature."},
+                    {"value",  std::isnan(res_task->power.temp_mem_c) ? 0.f : res_task->power.temp_mem_c}
+            },{
+                    {"name",  "gpu_power_watts"},
+                    {"help",  "GPU board power draw."},
+                    {"value",  std::isnan(res_task->power.power_w) ? 0.f : res_task->power.power_w}
+            },{
+                    {"name",  "gpu_busy_percent"},
+                    {"help",  "GPU utilisation as reported by the driver, -1 when unknown."},
+                    {"value",  (float) res_task->power.busy_pct}
+            },{
+                    {"name",  "power_throttle_seconds_total"},
+                    {"help",  "Cumulative time spent sleeping to hold the power and rate targets."},
+                    {"value",  res_task->power.throttled_seconds}
             }}}
         };
 
@@ -4559,9 +4619,23 @@ void server_routes::init_routes() {
         std::string tmpl_default = common_chat_templates_source(meta->chat_params.tmpls.get(), "");
         std::string tmpl_tools   = common_chat_templates_source(meta->chat_params.tmpls.get(), "tool_use");
 
+        // The configuration only. Live telemetry and the current duty cycle are on /metrics,
+        // which is where a changing value belongs.
+        json power_governor = {
+            { "enabled",           params.power.enabled },
+            { "max_temp_c",        params.power.max_temp_c },
+            { "max_mem_temp_c",    params.power.max_mem_temp_c },
+            { "budget_pct",        params.power.budget_pct },
+            { "budget_watts",      params.power.budget_watts },
+            { "min_duty_pct",      params.power.min_duty_pct },
+            { "max_gen_tps",       params.power.max_gen_tps },
+            { "max_prompt_tps",    params.power.max_prompt_tps },
+        };
+
         json props = {
             { "default_generation_settings", default_generation_settings_for_props },
             { "total_slots",                 params.n_parallel },
+            { "power_governor",              power_governor },
             { "model_alias",                 meta->model_name },
             { "model_ftype",                 meta->model_ftype },
             { "model_path",                  meta->model_path },
