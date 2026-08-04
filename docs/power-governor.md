@@ -198,6 +198,53 @@ its own rather than riding on a thermal limit.
 **VRAM occupancy does not move.** 8139 MiB at duty 1.00 and 8139 MiB at duty 0.74. This is the
 measurement behind the claim above that capacity is not something pacing can give back.
 
+### Does it actually yield? Measured against a real game and a saturating competitor
+
+Card-wide counters cannot answer this: they say what the GPU did, not who got it. So the
+measurement is the *other* application's own throughput.
+
+**A controlled competitor** — a fixed matmul workload run flat out, reporting its own
+iterations per second, so its arms are comparable in a way a game's are not:
+
+| arm | competitor it/s | kept | gen tok/s | duty | card gpu% |
+|---|---|---|---|---|---|
+| competitor alone | 154.97 | ref | — | — | 99 |
+| + inference, unthrottled | 100.76 | **65.0%** | 30.50 | 1.00 | 100 |
+| + inference, `mem-busy 70` / `gpu-busy 80` / `gen-tps 20` | 138.02 | **89.1%** | 4.01 | 0.22 | 100 |
+| + inference, `gpu-busy 50` | 139.38 | **89.9%** | 4.03 | 0.15 | 100 |
+
+Unthrottled inference costs the competitor 35% of its performance. With the ceilings on it keeps
+89%, and inference gives up nearly everything to hand it back.
+
+**That last point is the behaviour to understand before enabling these.** When another
+application *by itself* saturates the card, the utilisation ceiling can never be satisfied by
+throttling inference — the competitor is what is holding the counter at 100%. The loop therefore
+integrates all the way down and parks at `min_duty`, taking inference from 30.5 to 4.0 tok/s.
+This is a hard yield, not a fair share. `--power-min-duty` is the only thing stopping it reaching
+zero, and it is doing exactly that job here: raise it if inference must keep making progress
+against a demanding neighbour, lower it to hand over more.
+
+**A real game** — Gran Turismo 4 under PCSX2, measured through per-process DRM fdinfo. Each arm
+samples the game alone for 25 s and then immediately with inference running, because a game's
+load drifts with what is on screen: GT4 measured 49.5% at the start of a session and 17.3%
+twenty minutes later with nothing else touching the card. Only the within-pair delta means
+anything; comparing across arms would not.
+
+| arm | game alone | game during | ratio | gen tok/s | duty | card gpu% |
+|---|---|---|---|---|---|---|
+| unthrottled | 50.0% | 59.7% | **119%** | 54.40 | 1.00 | 97 |
+| `mem-busy 70` / `gpu-busy 80` / `gen-tps 20` | 52.2% | 54.0% | **104%** | 19.94 | 0.84 | 68 |
+
+Read the ratio carefully: it is the game's *engine occupancy*, so above 100% is bad, not good.
+The same frames cost more GPU-nanoseconds when the card is contended. Unthrottled, GT4's work
+became 19% more expensive; with the ceilings on, 4%. The card sat at 97% busy in the first case
+and 68% in the second, which is the difference between saturated and having somewhere to grow.
+
+Two honest limits on that game measurement. It is engine time, not frame time — GT4 is frame
+capped and may well have held 60 fps in both arms, so this says the interference shrank, not
+that anything was visibly stuttering. And PCSX2 is a light load for this card: the synthetic
+competitor above, which does saturate it, is the better guide to what a demanding game would do.
+
 ### Pacing costs more throughput, and less energy, than the duty cycle suggests
 
 Both are visible above, and they pull in opposite directions.
