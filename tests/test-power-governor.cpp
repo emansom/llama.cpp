@@ -247,11 +247,25 @@ static void test_rate_interval() {
 
     p.max_gen_tps = 20.0f;
 
-    // One decode step advances every sequence by one token, so the interval is 1/N regardless
-    // of how many slots are busy - that is what makes the cap per-sequence.
-    check(common_power_rate_interval_us(p, 0, 1) == 50000, "20 tok/s -> 50 ms per step");
-    check(common_power_rate_interval_us(p, 0, 8) == 50000, "same interval with 8 slots busy");
+    // n_gen_tokens is the tokens ONE sequence committed in the step, so the interval scales
+    // with it. The caller keeps the cap per-sequence by passing the maximum across sequences
+    // rather than the sum, which is why "8 slots busy" is not a case this function can see:
+    // eight slots committing one token each arrive here as 1, not 8.
+    check(common_power_rate_interval_us(p, 0, 1) == 50000, "20 tok/s -> 50 ms for one token");
     check(common_power_rate_interval_us(p, 0, 0) == 0, "no gating when nothing is generating");
+
+    // Speculative decoding: one decode, several tokens handed back, each of them paid for.
+    // This is the case that used to escape the ceiling entirely - the step was charged 50 ms
+    // however many tokens it committed, so a 4-token accept ran at 4x the configured rate.
+    check(common_power_rate_interval_us(p, 0, 2) == 100000, "2 accepted tokens -> 100 ms");
+    check(common_power_rate_interval_us(p, 0, 4) == 200000, "4 accepted tokens -> 200 ms");
+
+    // The ceiling is the ceiling regardless of how the tokens were produced: N tokens cost
+    // the same wall clock whether they arrived one per decode or all in one verification.
+    for (int32_t n = 1; n <= 8; ++n) {
+        check(common_power_rate_interval_us(p, 0, n) == (int64_t) n * 50000,
+              "speculated and unspeculated tokens cost the same time");
+    }
 
     // Prompt work is bulk, so its ceiling scales with the token count.
     common_power_params q;

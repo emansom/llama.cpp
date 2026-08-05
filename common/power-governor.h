@@ -110,14 +110,22 @@ using common_power_governor_ptr = std::unique_ptr<common_power_governor, common_
 // Returns a governor with the sensor loop inert (but rate ceilings live) when enabled is false.
 common_power_governor_ptr common_power_governor_init(const common_power_params & params);
 
-// Call immediately after each llama_decode.
+// Call once per decode step, AFTER the step's tokens have been committed.
 //
 //   n_prompt_tokens - tokens being prefilled in this step
-//   n_gen_tokens    - sequences that advanced by one token in this step
-//   work_us         - wall-clock duration of the decode call
+//   n_gen_tokens    - the most tokens any ONE sequence committed in this step
+//   work_us         - wall-clock duration of the step (decode plus commit)
 //
 // Samples sensors when the interval has elapsed, updates the duty cycle, pushes it to ggml,
 // and sleeps for whatever the rate ceilings still require.
+//
+// n_gen_tokens is COMMITTED TOKENS, not sequences, and the difference is the whole reason
+// this is called after the commit rather than straight after llama_decode. It used to mean
+// "sequences that advanced by one token", which held only because one decode advanced each
+// sequence exactly once. Speculative decoding breaks that: a verification step commits
+// between 1 and n_draft+1 tokens per sequence, so counting sequences would let generation run
+// at up to n_draft+1 times the ceiling. Taking the MAXIMUM across sequences rather than the
+// sum keeps max_gen_tps a PER-SEQUENCE bound, which is what it has always been.
 void common_power_governor_on_decode(
         common_power_governor * gov,
         int32_t                 n_prompt_tokens,

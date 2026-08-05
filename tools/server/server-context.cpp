@@ -924,6 +924,11 @@ private:
     // Always constructed; inert unless the governor is enabled or a ceiling is configured.
     common_power_governor_ptr power_governor;
 
+    // Carried from decode() to pace_step(), which runs after the step's tokens are committed
+    // and so cannot observe either of these for itself.
+    int64_t t_decode_last_us = 0;   // duration of the llama_decode call
+    int32_t n_prompt_last    = 0;   // prefill tokens in that batch view, speculation excluded
+
     json json_ui_settings = json::object();
 
     // Necessary similarity of prompt for slot selection
@@ -2835,6 +2840,9 @@ private:
         llama_batch batch_view;
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
+        // Per-slot n_decoded as it stood before the commit, in slots' iteration order. Kept
+        // out here so the vector is sized once rather than per batch view.
+        std::vector<int32_t> n_decoded_before(slots.size(), 0);
         for (int32_t off = 0; off < batch.size(); off = off_next) {
             const int32_t n_tokens = std::min(n_batch, batch.size() - off);
             try {
@@ -2863,6 +2871,18 @@ private:
                 break; // stop any further processing
             }
 
+            // Snapshot before post_decode(), which is where tokens are actually committed:
+            // one per slot on the plain sampling path, up to n_draft+1 on the speculative
+            // one. Diffing n_decoded across it is what makes the ceiling in pace_step()
+            // indifferent to which path produced them, and to any future path that does not
+            // exist yet.
+            {
+                size_t i = 0;
+                for (const auto & slot : slots) {
+                    n_decoded_before[i++] = slot.n_decoded;
+                }
+            }
+
             try {
                 scoped_timer t(t_post_decode, n_post_decode);
                 post_decode(n_tokens, off, batch_view);
@@ -2871,6 +2891,8 @@ private:
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
             }
+
+            pace_step(n_decoded_before);
         }
     }
 
@@ -3607,6 +3629,54 @@ private:
         }
     }
 
+    // Hold the step to whatever the tokens-per-second ceilings allow, and let the thermal
+    // loop take its sample. Runs once per decode step, after post_decode() has committed the
+    // step's tokens.
+    //
+    // WHY IT IS HERE AND NOT IN decode(). The generation ceiling bounds tokens the CALLER
+    // receives, and until the draft has been verified nobody knows how many that is. Pacing
+    // straight after llama_decode had to guess from the batch's shape, and speculative
+    // decoding made every guess wrong in the same direction: a verification batch carries
+    // n_draft+1 tokens for one sequence, which the old arithmetic read as prefill, and
+    // prefill switched the generation ceiling off. max-gen-tps then still read as set in the
+    // preset and enforced nothing at all - the failure mode where the config lies.
+    //
+    // Counting committed tokens instead means the ceiling holds the same whether speculation
+    // is on, off, or partially accepted, which is the point: MTP should buy idle GPU at a
+    // fixed output rate, not a higher output rate.
+    void pace_step(const std::vector<int32_t> & n_decoded_before) {
+        if (!power_governor) {
+            return;
+        }
+
+        // MAX, not sum: max_gen_tps is a per-sequence ceiling, so the step must be long
+        // enough for the busiest sequence in it. Summing would throttle by total server
+        // throughput and make the ceiling depend on how many slots happen to be active.
+        int32_t n_gen = 0;
+        {
+            size_t i = 0;
+            for (const auto & slot : slots) {
+                n_gen = std::max(n_gen, slot.n_decoded - n_decoded_before[i++]);
+            }
+        }
+
+        // A step that committed nothing is prefill or bookkeeping; leave it to the prompt
+        // ceiling, which is what n_prompt_last carries.
+        //
+        // Both counts are passed through together, where the old code zeroed n_gen whenever
+        // the batch also held prefill ("treated as prompt work, which is where the compute
+        // actually is"). That suppression is gone deliberately, and it costs nothing: the
+        // sleep is computed as target minus time ALREADY SPENT, so a mixed batch heavy
+        // enough to be worth the original worry has by then overrun the generation target on
+        // its own and asks for no sleep anyway. What the suppression did do was hand
+        // speculation a way to switch the ceiling off, since every verification step looked
+        // like prefill under the old classification.
+        common_power_governor_on_decode(power_governor.get(), n_prompt_last, n_gen, t_decode_last_us);
+
+        t_decode_last_us = 0;
+        n_prompt_last    = 0;
+    }
+
     // returns true = success ; false = retry with smaller batch size
     // throw std::runtime_error on fatal error
     bool decode(int32_t & n_batch, int32_t off, llama_batch & batch_view) {
@@ -3632,24 +3702,34 @@ private:
 
         metrics.on_decoded(slots);
 
-        // Pace the next step. One decode advances every generating sequence by exactly one
-        // token, so counting generating slots gives the per-sequence rate; anything else in the
-        // batch is bulk prompt work and is gated on its token count instead. A batch that
-        // carries both is treated as prompt work, which is where the compute actually is.
+        // Pacing does NOT happen here, though it used to. How many tokens this step will
+        // actually hand back is not known yet: under speculative decoding the verification
+        // batch is decoded here but accepted in post_decode(), and between 1 and n_draft+1 of
+        // its tokens survive. Pacing on what the batch CONTAINS rather than on what it
+        // COMMITS is what let generation run past max-gen-tps once speculation was enabled.
+        // See pace_step() and its call site in update_slots().
+        //
+        // What is recorded here is how long the decode took, which pace_step() needs and
+        // cannot measure for itself.
         if (ret == 0) {
-            int32_t n_gen = 0;
+            t_decode_last_us = t_decode_us;
+
+            // Tokens this batch view contributed on behalf of already-generating sequences,
+            // as opposed to prefill. One per generating slot normally; a speculating slot
+            // puts its whole draft in at once, and spec_i_batch is exactly those positions.
+            // Read BEFORE post_decode(), which clears it on acceptance.
+            //
+            // The old form of this was `batch_view.n_tokens - <number of generating slots>`,
+            // which counted a speculating slot's n_draft extra tokens as prefill and so made
+            // every speculative step look like prompt work.
+            int32_t n_spec_batch = 0;
             for (const auto & slot : slots) {
                 if (slot.state == SLOT_STATE_GENERATING) {
-                    n_gen++;
+                    n_spec_batch += slot.spec_i_batch.empty() ? 1 : (int32_t) slot.spec_i_batch.size();
                 }
             }
 
-            int32_t n_prompt = std::max(0, batch_view.n_tokens - n_gen);
-            if (n_prompt > 0) {
-                n_gen = 0;
-            }
-
-            common_power_governor_on_decode(power_governor.get(), n_prompt, n_gen, t_decode_us);
+            n_prompt_last = std::max(0, batch_view.n_tokens - n_spec_batch);
         }
 
         if (ret != 0) {

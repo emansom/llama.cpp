@@ -114,8 +114,13 @@ int64_t common_power_rate_interval_us(
         int32_t                     n_gen_tokens) {
     int64_t target_us = 0;
 
+    // Scaled by the tokens actually committed, not charged once per step. With one token per
+    // step the two are identical, which is why this read as `1e6f / max_gen_tps` for as long
+    // as that was the only case. A speculative step commits up to n_draft+1 tokens for the
+    // same single decode, and each of them is a token the caller receives, so each of them
+    // has to be paid for at the ceiling's rate.
     if (params.max_gen_tps > 0.0f && n_gen_tokens > 0) {
-        target_us = std::max(target_us, (int64_t) (1e6f / params.max_gen_tps));
+        target_us = std::max(target_us, (int64_t) ((float) n_gen_tokens * 1e6f / params.max_gen_tps));
     }
 
     if (params.max_prompt_tps > 0.0f && n_prompt_tokens > 0) {
