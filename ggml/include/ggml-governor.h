@@ -33,8 +33,9 @@
 extern "C" {
 #endif
 
-#define GGML_GOVERNOR_PROC_GET_TELEMETRY "ggml_backend_dev_get_telemetry"
-#define GGML_GOVERNOR_PROC_SET_PACE      "ggml_backend_dev_set_pace"
+#define GGML_GOVERNOR_PROC_GET_TELEMETRY    "ggml_backend_dev_get_telemetry"
+#define GGML_GOVERNOR_PROC_SET_PACE         "ggml_backend_dev_set_pace"
+#define GGML_GOVERNOR_PROC_SET_PACE_EVERY_N "ggml_backend_dev_set_pace_every_n"
 
     // Physical sensor readings for a device. Fields that could not be read are NAN (floats),
     // -1 (signed integers) or 0 (sizes). Temperatures are degrees Celsius, power is Watts.
@@ -67,6 +68,17 @@ extern "C" {
         // free VRAM, so nothing the governor does moves these numbers.
         uint64_t vram_used;
         uint64_t vram_total;
+
+        // Pacing activity, cumulative since process start.
+        //
+        // Each pace point takes the device from loaded to idle and back, which is a load step
+        // seen by the power supply. The peak is unchanged - pacing never raises draw above what
+        // an unpaced card would pull - but the RATE of those steps is what a duty cycle adds,
+        // and it is otherwise invisible: board power is only reported as a ~100 ms rolling
+        // average, three orders of magnitude too slow to see a transient. Take the derivative
+        // of pace_points_total to get load steps per second.
+        uint64_t pace_points_total;
+        uint64_t pace_sleep_us_total;
     };
 
     // Zero a telemetry struct and stamp its size. Always use this rather than initialising by
@@ -84,12 +96,28 @@ extern "C" {
     // Safe to call from a different thread than the one running the backend.
     GGML_API void ggml_backend_dev_set_pace(ggml_backend_dev_t dev, float duty);
 
-    typedef bool (*ggml_backend_dev_get_telemetry_t)(ggml_backend_dev_t dev, struct ggml_governor_telemetry * out);
-    typedef void (*ggml_backend_dev_set_pace_t)     (ggml_backend_dev_t dev, float duty);
+    // Pace at most once every n submission boundaries, instead of at every one.
+    //
+    // The duty cycle is unchanged - work simply accumulates across the skipped boundaries and
+    // is paid off in one longer sleep - so this trades how smoothly the duty is spread for how
+    // often the device is switched between loaded and idle. Raise it to reduce load-step
+    // frequency on the power supply; leave it at 1 for the smoothest thermal behaviour.
+    // Values below 1 are treated as 1.
+    GGML_API void ggml_backend_dev_set_pace_every_n(ggml_backend_dev_t dev, uint32_t n);
 
-    // Called by a backend at a submission boundary. Measures the work submitted since the
-    // previous pace point on this device and sleeps to hold the configured duty cycle.
-    // A no-op, costing one relaxed atomic load, when no device is being paced.
+    typedef bool (*ggml_backend_dev_get_telemetry_t) (ggml_backend_dev_t dev, struct ggml_governor_telemetry * out);
+    typedef void (*ggml_backend_dev_set_pace_t)      (ggml_backend_dev_t dev, float duty);
+    typedef void (*ggml_backend_dev_set_pace_every_n_t)(ggml_backend_dev_t dev, uint32_t n);
+
+    // Called by a backend at a submission boundary to ask whether this one is a pace point.
+    // Counts the boundary and applies the every-n granularity, so the backend can skip the
+    // expensive part - draining the queue - on boundaries that will not be paced.
+    // A no-op returning false, costing one relaxed atomic load, when nothing is being paced.
+    GGML_API bool ggml_governor_pace_due(ggml_backend_dev_t dev);
+
+    // Called by a backend once ggml_governor_pace_due() has returned true AND the queue has
+    // been drained. Measures the work submitted since the previous pace point on this device
+    // and sleeps to hold the configured duty cycle.
     GGML_API void ggml_governor_pace_point(ggml_backend_dev_t dev);
 
     // True when dev currently has a duty cycle below 1.0. Backends can use this to choose a

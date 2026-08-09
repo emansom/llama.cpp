@@ -16905,7 +16905,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             }
             submit_count++;
 
-            if (gov_pacing) {
+            // pace_due() first: it applies the every-n granularity, and a boundary that will
+            // not be paced must not pay for a queue drain either.
+            if (gov_pacing && ggml_governor_pace_due(gov_dev)) {
                 ggml_vk_governor_pace(ctx, gov_dev);
             }
         }
@@ -18283,6 +18285,10 @@ static void * ggml_backend_vk_get_proc_address(ggml_backend_reg_t reg, const cha
     }
     if (strcmp(name, GGML_GOVERNOR_PROC_SET_PACE) == 0) {
         ggml_backend_dev_set_pace_t fct = ggml_backend_dev_set_pace;
+        return (void *)fct;
+    }
+    if (strcmp(name, GGML_GOVERNOR_PROC_SET_PACE_EVERY_N) == 0) {
+        ggml_backend_dev_set_pace_every_n_t fct = ggml_backend_dev_set_pace_every_n;
         return (void *)fct;
     }
 

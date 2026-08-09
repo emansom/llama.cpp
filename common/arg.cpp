@@ -1767,6 +1767,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_POWER_MAX_GPU_BUSY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--power-pace-every-n"}, "N",
+        string_format("apply the duty cycle once every N backend submissions instead of at every one\n"
+                      "(default: %d). Each pace point switches the card between loaded and idle, which\n"
+                      "is a load step at the power supply; raising this cuts the RATE of those steps at\n"
+                      "the cost of a coarser duty cycle. Peak draw is unaffected either way -- pacing\n"
+                      "never pulls more than an unpaced card. Watch llamacpp:gpu_pace_points_total",
+                      params.power.pace_every_n),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::invalid_argument("power-pace-every-n must be at least 1");
+            }
+            params.power.pace_every_n = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_PACE_EVERY_N").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--power-budget-pct"}, "N",
         string_format("power target as a percentage of the board's default power limit (default: %d)", params.power.budget_pct),
         [](common_params & params, int value) {

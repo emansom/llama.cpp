@@ -39,8 +39,19 @@ namespace {
 
 struct governor_device {
     // pacing state
-    std::atomic<float>   duty{1.0f};
-    std::atomic<int64_t> last_pace_us{0};
+    std::atomic<float>    duty{1.0f};
+    std::atomic<int64_t>  last_pace_us{0};
+
+    // Pace at most once every `pace_every_n` submission boundaries. Skipped boundaries still
+    // accumulate work, so the duty cycle is unchanged - only the number of load steps falls.
+    std::atomic<uint32_t> pace_every_n{1};
+    std::atomic<uint64_t> submits{0};
+
+    // Cumulative, for observability: the rate of these is the load-step frequency the duty
+    // cycle imposes on the power supply, which no power sensor on the card is fast enough
+    // to show.
+    std::atomic<uint64_t> pace_points{0};
+    std::atomic<uint64_t> pace_sleep_us{0};
 
     // sensor state, resolved once
     std::mutex  sensor_mutex;
@@ -406,6 +417,9 @@ bool ggml_backend_dev_get_telemetry(ggml_backend_dev_t dev, struct ggml_governor
     t.vram_used    = read_fd_long(gd->fd_vram_used,  v) ? (uint64_t) v : 0;
     t.vram_total   = read_fd_long(gd->fd_vram_total, v) ? (uint64_t) v : 0;
 
+    t.pace_points_total   = gd->pace_points.load(std::memory_order_relaxed);
+    t.pace_sleep_us_total = gd->pace_sleep_us.load(std::memory_order_relaxed);
+
     const uint32_t want = out->size;
     memcpy(out, &t, want < sizeof(t) ? want : sizeof(t));
     out->size = want;
@@ -443,6 +457,32 @@ void ggml_backend_dev_set_pace(ggml_backend_dev_t dev, float duty) {
         // Starting fresh: do not charge for whatever happened before pacing was enabled.
         gd->last_pace_us.store(0, std::memory_order_relaxed);
     }
+}
+
+void ggml_backend_dev_set_pace_every_n(ggml_backend_dev_t dev, uint32_t n) {
+    governor_device * gd = governor_get(dev);
+    if (gd == nullptr) {
+        return;
+    }
+    gd->pace_every_n.store(n < 1 ? 1 : n, std::memory_order_relaxed);
+}
+
+bool ggml_governor_pace_due(ggml_backend_dev_t dev) {
+    if (g_ggml_governor_paced.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+
+    governor_device * gd = governor_get(dev);
+    if (gd == nullptr || gd->duty.load(std::memory_order_relaxed) >= 1.0f) {
+        return false;
+    }
+
+    const uint32_t every_n = gd->pace_every_n.load(std::memory_order_relaxed);
+    const uint64_t n       = gd->submits.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // Skipped boundaries deliberately leave last_pace_us alone, so the work they submitted is
+    // still counted when the next real pace point arrives and is paid off in one longer sleep.
+    return every_n <= 1 || (n % every_n) == 0;
 }
 
 bool ggml_governor_pace_active(ggml_backend_dev_t dev) {
@@ -493,8 +533,18 @@ void ggml_governor_pace_point(ggml_backend_dev_t dev) {
     if (work_us <= 0) {
         return;
     }
-    if (work_us > GGML_GOVERNOR_MAX_WORK_US) {
-        work_us = GGML_GOVERNOR_MAX_WORK_US;
+
+    // Both guards scale with the granularity. Under every-n pacing a pace point legitimately
+    // covers n boundaries' worth of work and owes n boundaries' worth of sleep, so clamping at
+    // the single-boundary limits would quietly under-sleep and raise the effective duty above
+    // what was asked for - the coarser the pacing, the further off it would drift.
+    const uint32_t every_n = gd->pace_every_n.load(std::memory_order_relaxed);
+
+    const int64_t max_work  = GGML_GOVERNOR_MAX_WORK_US  * (int64_t) every_n;
+    const int64_t max_sleep = GGML_GOVERNOR_MAX_SLEEP_US * (int64_t) every_n;
+
+    if (work_us > max_work) {
+        work_us = max_work;
     }
 
     // Hold a duty cycle of `duty`: for every unit of work, idle (1/duty - 1) units.
@@ -502,9 +552,12 @@ void ggml_governor_pace_point(ggml_backend_dev_t dev) {
     if (sleep_us <= 0) {
         return;
     }
-    if (sleep_us > GGML_GOVERNOR_MAX_SLEEP_US) {
-        sleep_us = GGML_GOVERNOR_MAX_SLEEP_US;
+    if (sleep_us > max_sleep) {
+        sleep_us = max_sleep;
     }
+
+    gd->pace_points.fetch_add(1, std::memory_order_relaxed);
+    gd->pace_sleep_us.fetch_add((uint64_t) sleep_us, std::memory_order_relaxed);
 
     sleep_us_sliced(sleep_us);
 

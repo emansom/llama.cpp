@@ -45,6 +45,15 @@ struct common_power_params {
     int32_t max_gpu_busy_pct  = 0;       // GPU core
     int32_t max_mem_busy_pct  = 0;       // memory controller, i.e. bandwidth
 
+    // Pace at most once every N backend submission boundaries rather than at every one.
+    //
+    // Each pace point takes the card from loaded to idle and back - a load step at the power
+    // supply. The peak is never above what an unpaced card pulls, but the RATE of those steps
+    // is what a duty cycle adds, and no sensor on the board can show it: power is reported
+    // only as a ~100 ms rolling average, orders of magnitude too slow for a transient. Raising
+    // this trades how smoothly the duty cycle is spread for how often the card is switched.
+    int32_t pace_every_n = 1;
+
     // loop behaviour
     int32_t min_duty_pct      = 15;
     int32_t sample_interval_ms = 250;
@@ -80,6 +89,12 @@ struct common_power_status {
     // move these.
     uint64_t vram_used  = 0;
     uint64_t vram_total = 0;
+
+    // Cumulative pacing activity. The derivative of pace_points is the load-step frequency the
+    // duty cycle imposes on the power supply - the one quantity here that no board sensor can
+    // observe, and the reason it is exported at all.
+    uint64_t pace_points   = 0;
+    uint64_t pace_sleep_us = 0;
 
     // resolved targets, after budget_pct was applied to the board's limit
     float target_temp_c     = NAN;

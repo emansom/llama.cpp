@@ -4587,6 +4587,14 @@ void server_routes::init_routes() {
                     {"help",  "Total VRAM on the card."},
                     {"value",  (double) res_task->power.vram_total}
             },{
+                    {"name",  "gpu_pace_points_total"},
+                    {"help",  "Times the duty cycle has taken the GPU from loaded to idle and back. Its rate is the load-step frequency seen by the power supply - the one thing pacing adds that no sensor on the board can show, since power is reported only as a ~100ms rolling average. Peak draw is unaffected: pacing never pulls more than an unpaced card."},
+                    {"value",  (double) res_task->power.pace_points}
+            },{
+                    {"name",  "gpu_pace_sleep_seconds_total"},
+                    {"help",  "Cumulative time the GPU was held idle by the duty cycle."},
+                    {"value",  (double) res_task->power.pace_sleep_us / 1e6}
+            },{
                     {"name",  "gpu_power_watts"},
                     {"help",  "GPU board power draw."},
                     {"value",  std::isnan(res_task->power.power_w) ? 0.f : res_task->power.power_w}
@@ -4734,6 +4742,7 @@ void server_routes::init_routes() {
             { "sustained_window_s",   params.power.sustained_window_s },
             { "max_gpu_busy_pct",     params.power.max_gpu_busy_pct },
             { "max_mem_busy_pct",     params.power.max_mem_busy_pct },
+            { "pace_every_n",         params.power.pace_every_n },
         };
 
         json props = {
