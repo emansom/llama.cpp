@@ -7,6 +7,7 @@
 #include "ggml-governor.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -30,6 +31,17 @@ static const float GOV_DEADBAND = 0.05f;
 // actuation by seconds, so a symmetric loop oscillates: back off quickly, recover slowly.
 static const float GOV_MAX_FALL_PER_S = 1.00f;   // 1 s to go from full speed to a standstill
 static const float GOV_MAX_RISE_PER_S = 0.10f;   // 10 s to climb back to full speed
+
+// Largest dt the controller will integrate or slew over in one step, in seconds.
+//
+// The slew limits are per second, so stepping the loop with a dt of two minutes would permit a
+// rise of 12.0 duty units and snap straight to the target - defeating the asymmetric slew
+// entirely. That is not hypothetical: before the loop was put on a timer it only advanced on
+// decode, so the first request after an idle period stepped with the whole idle gap as its dt.
+// Clamping here bounds one step to the same authority it would have had if the tick had not
+// been missed. The sustained VRAM average deliberately does NOT use this - it wants true
+// elapsed time, because it is a time-average rather than a rate limit.
+static const float GOV_MAX_STEP_DT_S = 1.0f;
 
 // Rate-limiter sleeps are served in slices so that a cancelled request or a Ctrl-C is not
 // stuck behind a long nanosleep.
@@ -158,6 +170,15 @@ struct common_power_governor {
     double  throttled_seconds = 0.0;
 
     float min_duty = 0.15f;
+
+    // The loop has to advance on a timer, not on traffic. Driving it from the decode path
+    // alone meant a server that throttled once stayed throttled until the next request:
+    // measured duty frozen at 0.67 across two minutes of idle on a 35 C card drawing 26 W,
+    // recovering only when a request arrived. Thermal state keeps changing while nothing is
+    // being decoded, so the controller has to keep looking.
+    std::thread             ticker;
+    std::condition_variable cv;
+    bool                    stopping = false;
 };
 
 // Record a telemetry reading: keep it as the reportable snapshot and advance the long-window
@@ -204,15 +225,24 @@ static void gov_update_thermal(common_power_governor * gov, int64_t now_us) {
         return;
     }
 
-    const float dt = gov->t_last_sample_us == 0
+    const float dt_elapsed = gov->t_last_sample_us == 0
         ? (float) gov->params.sample_interval_ms / 1000.0f
         : (float) (now_us - gov->t_last_sample_us) / 1e6f;
     gov->t_last_sample_us = now_us;
 
+    // See GOV_MAX_STEP_DT_S: one step must not be handed the authority of a missed hour.
+    const float dt = std::min(dt_elapsed, GOV_MAX_STEP_DT_S);
+
     // Worst offender governs: sample every device and every signal, take the largest
     // normalised error. One hot card in a multi-GPU box should throttle the whole process.
-    float err = -1.0f;
-    bool  any = false;
+    // `have_err` rather than a sentinel value in `err`. An earlier version seeded err at -1.0
+    // to mean "nothing read" and tested `err < -0.5` for it, which collides with reality: a
+    // cold idle card produces a worst-case error near -0.8, and every signal on it is more
+    // negative still. The loop therefore refused to step exactly when it should have been
+    // recovering the duty cycle, and duty stayed frozen wherever the last busy period left it.
+    float err      = 0.0f;
+    bool  have_err = false;
+    bool  any      = false;
 
     for (const auto & d : gov->devices) {
         ggml_governor_telemetry t;
@@ -247,16 +277,38 @@ static void gov_update_thermal(common_power_governor * gov, int64_t now_us) {
 
         for (const float e : { e_junction, e_mem, e_power, e_mem_sustained, e_gpu_busy, e_mem_busy }) {
             if (!std::isnan(e)) {
-                err = std::max(err, e);
+                err      = have_err ? std::max(err, e) : e;
+                have_err = true;
             }
         }
     }
 
-    if (!any || err < -0.5f) {
+    if (!any || !have_err) {
         return;   // nothing readable this round; hold the current duty
     }
 
     gov_push_duty(gov, common_power_loop_step(gov->loop, err, dt, gov->min_duty));
+}
+
+// Advance the loop on a timer, whatever the traffic is doing.
+//
+// Runs with the governor mutex held except while waiting, which is the same discipline the
+// decode and status paths use. The wait is a condition variable rather than a sleep so that
+// shutdown does not have to sit through a whole interval.
+static void gov_ticker(common_power_governor * gov) {
+    std::unique_lock<std::mutex> lock(gov->mutex);
+
+    while (!gov->stopping) {
+        gov->cv.wait_for(lock,
+                std::chrono::milliseconds(gov->params.sample_interval_ms),
+                [gov] { return gov->stopping; });
+
+        if (gov->stopping) {
+            break;
+        }
+
+        gov_update_thermal(gov, ggml_time_us());
+    }
 }
 
 common_power_governor_ptr common_power_governor_init(const common_power_params & params) {
@@ -338,12 +390,29 @@ common_power_governor_ptr common_power_governor_init(const common_power_params &
             "--power-governor-hwmon at the correct hwmon directory, or disable the governor.");
     }
 
+    // Only when there is something to govern. With the sensor loop off the ticker would wake
+    // every interval to do nothing, and the tokens-per-second ceilings need no timer - they are
+    // feed-forward and act on the decode path itself.
+    if (gov->params.enabled && !gov->devices.empty()) {
+        gov->ticker = std::thread(gov_ticker, gov.get());
+    }
+
     return gov;
 }
 
 void common_power_governor_free(common_power_governor * gov) {
     if (gov == nullptr) {
         return;
+    }
+
+    // Stop the ticker before anything else: it touches every field below.
+    {
+        std::lock_guard<std::mutex> lock(gov->mutex);
+        gov->stopping = true;
+    }
+    gov->cv.notify_all();
+    if (gov->ticker.joinable()) {
+        gov->ticker.join();
     }
 
     // Leave the hardware unpaced; the process may outlive the governor.

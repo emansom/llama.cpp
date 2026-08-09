@@ -350,6 +350,40 @@ static void test_sustained_average_is_sampling_rate_independent() {
     check(once <= value + 1e-3f, "a long gap clamps rather than overshooting");
 }
 
+// A cold, idle card produces errors far below -1 on every signal. The loop must still step:
+// that is precisely when the duty cycle should be climbing back to 1.0.
+//
+// Regression for a sentinel collision that shipped: the worst-case error was seeded at -1.0 to
+// mean "no sensor data" and detected with `err < -0.5`, which a genuinely cold card satisfies.
+// Duty froze wherever the last busy period left it -- measured stuck at 0.80 for a full minute
+// of idle on a 35 C card -- and only moved again when traffic returned.
+static void test_loop_recovers_from_deeply_negative_error() {
+    printf("test_loop_recovers_from_deeply_negative_error\n");
+
+    // These are the real numbers off an idle RX 9070 XT against the shipped targets.
+    const float e_junction  = common_power_headroom_error(35.0f, 70.0f, 110.0f);
+    const float e_mem       = common_power_headroom_error(54.0f, 85.0f, 108.0f);
+    const float e_power     = common_power_headroom_error(26.0f, 182.0f, 374.0f);
+    const float e_sustained = common_power_headroom_error(54.0f, 80.0f, 85.0f);
+    const float e_gpu_busy  = common_power_headroom_error(3.0f, 80.0f, 100.0f);
+
+    float worst = e_junction;
+    for (const float e : { e_mem, e_power, e_sustained, e_gpu_busy }) {
+        worst = std::max(worst, e);
+    }
+
+    check(worst < -0.5f, "an idle cold card really does sit below the old -0.5 sentinel");
+
+    // Starting throttled, that error must drive the duty cycle back up.
+    common_power_loop_state st;
+    st.duty = 0.15f;
+
+    for (int i = 0; i < 400; i++) {
+        common_power_loop_step(st, worst, 0.25f, 0.15f);
+    }
+    check_near(st.duty, 1.0f, 1e-3f, "recovers to full speed on a cold idle card");
+}
+
 int main() {
     test_headroom_error();
     test_loop_deadband();
@@ -358,6 +392,7 @@ int main() {
     test_loop_min_duty_clamp();
     test_loop_converges_on_synthetic_thermal_model();
     test_loop_leaves_a_cool_card_alone();
+    test_loop_recovers_from_deeply_negative_error();
     test_utilisation_headroom();
     test_sustained_window_ignores_spikes_catches_plateaus();
     test_sustained_average_is_sampling_rate_independent();
