@@ -36,6 +36,7 @@ extern "C" {
 #define GGML_GOVERNOR_PROC_GET_TELEMETRY    "ggml_backend_dev_get_telemetry"
 #define GGML_GOVERNOR_PROC_SET_PACE         "ggml_backend_dev_set_pace"
 #define GGML_GOVERNOR_PROC_SET_PACE_EVERY_N "ggml_backend_dev_set_pace_every_n"
+#define GGML_GOVERNOR_PROC_SET_SOFT_START   "ggml_backend_dev_set_soft_start"
 
     // Physical sensor readings for a device. Fields that could not be read are NAN (floats),
     // -1 (signed integers) or 0 (sizes). Temperatures are degrees Celsius, power is Watts.
@@ -79,6 +80,11 @@ extern "C" {
         // of pace_points_total to get load steps per second.
         uint64_t pace_points_total;
         uint64_t pace_sleep_us_total;
+
+        // Soft-start ramps begun, i.e. returns to load after an idle gap. The count going up
+        // is the only direct evidence the ramp is firing, since the transient it targets is
+        // far too fast for any sensor on the board to show.
+        uint64_t soft_start_ramps_total;
     };
 
     // Zero a telemetry struct and stamp its size. Always use this rather than initialising by
@@ -96,6 +102,21 @@ extern "C" {
     // Safe to call from a different thread than the one running the backend.
     GGML_API void ggml_backend_dev_set_pace(ggml_backend_dev_t dev, float duty);
 
+    // Ramp the duty cycle up over `ramp_ms` when the device emerges from idle, starting from
+    // `start_duty`, instead of going straight to full load.
+    //
+    // This targets a different thing from the duty cycle proper. Going from idle to a full
+    // prompt-processing graph steps the board current from near nothing to its maximum in
+    // milliseconds, and no closed loop sampling at hundreds of milliseconds can intervene in
+    // time. The ramp does not work by lowering current directly - during the loaded part of
+    // any duty cycle the card is at full tilt regardless - it works because the GPU's own DPM
+    // needs sustained load to climb its boost curve. Short bursts do not give it that time, so
+    // clocks, and therefore current, rise gradually rather than stepping.
+    //
+    // ramp_ms of 0 disables it. While a ramp is in progress the every-n granularity is ignored
+    // and every boundary is a pace point, since short bursts are the entire mechanism.
+    GGML_API void ggml_backend_dev_set_soft_start(ggml_backend_dev_t dev, uint32_t ramp_ms, float start_duty);
+
     // Pace at most once every n submission boundaries, instead of at every one.
     //
     // The duty cycle is unchanged - work simply accumulates across the skipped boundaries and
@@ -105,9 +126,10 @@ extern "C" {
     // Values below 1 are treated as 1.
     GGML_API void ggml_backend_dev_set_pace_every_n(ggml_backend_dev_t dev, uint32_t n);
 
-    typedef bool (*ggml_backend_dev_get_telemetry_t) (ggml_backend_dev_t dev, struct ggml_governor_telemetry * out);
-    typedef void (*ggml_backend_dev_set_pace_t)      (ggml_backend_dev_t dev, float duty);
+    typedef bool (*ggml_backend_dev_get_telemetry_t)   (ggml_backend_dev_t dev, struct ggml_governor_telemetry * out);
+    typedef void (*ggml_backend_dev_set_pace_t)        (ggml_backend_dev_t dev, float duty);
     typedef void (*ggml_backend_dev_set_pace_every_n_t)(ggml_backend_dev_t dev, uint32_t n);
+    typedef void (*ggml_backend_dev_set_soft_start_t)  (ggml_backend_dev_t dev, uint32_t ramp_ms, float start_duty);
 
     // Called by a backend at a submission boundary to ask whether this one is a pace point.
     // Counts the boundary and applies the every-n granularity, so the backend can skip the

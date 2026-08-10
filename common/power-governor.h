@@ -54,6 +54,18 @@ struct common_power_params {
     // this trades how smoothly the duty cycle is spread for how often the card is switched.
     int32_t pace_every_n = 1;
 
+    // Soft start: on returning to load after an idle gap, ramp the duty cycle up over this many
+    // milliseconds from soft_start_duty_pct instead of going straight to full tilt. 0 disables.
+    //
+    // This targets the one thing the closed loop structurally cannot: the idle-to-full-tilt
+    // current step at the start of a request, which is over in milliseconds while the loop
+    // samples every 250. It does not lower current directly - during the loaded part of any
+    // duty cycle the card is at full tilt - it works because the GPU's DPM needs sustained load
+    // to climb its boost curve, and short bursts deny it that, so clocks and therefore current
+    // rise gradually instead of stepping.
+    int32_t soft_start_ms       = 0;
+    int32_t soft_start_duty_pct = 15;
+
     // loop behaviour
     int32_t min_duty_pct      = 15;
     int32_t sample_interval_ms = 250;
@@ -93,8 +105,9 @@ struct common_power_status {
     // Cumulative pacing activity. The derivative of pace_points is the load-step frequency the
     // duty cycle imposes on the power supply - the one quantity here that no board sensor can
     // observe, and the reason it is exported at all.
-    uint64_t pace_points   = 0;
-    uint64_t pace_sleep_us = 0;
+    uint64_t pace_points       = 0;
+    uint64_t pace_sleep_us     = 0;
+    uint64_t soft_start_ramps  = 0;
 
     // resolved targets, after budget_pct was applied to the board's limit
     float target_temp_c     = NAN;

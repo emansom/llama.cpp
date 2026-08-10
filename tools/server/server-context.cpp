@@ -4595,6 +4595,10 @@ void server_routes::init_routes() {
                     {"help",  "Cumulative time the GPU was held idle by the duty cycle."},
                     {"value",  (double) res_task->power.pace_sleep_us / 1e6}
             },{
+                    {"name",  "gpu_soft_start_ramps_total"},
+                    {"help",  "Returns to load after an idle gap that were ramped rather than stepped. This going up is the only direct evidence the soft start is firing; the current transient it targets is far too fast for any sensor on the board to show."},
+                    {"value",  (double) res_task->power.soft_start_ramps}
+            },{
                     {"name",  "gpu_power_watts"},
                     {"help",  "GPU board power draw."},
                     {"value",  std::isnan(res_task->power.power_w) ? 0.f : res_task->power.power_w}
@@ -4743,6 +4747,8 @@ void server_routes::init_routes() {
             { "max_gpu_busy_pct",     params.power.max_gpu_busy_pct },
             { "max_mem_busy_pct",     params.power.max_mem_busy_pct },
             { "pace_every_n",         params.power.pace_every_n },
+            { "soft_start_ms",        params.power.soft_start_ms },
+            { "soft_start_duty_pct",  params.power.soft_start_duty_pct },
         };
 
         json props = {

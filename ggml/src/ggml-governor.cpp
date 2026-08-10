@@ -35,6 +35,15 @@ static const int64_t GGML_GOVERNOR_SLICE_US = 25 * 1000;       // 25 ms
 // so a build with pacing disabled pays essentially nothing.
 static std::atomic<int> g_ggml_governor_paced{0};
 
+// Devices with a soft start configured. Kept separate from the paced count because a ramp has
+// to run even when the governor is asking for full duty - that is the whole point of it.
+static std::atomic<int> g_ggml_governor_softstart{0};
+
+// A gap longer than this between submission boundaries means the device went idle, and the next
+// boundary is a return to load worth ramping. Short enough not to fire between the graphs of one
+// generation, long enough to catch a genuine idle-to-prefill transition.
+static const int64_t GGML_GOVERNOR_IDLE_GAP_US = 100 * 1000;
+
 namespace {
 
 struct governor_device {
@@ -46,6 +55,14 @@ struct governor_device {
     // accumulate work, so the duty cycle is unchanged - only the number of load steps falls.
     std::atomic<uint32_t> pace_every_n{1};
     std::atomic<uint64_t> submits{0};
+
+    // Soft start. `last_submit_us` is how a return from idle is detected at all; `ramp_start_us`
+    // is when the current ramp began.
+    std::atomic<uint32_t> soft_start_ms{0};
+    std::atomic<float>    soft_start_duty{0.15f};
+    std::atomic<int64_t>  last_submit_us{0};
+    std::atomic<int64_t>  ramp_start_us{0};
+    std::atomic<uint64_t> ramps{0};
 
     // Cumulative, for observability: the rate of these is the load-step frequency the duty
     // cycle imposes on the power supply, which no power sensor on the card is fast enough
@@ -417,8 +434,9 @@ bool ggml_backend_dev_get_telemetry(ggml_backend_dev_t dev, struct ggml_governor
     t.vram_used    = read_fd_long(gd->fd_vram_used,  v) ? (uint64_t) v : 0;
     t.vram_total   = read_fd_long(gd->fd_vram_total, v) ? (uint64_t) v : 0;
 
-    t.pace_points_total   = gd->pace_points.load(std::memory_order_relaxed);
-    t.pace_sleep_us_total = gd->pace_sleep_us.load(std::memory_order_relaxed);
+    t.pace_points_total        = gd->pace_points.load(std::memory_order_relaxed);
+    t.pace_sleep_us_total      = gd->pace_sleep_us.load(std::memory_order_relaxed);
+    t.soft_start_ramps_total   = gd->ramps.load(std::memory_order_relaxed);
 
     const uint32_t want = out->size;
     memcpy(out, &t, want < sizeof(t) ? want : sizeof(t));
@@ -459,6 +477,63 @@ void ggml_backend_dev_set_pace(ggml_backend_dev_t dev, float duty) {
     }
 }
 
+namespace {
+
+// The duty to actually hold right now: whatever the governor is asking for, further limited by
+// a soft-start ramp if one is in progress. Cheap enough to recompute rather than cache.
+struct effective_pace {
+    float duty;
+    bool  ramping;
+};
+
+effective_pace pace_now(governor_device * gd, int64_t now) {
+    effective_pace e = { gd->duty.load(std::memory_order_relaxed), false };
+
+    const uint32_t ramp_ms = gd->soft_start_ms.load(std::memory_order_relaxed);
+    if (ramp_ms == 0) {
+        return e;
+    }
+
+    const int64_t began = gd->ramp_start_us.load(std::memory_order_relaxed);
+    if (began == 0) {
+        return e;
+    }
+
+    const int64_t since   = now - began;
+    const int64_t ramp_us = (int64_t) ramp_ms * 1000;
+    if (since < 0 || since >= ramp_us) {
+        return e;
+    }
+
+    // Linear in time from the starting duty up to full. The card's own DPM does the rest: it
+    // cannot boost through bursts this short, so the current envelope follows the ramp.
+    const float start = gd->soft_start_duty.load(std::memory_order_relaxed);
+    const float ramp  = start + (1.0f - start) * ((float) since / (float) ramp_us);
+
+    e.ramping = true;
+    e.duty    = e.duty < ramp ? e.duty : ramp;
+    return e;
+}
+
+} // namespace
+
+void ggml_backend_dev_set_soft_start(ggml_backend_dev_t dev, uint32_t ramp_ms, float start_duty) {
+    governor_device * gd = governor_get(dev);
+    if (gd == nullptr) {
+        return;
+    }
+
+    if (!(start_duty > 0.0f) || start_duty > 1.0f) {   // also catches NaN
+        start_duty = 0.15f;
+    }
+    gd->soft_start_duty.store(start_duty, std::memory_order_relaxed);
+
+    const uint32_t prev = gd->soft_start_ms.exchange(ramp_ms, std::memory_order_relaxed);
+    if ((prev == 0) != (ramp_ms == 0)) {
+        g_ggml_governor_softstart.fetch_add(ramp_ms == 0 ? -1 : 1, std::memory_order_release);
+    }
+}
+
 void ggml_backend_dev_set_pace_every_n(ggml_backend_dev_t dev, uint32_t n) {
     governor_device * gd = governor_get(dev);
     if (gd == nullptr) {
@@ -468,20 +543,43 @@ void ggml_backend_dev_set_pace_every_n(ggml_backend_dev_t dev, uint32_t n) {
 }
 
 bool ggml_governor_pace_due(ggml_backend_dev_t dev) {
-    if (g_ggml_governor_paced.load(std::memory_order_acquire) == 0) {
+    if (g_ggml_governor_paced.load(std::memory_order_acquire) == 0 &&
+        g_ggml_governor_softstart.load(std::memory_order_acquire) == 0) {
         return false;
     }
 
     governor_device * gd = governor_get(dev);
-    if (gd == nullptr || gd->duty.load(std::memory_order_relaxed) >= 1.0f) {
+    if (gd == nullptr) {
         return false;
     }
 
-    const uint32_t every_n = gd->pace_every_n.load(std::memory_order_relaxed);
-    const uint64_t n       = gd->submits.fetch_add(1, std::memory_order_relaxed) + 1;
+    const int64_t now  = ggml_time_us();
+    const int64_t prev = gd->last_submit_us.exchange(now, std::memory_order_relaxed);
+
+    // A long gap means the device was idle and this boundary is a return to load - the step
+    // that a closed loop sampling every 250 ms can never catch in time. Start a ramp.
+    if (gd->soft_start_ms.load(std::memory_order_relaxed) > 0 &&
+        (prev == 0 || now - prev > GGML_GOVERNOR_IDLE_GAP_US)) {
+        gd->ramp_start_us.store(now, std::memory_order_relaxed);
+        gd->ramps.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    const effective_pace e = pace_now(gd, now);
+    if (e.duty >= 1.0f) {
+        return false;
+    }
+
+    const uint64_t n = gd->submits.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // Granularity is ignored while ramping: short bursts ARE the mechanism, and coarsening them
+    // would defeat the thing the ramp exists to do.
+    if (e.ramping) {
+        return true;
+    }
 
     // Skipped boundaries deliberately leave last_pace_us alone, so the work they submitted is
     // still counted when the next real pace point arrives and is paid off in one longer sleep.
+    const uint32_t every_n = gd->pace_every_n.load(std::memory_order_relaxed);
     return every_n <= 1 || (n % every_n) == 0;
 }
 
@@ -507,8 +605,9 @@ void ggml_governor_pace_reset(ggml_backend_dev_t dev) {
 
 void ggml_governor_pace_point(ggml_backend_dev_t dev) {
 #if defined(__linux__)
-    // Fast path: one relaxed load when nothing is being paced.
-    if (g_ggml_governor_paced.load(std::memory_order_acquire) == 0) {
+    // Fast path: one relaxed load when nothing is being paced or ramped.
+    if (g_ggml_governor_paced.load(std::memory_order_acquire) == 0 &&
+        g_ggml_governor_softstart.load(std::memory_order_acquire) == 0) {
         return;
     }
 
@@ -517,12 +616,15 @@ void ggml_governor_pace_point(ggml_backend_dev_t dev) {
         return;
     }
 
-    const float duty = gd->duty.load(std::memory_order_relaxed);
+    const int64_t now = ggml_time_us();
+
+    const effective_pace e = pace_now(gd, now);
+
+    const float duty = e.duty;
     if (duty >= 1.0f) {
         return;
     }
 
-    const int64_t now  = ggml_time_us();
     const int64_t last = gd->last_pace_us.exchange(now, std::memory_order_relaxed);
 
     if (last == 0) {
@@ -538,7 +640,9 @@ void ggml_governor_pace_point(ggml_backend_dev_t dev) {
     // covers n boundaries' worth of work and owes n boundaries' worth of sleep, so clamping at
     // the single-boundary limits would quietly under-sleep and raise the effective duty above
     // what was asked for - the coarser the pacing, the further off it would drift.
-    const uint32_t every_n = gd->pace_every_n.load(std::memory_order_relaxed);
+    // While ramping every boundary is paced, so a pace point covers one boundary and the
+    // single-boundary limits are the right ones.
+    const uint32_t every_n = e.ramping ? 1u : gd->pace_every_n.load(std::memory_order_relaxed);
 
     const int64_t max_work  = GGML_GOVERNOR_MAX_WORK_US  * (int64_t) every_n;
     const int64_t max_sleep = GGML_GOVERNOR_MAX_SLEEP_US * (int64_t) every_n;

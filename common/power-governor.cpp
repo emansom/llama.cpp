@@ -58,9 +58,10 @@ struct gov_device {
 
     ggml_backend_dev_get_telemetry_t    get_telemetry    = nullptr;
     ggml_backend_dev_set_pace_t         set_pace         = nullptr;
-    // Optional: a ggml predating the granularity knob resolves this to nullptr and simply
-    // paces at every boundary, which is the old behaviour and still correct.
+    // Optional: a ggml predating these resolves them to nullptr and simply paces at every
+    // boundary with no ramp, which is the old behaviour and still correct.
     ggml_backend_dev_set_pace_every_n_t set_pace_every_n = nullptr;
+    ggml_backend_dev_set_soft_start_t   set_soft_start   = nullptr;
 
     std::string name;
     std::string id;
@@ -351,6 +352,8 @@ common_power_governor_ptr common_power_governor_init(const common_power_params &
             ggml_backend_reg_get_proc_address(reg, GGML_GOVERNOR_PROC_SET_PACE);
         auto set_pace_every_n = (ggml_backend_dev_set_pace_every_n_t)
             ggml_backend_reg_get_proc_address(reg, GGML_GOVERNOR_PROC_SET_PACE_EVERY_N);
+        auto set_soft_start = (ggml_backend_dev_set_soft_start_t)
+            ggml_backend_reg_get_proc_address(reg, GGML_GOVERNOR_PROC_SET_SOFT_START);
 
         if (get_telemetry == nullptr || set_pace == nullptr) {
             continue;
@@ -370,6 +373,7 @@ common_power_governor_ptr common_power_governor_init(const common_power_params &
         d.get_telemetry    = get_telemetry;
         d.set_pace         = set_pace;
         d.set_pace_every_n = set_pace_every_n;
+        d.set_soft_start   = set_soft_start;
         d.name             = ggml_backend_dev_name(dev);
         d.id              = props.device_id ? props.device_id : "unknown";
         d.crit_junction_c = t.temp_junction_crit_c;
@@ -389,6 +393,14 @@ common_power_governor_ptr common_power_governor_init(const common_power_params &
         // Push the granularity once, here: it is static configuration, unlike the duty cycle.
         if (d.set_pace_every_n && params.pace_every_n > 1) {
             d.set_pace_every_n(d.dev, (uint32_t) params.pace_every_n);
+        }
+
+        // Likewise the soft start. Note this is pushed even when the sensor loop is off: the
+        // ramp is not a closed loop and does not need one, and the idle-to-load step it targets
+        // happens whether or not anything is governing temperature.
+        if (d.set_soft_start && params.soft_start_ms > 0) {
+            d.set_soft_start(d.dev, (uint32_t) params.soft_start_ms,
+                             (float) params.soft_start_duty_pct / 100.0f);
         }
 
         gov->devices.push_back(std::move(d));
@@ -525,8 +537,9 @@ common_power_status common_power_governor_status(common_power_governor * gov) {
         st.mem_busy_pct    = gov->last.mem_busy_pct;
         st.vram_used       = gov->last.vram_used;
         st.vram_total      = gov->last.vram_total;
-        st.pace_points     = gov->last.pace_points_total;
-        st.pace_sleep_us   = gov->last.pace_sleep_us_total;
+        st.pace_points      = gov->last.pace_points_total;
+        st.pace_sleep_us    = gov->last.pace_sleep_us_total;
+        st.soft_start_ramps = gov->last.soft_start_ramps_total;
     }
 
     return st;

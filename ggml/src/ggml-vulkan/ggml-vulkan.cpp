@@ -18291,6 +18291,10 @@ static void * ggml_backend_vk_get_proc_address(ggml_backend_reg_t reg, const cha
         ggml_backend_dev_set_pace_every_n_t fct = ggml_backend_dev_set_pace_every_n;
         return (void *)fct;
     }
+    if (strcmp(name, GGML_GOVERNOR_PROC_SET_SOFT_START) == 0) {
+        ggml_backend_dev_set_soft_start_t fct = ggml_backend_dev_set_soft_start;
+        return (void *)fct;
+    }
 
     return NULL;
 

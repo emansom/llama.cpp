@@ -1767,6 +1767,34 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_POWER_MAX_GPU_BUSY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--power-soft-start-ms"}, "N",
+        string_format("on returning to load after an idle gap, ramp the duty cycle up over N\n"
+                      "milliseconds instead of going straight to full tilt (default: %d, 0 = off).\n"
+                      "targets the idle-to-full-tilt current step at the start of a request, which is\n"
+                      "over in milliseconds while the governor samples every 250. it works because the\n"
+                      "GPU's DPM needs sustained load to climb its boost curve and short bursts deny it\n"
+                      "that, so current rises gradually instead of stepping. independent of\n"
+                      "--power-governor: the step happens whether or not anything governs temperature",
+                      params.power.soft_start_ms),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("power-soft-start-ms must be non-negative");
+            }
+            params.power.soft_start_ms = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_SOFT_START_MS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--power-soft-start-duty"}, "N",
+        string_format("duty cycle the soft-start ramp begins at, as a percentage (default: %d)",
+                      params.power.soft_start_duty_pct),
+        [](common_params & params, int value) {
+            if (value < 1 || value > 100) {
+                throw std::invalid_argument("power-soft-start-duty must be between 1 and 100");
+            }
+            params.power.soft_start_duty_pct = value;
+        }
+    ).set_env("LLAMA_ARG_POWER_SOFT_START_DUTY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--power-pace-every-n"}, "N",
         string_format("apply the duty cycle once every N backend submissions instead of at every one\n"
                       "(default: %d). Each pace point switches the card between loaded and idle, which\n"
